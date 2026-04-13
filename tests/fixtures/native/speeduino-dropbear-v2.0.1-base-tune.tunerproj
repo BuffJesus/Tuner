@@ -1,0 +1,9 @@
+{
+  "format": "tuner-project-v1",
+  "name": "Speeduino Base Tune (production)",
+  "definition_file": "speeduino-dropbear-v2.0.1-base-tune.tunerdef",
+  "tune_file": "speeduino-dropbear-v2.0.1-base-tune.tuner",
+  "firmware_signature": "speeduino 202501-T41",
+  "active_settings": [],
+  "notes": "Converted from speeduino-dropbear-v2.0.1.ini + speeduino-dropbear-v2.0.1-base-tune.msq"
+}

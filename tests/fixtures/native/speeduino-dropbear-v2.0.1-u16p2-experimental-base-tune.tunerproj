@@ -1,0 +1,9 @@
+{
+  "format": "tuner-project-v1",
+  "name": "Speeduino Base Tune (U16P2 experimental)",
+  "definition_file": "speeduino-dropbear-v2.0.1-u16p2-experimental-base-tune.tunerdef",
+  "tune_file": "speeduino-dropbear-v2.0.1-u16p2-experimental-base-tune.tuner",
+  "firmware_signature": "speeduino 202501-T41-U16P2",
+  "active_settings": [],
+  "notes": "Converted from speeduino-dropbear-v2.0.1-u16p2-experimental.ini + speeduino-dropbear-v2.0.1-u16p2-experimental-base-tune.msq"
+}

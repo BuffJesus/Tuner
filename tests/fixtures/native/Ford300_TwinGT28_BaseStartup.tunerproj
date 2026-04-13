@@ -1,0 +1,9 @@
+{
+  "format": "tuner-project-v1",
+  "name": "Ford 300 Twin GT28 (production)",
+  "definition_file": "Ford300_TwinGT28_BaseStartup.tunerdef",
+  "tune_file": "Ford300_TwinGT28_BaseStartup.tuner",
+  "firmware_signature": "speeduino 202501-T41",
+  "active_settings": [],
+  "notes": "Converted from speeduino-dropbear-v2.0.1.ini + Ford300_TwinGT28_BaseStartup.msq"
+}

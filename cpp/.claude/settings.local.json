@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//d/Documents/JetBrains/Python/Tuner/**)",
+      "Bash(cmake --build build/cpp --config Release)",
+      "Bash(build/cpp/tuner_core_tests.exe)",
+      "Bash(python -m pytest -q)",
+      "Bash(wc -l *.py)"
+    ]
+  }
+}

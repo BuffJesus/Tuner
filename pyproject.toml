@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tuner-py"
+version = "0.1.0"
+description = "Python recreation scaffold for a TunerStudio-like desktop application."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+comms = [
+    "pyserial>=3.5",
+    "httpx>=0.27",
+]
+math = [
+    "numpy>=1.26",
+]
+graphs = [
+    "pyqtgraph>=0.13",
+]
+flash = [
+    "pyserial>=3.5",
+    "pyusb>=1.2",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["__pycache__", ".venv", "*.egg-info", "build", "dist"]
