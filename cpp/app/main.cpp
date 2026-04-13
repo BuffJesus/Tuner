@@ -11029,6 +11029,161 @@ public:
             // File → Open... opens a file dialog for .msq tune files.
             // Hot-reload is not yet supported — the selected file is
             // saved to recents and the operator is prompted to restart.
+            // New Project — creates project directory, saves .project file.
+            auto* new_proj_action = file_menu->addAction("&New Project...");
+            QObject::connect(new_proj_action, &QAction::triggered,
+                             [this, shared_workspace, reload_active_project]() {
+                auto* dlg = new QDialog(this);
+                dlg->setWindowTitle("New Project");
+                dlg->setMinimumWidth(480);
+                {
+                    char s[64];
+                    std::snprintf(s, sizeof(s), "QDialog { background: %s; }", tt::bg_base);
+                    dlg->setStyleSheet(QString::fromUtf8(s));
+                }
+                auto* form = new QVBoxLayout(dlg);
+                form->setContentsMargins(tt::space_xl, tt::space_xl, tt::space_xl, tt::space_xl);
+                form->setSpacing(tt::space_md);
+
+                // Title.
+                auto* title = new QLabel;
+                title->setTextFormat(Qt::RichText);
+                {
+                    char h[128];
+                    std::snprintf(h, sizeof(h),
+                        "<span style='font-size: %dpx; font-weight: bold; color: %s;'>"
+                        "Create New Project</span>",
+                        tt::font_heading, tt::text_primary);
+                    title->setText(QString::fromUtf8(h));
+                }
+                form->addWidget(title);
+
+                auto make_field = [form](const char* label_text) -> QComboBox* {
+                    auto* row = new QHBoxLayout;
+                    auto* label = new QLabel(QString::fromUtf8(label_text));
+                    label->setFixedWidth(120);
+                    {
+                        char s[64];
+                        std::snprintf(s, sizeof(s), "QLabel { color: %s; }", tt::text_secondary);
+                        label->setStyleSheet(QString::fromUtf8(s));
+                    }
+                    row->addWidget(label);
+                    auto* combo = new QComboBox;
+                    combo->setEditable(true);
+                    {
+                        char s[192];
+                        std::snprintf(s, sizeof(s),
+                            "QComboBox { background: %s; color: %s; border: 1px solid %s; "
+                            "border-radius: %dpx; padding: %dpx %dpx; }",
+                            tt::bg_elevated, tt::text_primary, tt::border,
+                            tt::radius_sm, tt::space_xs, tt::space_sm);
+                        combo->setStyleSheet(QString::fromUtf8(s));
+                    }
+                    row->addWidget(combo, 1);
+
+                    auto* browse = new QPushButton(QString::fromUtf8("..."));
+                    browse->setFixedWidth(32);
+                    row->addWidget(browse);
+                    form->addLayout(row);
+                    return combo;
+                };
+
+                auto* name_field = make_field("Project Name:");
+                name_field->setEditText(QString::fromUtf8("My Speeduino Project"));
+
+                auto* dir_field = make_field("Directory:");
+                dir_field->setEditText(QDir::homePath());
+                // Wire browse button (it's the last widget in the row).
+                {
+                    auto* row_layout = static_cast<QHBoxLayout*>(form->itemAt(form->count() - 1)->layout());
+                    auto* browse_btn = qobject_cast<QPushButton*>(row_layout->itemAt(2)->widget());
+                    if (browse_btn) {
+                        QObject::connect(browse_btn, &QPushButton::clicked,
+                                         [dlg, dir_field]() {
+                            auto dir = QFileDialog::getExistingDirectory(dlg,
+                                QString::fromUtf8("Select Project Directory"));
+                            if (!dir.isEmpty()) dir_field->setEditText(dir);
+                        });
+                    }
+                }
+
+                auto* ini_field = make_field("INI Definition:");
+                {
+                    auto ini_path = find_production_ini();
+                    if (!ini_path.empty())
+                        ini_field->setEditText(QString::fromUtf8(ini_path.string().c_str()));
+                }
+
+                auto* tune_field = make_field("Tune File (.msq):");
+                tune_field->setEditText(QString::fromUtf8("(create empty)"));
+
+                // Hint.
+                auto* hint = new QLabel;
+                hint->setWordWrap(true);
+                {
+                    char h[256];
+                    std::snprintf(h, sizeof(h),
+                        "<span style='color: %s; font-size: %dpx;'>"
+                        "Creates a project directory with a .project file. "
+                        "Run the Engine Setup Wizard after to generate a base tune.</span>",
+                        tt::text_dim, tt::font_small);
+                    hint->setTextFormat(Qt::RichText);
+                    hint->setText(QString::fromUtf8(h));
+                }
+                form->addWidget(hint);
+
+                // Buttons.
+                auto* btn_row = new QHBoxLayout;
+                btn_row->addStretch(1);
+                auto* create_btn = new QPushButton(QString::fromUtf8("Create"));
+                auto* cancel_btn = new QPushButton(QString::fromUtf8("Cancel"));
+                btn_row->addWidget(create_btn);
+                btn_row->addWidget(cancel_btn);
+                form->addLayout(btn_row);
+
+                QObject::connect(cancel_btn, &QPushButton::clicked, dlg, &QDialog::reject);
+                QObject::connect(create_btn, &QPushButton::clicked,
+                                 [dlg, name_field, dir_field, ini_field]() {
+                    std::string name = name_field->currentText().toStdString();
+                    std::string dir = dir_field->currentText().toStdString();
+                    std::string ini = ini_field->currentText().toStdString();
+
+                    if (name.empty() || dir.empty()) return;
+
+                    // Create project directory.
+                    std::filesystem::path proj_dir = std::filesystem::path(dir) / name;
+                    std::filesystem::create_directories(proj_dir);
+
+                    // Write minimal .project file.
+                    auto proj_file = proj_dir / (name + ".project");
+                    std::ofstream out(proj_file, std::ios::out);
+                    if (out) {
+                        out << "# Tuner project file\n";
+                        out << "projectName=" << name << "\n";
+                        if (!ini.empty() && ini != "(create empty)")
+                            out << "iniFile=" << ini << "\n";
+                        out << "activeSettings=\n";
+                        out.close();
+                    }
+
+                    // Save to QSettings as current project.
+                    QSettings settings;
+                    settings.setValue(kCurrentProjectNameKey,
+                        QString::fromUtf8(name.c_str()));
+                    if (!ini.empty() && ini != "(create empty)")
+                        settings.setValue(kCurrentProjectIniKey,
+                            QString::fromUtf8(ini.c_str()));
+
+                    dlg->accept();
+                });
+
+                if (dlg->exec() == QDialog::Accepted) {
+                    // Reload to pick up the new project.
+                    reload_active_project();
+                }
+                dlg->deleteLater();
+            });
+
             auto* open_action = file_menu->addAction("&Open Tune...");
             open_action->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_O));
             open_action->setShortcutContext(Qt::ApplicationShortcut);
