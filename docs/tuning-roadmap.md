@@ -4374,3 +4374,60 @@ After the active roadmap/backlog is in a good state:
 - Keep offline and live workflows equally supported.
 - Keep evidence/replay flows reviewable and deterministic.
 - Do not reintroduce full table rerenders for evidence-only updates.
+
+## Post-Parity Feature Roadmap (as of sub-slice 146)
+
+With full tab parity achieved and the native format ecosystem in place,
+the following features are prioritized by operator impact.
+
+### Phase 15: Operator-Facing Features
+
+| # | Feature | Effort | Status |
+|---|---------|--------|--------|
+| 1 | Virtual dyno / power curve view | Moderate | Next up |
+| 2 | VE Analyze coverage heatmap overlay | Moderate | Planned |
+| 3 | Zone-based alert toasts on gauges | Trivial | Planned |
+| 4 | Airbear SD card log download | Moderate | Planned |
+| 5 | Staged-change visual diff (table heatmap) | Moderate | Planned |
+| 6 | Confidence badges on wizard generators | Trivial | Planned |
+| 7 | Plain-language VE Analyze summaries | Moderate | Planned |
+| 8 | Next-steps guidance after VE Analyze | Moderate | Planned |
+| 9 | Map switching / multi-tune slots | Moderate | Planned (firmware ready) |
+| 10 | Compressor map turbo modeling | Medium | Planned |
+
+### Phase 16: Ecosystem Tightening
+
+| # | Feature | Effort | Requires |
+|---|---------|--------|----------|
+| 1 | Definition hash in firmware capability | Firmware change | Speeduino firmware PR |
+| 2 | Per-page format bitmap in 'K' response | Firmware change | Speeduino firmware PR |
+| 3 | HTTP API versioning (/api/v1/) | Trivial | Desktop only |
+| 4 | Airbear error counters in /api/status | Airbear change | Airbear firmware PR |
+| 5 | Standalone log viewer with timeline | Large | Desktop only |
+
+### Virtual Dyno Design Notes
+
+Calculates estimated torque and horsepower from ECU sensor data during
+a WOT (wide-open throttle) pull. No physical dyno required.
+
+**Inputs (from datalog or live capture):**
+- RPM, MAP, IAT, AFR from runtime channels
+- Displacement, VE table values from tune
+- Injector flow rate from tune
+
+**Calculation:**
+```
+mass_air_flow = VE * displacement * RPM * MAP / (R * IAT_kelvin * 120)
+fuel_mass = mass_air_flow / AFR
+indicated_torque = fuel_mass * LHV * thermal_efficiency / (4 * pi)
+brake_torque = indicated_torque * mechanical_efficiency
+horsepower = brake_torque * RPM / 5252
+```
+
+**Output:**
+- Torque vs RPM curve
+- Horsepower vs RPM curve
+- Peak torque + peak HP annotations
+- Before/after overlay for tune comparison
+
+**UI location:** New section in ASSIST tab, or standalone Dyno tab.
