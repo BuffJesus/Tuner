@@ -2352,14 +2352,19 @@ QWidget* build_tune_tab(
             {
                 namespace vex = tuner_core::visibility_expression;
                 auto values = edit_svc->get_scalar_values_dict();
-                // Convert to std::map for the evaluator.
-                std::map<std::string, double> val_map(values.begin(), values.end());
-                auto it = std::remove_if(compiled.begin(), compiled.end(),
-                    [&val_map](const dlns::LayoutPage& pg) {
-                        if (pg.visibility_expression.empty()) return false;
-                        return !vex::evaluate(pg.visibility_expression, val_map);
-                    });
-                compiled.erase(it, compiled.end());
+                // Only filter if we have actual tune data. When no tune
+                // is loaded (new project), all values are empty — every
+                // visibility expression would evaluate to 0 (false) and
+                // hide ALL pages. Show everything instead.
+                if (!values.empty()) {
+                    std::map<std::string, double> val_map(values.begin(), values.end());
+                    auto it = std::remove_if(compiled.begin(), compiled.end(),
+                        [&val_map](const dlns::LayoutPage& pg) {
+                            if (pg.visibility_expression.empty()) return false;
+                            return !vex::evaluate(pg.visibility_expression, val_map);
+                        });
+                    compiled.erase(it, compiled.end());
+                }
             }
             // Group pages BEFORE moving into the map.
             namespace tpg = tuner_core::tuning_page_grouping;
@@ -7846,6 +7851,9 @@ struct WizardResult {
     bool two_stroke = false;
     int load_algorithm = 0;  // 0=Speed Density (MAP), 1=Alpha-N (TPS)
     int board_family = 3;    // 0=Mega2560, 1=T35, 2=T36, 3=T41, 4=STM32
+    int n_injectors = 6;
+    int inj_layout = 0;     // 0=paired, 1=semi-sequential, 2=sequential
+    int calibration_intent = 0;  // 0=first start, 1=drivable base
     // Step 2: Induction
     int induction = 0;  // 0=NA, 1=single turbo, 2=twin turbo, 3=supercharged
     double boost_target_psi = 14.0;
@@ -7862,13 +7870,17 @@ struct WizardResult {
     int ae_mode = 0;             // 0=TPS-based, 1=MAP-based, 2=disabled
     double ae_threshold = 10.0;  // TPS delta %
     double ae_amount = 2.0;      // enrichment ms
-    int fuel_system = 0;         // 0=return, 1=returnless
+    int fuel_pressure_model = 0; // 0=fixed, 1=vacuum-ref, 2=boost-ref
     double rail_pressure_kpa = 300.0;
     int dead_time_comp = 0;      // 0=fixed, 1=voltage curve
+    bool flex_fuel_enabled = false;
+    double flex_freq_low = 50.0;
+    double flex_freq_high = 150.0;
     // Step 4: Trigger / Ignition
     int trigger_teeth = 36;
     int missing_teeth = 1;
     int spark_mode = 0;  // 0=wasted, 1=single, 2=wasted COP, 3=sequential
+    int cam_input = 0;   // 0=none, 1=VR, 2=hall (visible when sequential)
     double dwell_running = 3.0;
     double dwell_cranking = 4.5;
     // Step 5: Sensors
@@ -7878,6 +7890,16 @@ struct WizardResult {
     double map_max = 260.0;
     int clt_thermistor = 0;  // index into thermistor presets (0=GM default)
     int iat_thermistor = 0;
+    int knock_mode = 0;      // 0=off, 1=digital, 2=analog
+    double knock_max_retard = 6.0;
+    bool oil_pressure_enabled = false;
+    double oil_pressure_min = 0.0;
+    double oil_pressure_max = 10.0;
+    bool afr_protection_enabled = false;
+    double afr_protection_max = 18.0;
+    double afr_protection_cut_time = 2.0;
+    int clt_filter = 180;
+    int iat_filter = 180;
 };
 
 WizardResult open_engine_setup_wizard(QWidget* parent) {
@@ -8009,8 +8031,33 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
     board_combo->addItem("Teensy 4.1 (DropBear)");
     board_combo->addItem("STM32F407 (Black Pill)");
     board_combo->setCurrentIndex(3);  // DropBear default
+    auto* inj_count_edit = make_row(p1l, "Injector Count:");
+    inj_count_edit->setText("6");
+    auto* inj_layout_combo = make_combo_row(p1l, "Injection Mode:");
+    inj_layout_combo->addItem("Paired (batch)");
+    inj_layout_combo->addItem("Semi-Sequential");
+    inj_layout_combo->addItem("Sequential");
+    auto* seq_note = new QLabel;
+    seq_note->setWordWrap(true);
+    {
+        char sn[256];
+        std::snprintf(sn, sizeof(sn),
+            "<span style='color: %s; font-size: %dpx;'>"
+            "\xe2\x9a\xa0\xef\xb8\x8f Sequential requires a cam sync input "
+            "\xe2\x80\x94 configure in Step 4</span>",
+            tt::accent_warning, tt::font_small);
+        seq_note->setTextFormat(Qt::RichText);
+        seq_note->setText(QString::fromUtf8(sn));
+    }
+    seq_note->hide();
+    p1l->addWidget(seq_note);
+    QObject::connect(inj_layout_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                     [seq_note](int idx) { seq_note->setVisible(idx == 2); });
+    auto* intent_combo = make_combo_row(p1l, "Calibration Intent:");
+    intent_combo->addItem("First Start (conservative)");
+    intent_combo->addItem("Drivable Base (moderate)");
     make_hint(p1l, "Speed Density is recommended for most builds. "
-              "Board selection determines flash tool and pin layout. "
+              "Sequential injection requires cam sync. "
               "Teensy 4.1 (DropBear) is recommended for new builds.");
     p1l->addStretch(1);
     pages->addWidget(p1);
@@ -8097,14 +8144,30 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
     auto* ae_amount_edit = make_row(p3l, "AE Enrichment (ms):");
     ae_amount_edit->setText("2.0");
     // Injector pressure compensation.
-    auto* fuel_pressure_combo = make_combo_row(p3l, "Fuel System:");
-    fuel_pressure_combo->addItem("Return-style (fixed rail pressure)");
-    fuel_pressure_combo->addItem("Returnless (pressure varies with manifold)");
+    auto* fuel_pressure_combo = make_combo_row(p3l, "Fuel Pressure Model:");
+    fuel_pressure_combo->addItem("Fixed rail pressure");
+    fuel_pressure_combo->addItem("Vacuum-referenced");
+    fuel_pressure_combo->addItem("Boost-referenced");
     auto* rail_pressure_edit = make_row(p3l, "Base Rail Pressure (kPa):");
     rail_pressure_edit->setText("300");
     auto* comp_mode_combo = make_combo_row(p3l, "Dead Time Compensation:");
     comp_mode_combo->addItem("Fixed (single value)");
     comp_mode_combo->addItem("Voltage curve (battery-compensated)");
+    // Flex fuel sensor.
+    auto* flex_combo = make_combo_row(p3l, "Flex Fuel Sensor:");
+    flex_combo->addItem("Disabled");
+    flex_combo->addItem("Enabled (GM / Continental)");
+    auto* flex_low_edit = make_row(p3l, "Flex Low Freq (Hz):");
+    flex_low_edit->setText("50");
+    flex_low_edit->setVisible(false);
+    auto* flex_high_edit = make_row(p3l, "Flex High Freq (Hz):");
+    flex_high_edit->setText("150");
+    flex_high_edit->setVisible(false);
+    QObject::connect(flex_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                     [flex_low_edit, flex_high_edit](int idx) {
+        flex_low_edit->setVisible(idx > 0);
+        flex_high_edit->setVisible(idx > 0);
+    });
     // reqFuel preview — computed from displacement, cylinders, flow.
     auto* reqfuel_label = new QLabel;
     reqfuel_label->setTextFormat(Qt::RichText);
@@ -8149,6 +8212,26 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
     spark_combo->addItem("Single Channel");
     spark_combo->addItem("Wasted COP");
     spark_combo->addItem("Sequential");
+    // Cam trigger input — required for sequential injection/ignition.
+    auto* cam_combo = make_combo_row(p4l, "Cam / Sync Input:");
+    cam_combo->addItem("None");
+    cam_combo->addItem("VR Sensor");
+    cam_combo->addItem("Hall Effect");
+    cam_combo->hide();
+    // Show cam input when injection OR ignition is sequential.
+    auto update_cam_vis = [cam_combo, inj_layout_combo, spark_combo]() {
+        bool need_cam = (inj_layout_combo->currentIndex() == 2)
+                     || (spark_combo->currentIndex() == 3);
+        cam_combo->setVisible(need_cam);
+        // Also show the label (parent row).
+        if (auto* parent_row = cam_combo->parentWidget())
+            parent_row->setVisible(need_cam);
+    };
+    QObject::connect(spark_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                     [update_cam_vis](int) { update_cam_vis(); });
+    // Also wire from Step 1's injection mode change (deferred — Step 1
+    // combo isn't in scope here, but the initial state is handled by
+    // evaluating on page show).
     // Ignition coil presets.
     auto* coil_combo = make_combo_row(p4l, "Coil Preset:");
     coil_combo->addItem("Custom / Manual Entry");
@@ -8244,10 +8327,44 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
     baro_combo->addItem("NXP MPXA6115A \xe2\x80\x94 15-115 kPa");
     baro_combo->addItem("Bosch TMAP \xe2\x80\x94 20-110 kPa (limited range)");
 
-    make_hint(p5l, "Wideband AFR is strongly recommended for tuning. "
-              "MAP sensor range must match your installed sensor. "
-              "Baro sensor is optional \xe2\x80\x94 'None' uses firmware's internal estimate. "
-              "Thermistor presets generate the correct ADC \xe2\x86\x92 temperature lookup.");
+    // Knock sensor.
+    auto* knock_combo = make_combo_row(p5l, "Knock Sensor:");
+    knock_combo->addItem("Disabled");
+    knock_combo->addItem("Digital");
+    knock_combo->addItem("Analog");
+    auto* knock_retard_edit = make_row(p5l, "Max Knock Retard (\xc2\xb0):");
+    knock_retard_edit->setText("6.0");
+    knock_retard_edit->setVisible(false);
+    QObject::connect(knock_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                     [knock_retard_edit](int idx) {
+        knock_retard_edit->setVisible(idx > 0);
+    });
+
+    // Oil pressure sensor.
+    auto* oil_combo = make_combo_row(p5l, "Oil Pressure Sensor:");
+    oil_combo->addItem("Disabled");
+    oil_combo->addItem("Enabled");
+
+    // AFR lean protection.
+    auto* afr_prot_combo = make_combo_row(p5l, "AFR Lean Protection:");
+    afr_prot_combo->addItem("Disabled");
+    afr_prot_combo->addItem("Enabled");
+    auto* afr_prot_max_edit = make_row(p5l, "Max AFR Before Cut:");
+    afr_prot_max_edit->setText("18.0");
+    afr_prot_max_edit->setVisible(false);
+    auto* afr_prot_time_edit = make_row(p5l, "Cut Delay (seconds):");
+    afr_prot_time_edit->setText("2.0");
+    afr_prot_time_edit->setVisible(false);
+    QObject::connect(afr_prot_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                     [afr_prot_max_edit, afr_prot_time_edit](int idx) {
+        afr_prot_max_edit->setVisible(idx > 0);
+        afr_prot_time_edit->setVisible(idx > 0);
+    });
+
+    make_hint(p5l, "Wideband AFR is strongly recommended. "
+              "Knock sensor protects against detonation. "
+              "AFR lean protection cuts fuel/spark if AFR exceeds threshold. "
+              "Oil pressure monitoring alerts on low pressure at RPM.");
     p5l->addStretch(1);
     pages->addWidget(p5);
 
@@ -8397,7 +8514,12 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
                       turbo_type_combo, ar_edit, comp_trim_edit, turbine_trim_edit,
                       ae_combo, ae_threshold_edit, ae_amount_edit,
                       fuel_pressure_combo, rail_pressure_edit, comp_mode_combo,
-                      baro_combo]() {
+                      baro_combo,
+                      inj_count_edit, inj_layout_combo, intent_combo,
+                      flex_combo, flex_low_edit, flex_high_edit,
+                      cam_combo, knock_combo, knock_retard_edit,
+                      oil_combo, afr_prot_combo, afr_prot_max_edit,
+                      afr_prot_time_edit]() {
         int idx = pages->currentIndex();
         if (idx < pages->count() - 1) {
             pages->setCurrentIndex(idx + 1);
@@ -8410,6 +8532,9 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
             result.two_stroke = (stroke_combo->currentIndex() == 1);
             result.load_algorithm = load_combo->currentIndex();
             result.board_family = board_combo->currentIndex();
+            try { result.n_injectors = std::stoi(inj_count_edit->text().toStdString()); } catch (...) {}
+            result.inj_layout = inj_layout_combo->currentIndex();
+            result.calibration_intent = intent_combo->currentIndex();
             result.induction = induction_combo->currentIndex();
             try { result.boost_target_psi = std::stod(boost_edit->text().toStdString()); } catch (...) {}
             result.intercooler_present = (intercooler_combo->currentIndex() == 1);
@@ -8423,7 +8548,7 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
             result.ae_mode = ae_combo->currentIndex();
             try { result.ae_threshold = std::stod(ae_threshold_edit->text().toStdString()); } catch (...) {}
             try { result.ae_amount = std::stod(ae_amount_edit->text().toStdString()); } catch (...) {}
-            result.fuel_system = fuel_pressure_combo->currentIndex();
+            // fuel_pressure_model already read above via the new staging path.
             try { result.rail_pressure_kpa = std::stod(rail_pressure_edit->text().toStdString()); } catch (...) {}
             result.dead_time_comp = comp_mode_combo->currentIndex();
             try { result.trigger_teeth = std::stoi(teeth_edit->text().toStdString()); } catch (...) {}
@@ -8437,6 +8562,18 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
             try { result.map_max = std::stod(map_max_edit->text().toStdString()); } catch (...) {}
             result.clt_thermistor = clt_combo->currentIndex();
             result.iat_thermistor = iat_combo->currentIndex();
+            // New fields.
+            result.flex_fuel_enabled = (flex_combo->currentIndex() > 0);
+            try { result.flex_freq_low = std::stod(flex_low_edit->text().toStdString()); } catch (...) {}
+            try { result.flex_freq_high = std::stod(flex_high_edit->text().toStdString()); } catch (...) {}
+            result.cam_input = cam_combo->currentIndex();
+            result.knock_mode = knock_combo->currentIndex();
+            try { result.knock_max_retard = std::stod(knock_retard_edit->text().toStdString()); } catch (...) {}
+            result.oil_pressure_enabled = (oil_combo->currentIndex() > 0);
+            result.afr_protection_enabled = (afr_prot_combo->currentIndex() > 0);
+            try { result.afr_protection_max = std::stod(afr_prot_max_edit->text().toStdString()); } catch (...) {}
+            try { result.afr_protection_cut_time = std::stod(afr_prot_time_edit->text().toStdString()); } catch (...) {}
+            result.fuel_pressure_model = fuel_pressure_combo->currentIndex();
             result.accepted = true;
             dlg->accept();
         }
@@ -8584,9 +8721,34 @@ QWidget* build_setup_tab(
                     stage_s("taeThresh", wr.ae_threshold);
                     stage_s("taeAmount", wr.ae_amount);
                 }
-                // Fuel system — rail pressure for returnless compensation.
-                if (wr.fuel_system == 1) {
+                // Injector layout + count.
+                stage_s("nInjectors", wr.n_injectors);
+                stage_s("injLayout", wr.inj_layout);
+                // Fuel pressure model.
+                if (wr.fuel_pressure_model > 0) {
+                    stage_s("fuelPressureModel", wr.fuel_pressure_model);
                     stage_s("fuelPressure", wr.rail_pressure_kpa);
+                }
+                // Flex fuel.
+                if (wr.flex_fuel_enabled) {
+                    stage_s("flexEnabled", 1.0);
+                    stage_s("flexFreqLow", wr.flex_freq_low);
+                    stage_s("flexFreqHigh", wr.flex_freq_high);
+                }
+                // Cam input (for sequential).
+                if (wr.cam_input > 0) {
+                    stage_s("camInput", wr.cam_input);
+                }
+                // Knock sensor.
+                if (wr.knock_mode > 0) {
+                    stage_s("knockMode", wr.knock_mode);
+                    stage_s("knock_maxRetard", wr.knock_max_retard);
+                }
+                // AFR lean protection.
+                if (wr.afr_protection_enabled) {
+                    stage_s("afrProtectEnabled", 1.0);
+                    stage_s("afrProtectDeviation", wr.afr_protection_max);
+                    stage_s("afrProtectCutTime", wr.afr_protection_cut_time);
                 }
 
                 // ---- Generate starter tables ----
