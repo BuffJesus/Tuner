@@ -11288,6 +11288,155 @@ public:
             help_q->setShortcutContext(Qt::ApplicationShortcut);
             QObject::connect(help_q, &QAction::triggered, open_shortcuts_dialog);
             this->addAction(help_q);
+            // Getting Started guide.
+            auto* getting_started_action = help_menu->addAction("Getting &Started");
+            QObject::connect(getting_started_action, &QAction::triggered, [this]() {
+                auto* dlg = new QDialog(this);
+                dlg->setWindowTitle("Getting Started");
+                dlg->setFixedSize(520, 480);
+                {
+                    char s[64];
+                    std::snprintf(s, sizeof(s), "QDialog { background: %s; }", tt::bg_base);
+                    dlg->setStyleSheet(QString::fromUtf8(s));
+                }
+                auto* vl = new QVBoxLayout(dlg);
+                vl->setContentsMargins(tt::space_xl, tt::space_xl, tt::space_xl, tt::space_xl);
+                vl->setSpacing(tt::space_md);
+
+                auto* body = new QLabel;
+                body->setTextFormat(Qt::RichText);
+                body->setWordWrap(true);
+                {
+                    char html[2048];
+                    std::snprintf(html, sizeof(html),
+                        "<span style='font-size: %dpx; font-weight: bold; color: %s;'>"
+                        "Getting Started with Tuner</span><br><br>"
+
+                        "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
+                        "1. Connect to your ECU</span><br>"
+                        "<span style='color: %s; font-size: %dpx;'>"
+                        "File \xe2\x86\x92 Connect to ECU. Choose Serial (USB) or TCP/WiFi "
+                        "(Airbear). Use Scan Network to auto-find devices.</span><br><br>"
+
+                        "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
+                        "2. View live data</span><br>"
+                        "<span style='color: %s; font-size: %dpx;'>"
+                        "Switch to the LIVE tab (Alt+2). Gauges show RPM, MAP, AFR, "
+                        "temperatures. Right-click any gauge to customize it. "
+                        "F11 for fullscreen dashboard.</span><br><br>"
+
+                        "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
+                        "3. Edit tune parameters</span><br>"
+                        "<span style='color: %s; font-size: %dpx;'>"
+                        "TUNE tab (Alt+1) shows all pages from the INI definition. "
+                        "Click a page, edit values. Changes are staged (yellow) until "
+                        "you press Ctrl+W to write to RAM.</span><br><br>"
+
+                        "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
+                        "4. Burn to flash</span><br>"
+                        "<span style='color: %s; font-size: %dpx;'>"
+                        "Ctrl+B burns written values to permanent flash. "
+                        "Review changes first with Ctrl+R.</span><br><br>"
+
+                        "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
+                        "5. Log and analyze</span><br>"
+                        "<span style='color: %s; font-size: %dpx;'>"
+                        "LOGGING tab captures live data to CSV. "
+                        "ASSIST tab imports logs for VE correction proposals. "
+                        "Start a live VE session while driving for real-time analysis.</span><br><br>"
+
+                        "<span style='color: %s; font-size: %dpx;'>"
+                        "Press F1 at any time for keyboard shortcuts.</span>",
+
+                        tt::font_heading, tt::text_primary,
+                        tt::accent_primary, tt::font_body,
+                        tt::text_secondary, tt::font_body,
+                        tt::accent_primary, tt::font_body,
+                        tt::text_secondary, tt::font_body,
+                        tt::accent_primary, tt::font_body,
+                        tt::text_secondary, tt::font_body,
+                        tt::accent_primary, tt::font_body,
+                        tt::text_secondary, tt::font_body,
+                        tt::accent_primary, tt::font_body,
+                        tt::text_secondary, tt::font_body,
+                        tt::text_dim, tt::font_small);
+                    body->setText(QString::fromUtf8(html));
+                }
+                vl->addWidget(body);
+                dlg->exec();
+                dlg->deleteLater();
+            });
+
+            // Connection guide.
+            auto* connection_guide_action = help_menu->addAction("&Connection Guide");
+            QObject::connect(connection_guide_action, &QAction::triggered, [this]() {
+                auto* dlg = new QDialog(this);
+                dlg->setWindowTitle("Connection Guide");
+                dlg->setFixedSize(480, 400);
+                {
+                    char s[64];
+                    std::snprintf(s, sizeof(s), "QDialog { background: %s; }", tt::bg_base);
+                    dlg->setStyleSheet(QString::fromUtf8(s));
+                }
+                auto* vl = new QVBoxLayout(dlg);
+                vl->setContentsMargins(tt::space_xl, tt::space_xl, tt::space_xl, tt::space_xl);
+                vl->setSpacing(tt::space_md);
+
+                auto* body = new QLabel;
+                body->setTextFormat(Qt::RichText);
+                body->setWordWrap(true);
+                {
+                    char html[2048];
+                    std::snprintf(html, sizeof(html),
+                        "<span style='font-size: %dpx; font-weight: bold; color: %s;'>"
+                        "Connecting to Your ECU</span><br><br>"
+
+                        "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
+                        "USB Serial</span><br>"
+                        "<span style='color: %s; font-size: %dpx;'>"
+                        "Plug in via USB. Select the COM port and baud rate (115200 for "
+                        "most boards). The app auto-probes baud rates if the first "
+                        "attempt fails.</span><br><br>"
+
+                        "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
+                        "WiFi via Airbear</span><br>"
+                        "<span style='color: %s; font-size: %dpx;'>"
+                        "Connect your laptop to the Airbear WiFi network. Switch to "
+                        "TCP/WiFi in the connection dialog. Host: speeduino.local, "
+                        "Port: 2000. Use Scan Network to auto-discover.</span><br><br>"
+
+                        "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
+                        "Supported Boards</span><br>"
+                        "<span style='color: %s; font-size: %dpx;'>"
+                        "\xe2\x80\xa2 Teensy 4.1 (DropBear) \xe2\x80\x94 recommended<br>"
+                        "\xe2\x80\xa2 Teensy 3.5 / 3.6<br>"
+                        "\xe2\x80\xa2 Arduino Mega 2560<br>"
+                        "\xe2\x80\xa2 STM32F407 (Black Pill)</span><br><br>"
+
+                        "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
+                        "Troubleshooting</span><br>"
+                        "<span style='color: %s; font-size: %dpx;'>"
+                        "No COM port? Check USB cable and drivers. "
+                        "WiFi timeout? Verify you're on the Airbear network. "
+                        "RC_BUSY_ERR? The Airbear dashboard is using the serial port "
+                        "\xe2\x80\x94 close the browser tab or wait.</span>",
+
+                        tt::font_heading, tt::text_primary,
+                        tt::accent_ok, tt::font_body,
+                        tt::text_secondary, tt::font_body,
+                        tt::accent_ok, tt::font_body,
+                        tt::text_secondary, tt::font_body,
+                        tt::accent_ok, tt::font_body,
+                        tt::text_secondary, tt::font_body,
+                        tt::accent_warning, tt::font_body,
+                        tt::text_secondary, tt::font_body);
+                    body->setText(QString::fromUtf8(html));
+                }
+                vl->addWidget(body);
+                dlg->exec();
+                dlg->deleteLater();
+            });
+
             help_menu->addSeparator();
             auto* about_action = help_menu->addAction("&About Tuner");
             QObject::connect(about_action, &QAction::triggered, [this]() {
