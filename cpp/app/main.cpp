@@ -3842,7 +3842,7 @@ QWidget* build_tune_tab(
                     auto* toggle_row = new QWidget;
                     auto* toggle_layout = new QHBoxLayout(toggle_row);
                     toggle_layout->setContentsMargins(0, 2, 0, 2);
-                    toggle_layout->setSpacing(4);
+                    toggle_layout->setSpacing(tt::space_xs);
                     auto* btn_2d = new QPushButton(QString::fromUtf8("2D"));
                     auto* btn_3d = new QPushButton(QString::fromUtf8("3D"));
                     // Two-state toggle: active uses `accent_primary`
@@ -5324,8 +5324,8 @@ QWidget* build_live_tab(
         if (lower == "red")    return tt::accent_danger;
         if (lower == "green")  return tt::accent_ok;
         if (lower == "yellow") return tt::accent_warning;
-        if (lower == "white")  return is_bg ? "#e0e0e0" : tt::text_primary;
-        if (lower == "black")  return is_bg ? tt::bg_base : "#1a1d24";
+        if (lower == "white")  return is_bg ? tt::text_primary : tt::text_primary;
+        if (lower == "black")  return is_bg ? tt::bg_base : tt::bg_base;
         if (lower == "blue")   return tt::accent_primary;
         return is_bg ? tt::bg_elevated : tt::text_dim;
     };
@@ -5500,7 +5500,7 @@ QWidget* build_live_tab(
     auto mock_ecu = std::make_shared<mer::MockEcu>(42);
 
     auto* dash_grid = new QGridLayout;
-    dash_grid->setSpacing(4);
+    dash_grid->setSpacing(tt::space_xs);
     auto* dash_container = new QWidget;
     dash_container->setLayout(dash_grid);
 
@@ -5625,10 +5625,10 @@ QWidget* build_live_tab(
         }
         auto* dl = new QVBoxLayout(dlg);
         dl->setContentsMargins(tt::space_xl, tt::space_xl, tt::space_xl, tt::space_xl);
-        dl->setSpacing(4);
+        dl->setSpacing(tt::space_xs);
 
         auto* grid = new QGridLayout;
-        grid->setSpacing(6);
+        grid->setSpacing(tt::space_sm - 2);
 
         // Build gauge widgets at 1.5x font scale.
         auto fs_bindings = std::make_shared<std::vector<GaugeBinding>>();
@@ -5925,7 +5925,7 @@ QWidget* build_live_tab(
     hist_map->setFixedHeight(70);
 
     auto* hist_grid = new QHBoxLayout;
-    hist_grid->setSpacing(4);
+    hist_grid->setSpacing(tt::space_xs);
     hist_grid->addWidget(hist_afr);
     hist_grid->addWidget(hist_rpm);
     hist_grid->addWidget(hist_map);
@@ -6434,7 +6434,7 @@ QWidget* build_flash_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
             "QPushButton:disabled { background: %s; color: %s; border-color: %s; }",
             tt::accent_ok, tt::accent_ok, tt::radius_sm,
             tt::text_primary, tt::font_body,
-            "#4bc078",  // slightly lighter green on hover
+            tt::fill_ok_mid,  // slightly lighter green on hover
             tt::bg_elevated, tt::text_dim, tt::border);
         flash_btn->setStyleSheet(QString::fromUtf8(style));
     }
@@ -6788,7 +6788,7 @@ QWidget* build_assist_tab(
             "QPushButton:hover { background: %s; } "
             "QPushButton:disabled { background: %s; color: %s; border-color: %s; }",
             tt::accent_ok, tt::accent_ok, tt::radius_sm,
-            tt::text_primary, tt::font_body, "#4bc078",
+            tt::text_primary, tt::font_body, tt::fill_ok_mid,
             tt::bg_elevated, tt::text_dim, tt::border);
         apply_btn->setStyleSheet(QString::fromUtf8(bs));
     }
@@ -6867,7 +6867,7 @@ QWidget* build_assist_tab(
         int disp_cols = std::min(cols, 16);
         auto* grid_card = new QWidget;
         auto* gl = new QVBoxLayout(grid_card);
-        gl->setContentsMargins(14, 12, 14, 12);
+        gl->setContentsMargins(tt::space_md + 2, tt::space_md, tt::space_md + 2, tt::space_md);
         grid_card->setStyleSheet(QString::fromUtf8(
             tt::card_style(tt::accent_ok).c_str()));
         auto* gh = new QLabel("Correction factor proposals");
@@ -7164,9 +7164,9 @@ QWidget* build_assist_tab(
     // calculates correction from live lambda, accumulates per-cell.
     {
         auto* live_header = new QLabel("Live VE Analyze");
-        QFont lhf = live_header->font(); lhf.setBold(true); lhf.setPointSize(12);
+        QFont lhf = live_header->font(); lhf.setBold(true); lhf.setPixelSize(tt::font_heading);
         live_header->setFont(lhf);
-        live_header->setStyleSheet("margin-top: 12px;");
+        live_header->setStyleSheet(QString::fromUtf8("margin-top: 12px;"));
         outer->addWidget(live_header);
 
         auto* live_card = new QWidget;
@@ -7424,9 +7424,9 @@ QWidget* build_assist_tab(
     {
         namespace waa_ns = tuner_core::wue_analyze_accumulator;
         auto* wue_header = new QLabel("WUE Analyze (Warmup Enrichment)");
-        QFont whf = wue_header->font(); whf.setBold(true); whf.setPointSize(12);
+        QFont whf = wue_header->font(); whf.setBold(true); whf.setPixelSize(tt::font_heading);
         wue_header->setFont(whf);
-        wue_header->setStyleSheet("margin-top: 12px;");
+        wue_header->setStyleSheet(QString::fromUtf8("margin-top: 12px;"));
         outer->addWidget(wue_header);
 
         auto* wue_note = new QLabel(
@@ -7489,8 +7489,8 @@ QWidget* render_heatmap(const std::vector<double>& values, int rows, int cols,
                          const char* title_text) {
     auto* card = new QWidget;
     auto* vl = new QVBoxLayout(card);
-    vl->setContentsMargins(14, 10, 14, 10);
-    vl->setSpacing(4);
+    vl->setContentsMargins(tt::space_md + 2, tt::space_sm + 2, tt::space_md + 2, tt::space_sm + 2);
+    vl->setSpacing(tt::space_xs);
     {
         char cstyle[192];
         std::snprintf(cstyle, sizeof(cstyle),
@@ -7501,7 +7501,7 @@ QWidget* render_heatmap(const std::vector<double>& values, int rows, int cols,
     }
 
     auto* h = new QLabel(QString::fromUtf8(title_text));
-    QFont hf = h->font(); hf.setBold(true); hf.setPointSize(11);
+    QFont hf = h->font(); hf.setBold(true); hf.setPixelSize(tt::font_label);
     h->setFont(hf);
     {
         char hstyle[96];
@@ -7565,8 +7565,8 @@ QWidget* render_1d_curve(const std::vector<double>& bins,
                           const char* accent = tt::accent_primary) {
     auto* card = new QWidget;
     auto* vl = new QVBoxLayout(card);
-    vl->setContentsMargins(14, 10, 14, 10);
-    vl->setSpacing(4);
+    vl->setContentsMargins(tt::space_md + 2, tt::space_sm + 2, tt::space_md + 2, tt::space_sm + 2);
+    vl->setSpacing(tt::space_xs);
     char card_style[256];
     std::snprintf(card_style, sizeof(card_style),
         "background-color: %s; border: 1px solid %s; "
@@ -7575,7 +7575,7 @@ QWidget* render_1d_curve(const std::vector<double>& bins,
     card->setStyleSheet(QString::fromUtf8(card_style));
 
     auto* h = new QLabel(QString::fromUtf8(title_text));
-    QFont hf = h->font(); hf.setBold(true); hf.setPointSize(11);
+    QFont hf = h->font(); hf.setBold(true); hf.setPixelSize(tt::font_label);
     h->setFont(hf);
     {
         char hstyle[96];
@@ -8298,8 +8298,8 @@ QWidget* build_setup_tab(
 
     auto* container = new QWidget;
     auto* layout = new QVBoxLayout(container);
-    layout->setContentsMargins(16, 16, 16, 16);
-    layout->setSpacing(12);
+    layout->setContentsMargins(tt::space_lg, tt::space_lg, tt::space_lg, tt::space_lg);
+    layout->setSpacing(tt::space_md);
 
     // Wizard step buttons — compact but clickable-looking.
     {
@@ -8315,7 +8315,7 @@ QWidget* build_setup_tab(
         auto* step_bar = new QWidget;
         auto* step_layout = new QHBoxLayout(step_bar);
         step_layout->setContentsMargins(0, 0, 0, 4);
-        step_layout->setSpacing(3);
+        step_layout->setSpacing(tt::space_xs);
         for (const auto& s : steps) {
             // Active step uses `fill_primary_mid` + `accent_primary`
             // border + `text_primary` text — same "selected" grammar
@@ -8654,8 +8654,8 @@ QWidget* build_setup_tab(
         // Render as a 1D curve (ADC → temperature).
         auto* therm_card = new QWidget;
         auto* tl = new QVBoxLayout(therm_card);
-        tl->setContentsMargins(14, 10, 14, 10);
-        tl->setSpacing(4);
+        tl->setContentsMargins(tt::space_md + 2, tt::space_sm + 2, tt::space_md + 2, tt::space_sm + 2);
+        tl->setSpacing(tt::space_xs);
         {
             char cstyle[192];
             std::snprintf(cstyle, sizeof(cstyle),
@@ -8664,7 +8664,7 @@ QWidget* build_setup_tab(
             therm_card->setStyleSheet(QString::fromUtf8(cstyle));
         }
         auto* th = new QLabel("GM CLT Thermistor Calibration (Steinhart-Hart)");
-        QFont thf = th->font(); thf.setBold(true); thf.setPointSize(11);
+        QFont thf = th->font(); thf.setBold(true); thf.setPixelSize(tt::font_label);
         th->setFont(thf);
         {
             char hstyle[96];
@@ -8751,9 +8751,9 @@ QWidget* build_setup_tab(
     {
         namespace hpns = tuner_core::hardware_presets;
         auto* preset_header = new QLabel("Ignition Coil Presets");
-        QFont phf = preset_header->font(); phf.setBold(true); phf.setPointSize(12);
+        QFont phf = preset_header->font(); phf.setBold(true); phf.setPixelSize(tt::font_heading);
         preset_header->setFont(phf);
-        preset_header->setStyleSheet("margin-top: 8px;");
+        preset_header->setStyleSheet(QString::fromUtf8("margin-top: 8px;"));
         layout->addWidget(preset_header);
 
         for (const auto& p : hpns::ignition_presets()) {
@@ -8773,9 +8773,9 @@ QWidget* build_setup_tab(
     {
         namespace ssc = tuner_core::sensor_setup_checklist;
         auto* sensor_header = new QLabel("Sensor Setup Checklist");
-        QFont shf = sensor_header->font(); shf.setBold(true); shf.setPointSize(12);
+        QFont shf = sensor_header->font(); shf.setBold(true); shf.setPixelSize(tt::font_heading);
         sensor_header->setFont(shf);
-        sensor_header->setStyleSheet("margin-top: 8px;");
+        sensor_header->setStyleSheet(QString::fromUtf8("margin-top: 8px;"));
         layout->addWidget(sensor_header);
 
         // Simulated sensor pages with typical Speeduino parameters.
@@ -8813,9 +8813,9 @@ QWidget* build_setup_tab(
     {
         namespace hsgc = tuner_core::hardware_setup_generator_context;
         auto* gen_header = new QLabel("Generator Readiness");
-        QFont ghf2 = gen_header->font(); ghf2.setBold(true); ghf2.setPointSize(12);
+        QFont ghf2 = gen_header->font(); ghf2.setBold(true); ghf2.setPixelSize(tt::font_heading);
         gen_header->setFont(ghf2);
-        gen_header->setStyleSheet("margin-top: 8px;");
+        gen_header->setStyleSheet(QString::fromUtf8("margin-top: 8px;"));
         layout->addWidget(gen_header);
 
         // Use the operator context from the SETUP demo above.
@@ -8894,9 +8894,9 @@ QWidget* build_setup_tab(
     {
         namespace itcv = tuner_core::ignition_trigger_cross_validation;
         auto* cv_header = new QLabel("Ignition / Trigger Cross-Validation");
-        QFont cvhf = cv_header->font(); cvhf.setBold(true); cvhf.setPointSize(12);
+        QFont cvhf = cv_header->font(); cvhf.setBold(true); cvhf.setPixelSize(tt::font_heading);
         cv_header->setFont(cvhf);
-        cv_header->setStyleSheet("margin-top: 8px;");
+        cv_header->setStyleSheet(QString::fromUtf8("margin-top: 8px;"));
         layout->addWidget(cv_header);
 
         // Simulated ignition + trigger pages.
@@ -9873,11 +9873,11 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
 QWidget* build_history_tab() {
     auto* container = new QWidget;
     auto* layout = new QVBoxLayout(container);
-    layout->setContentsMargins(16, 16, 16, 16);
-    layout->setSpacing(12);
+    layout->setContentsMargins(tt::space_lg, tt::space_lg, tt::space_lg, tt::space_lg);
+    layout->setSpacing(tt::space_md);
 
     auto* title = new QLabel("Phase 14 Slice 4 - workspace services in C++");
-    QFont tf = title->font(); tf.setPointSize(16); tf.setBold(true);
+    QFont tf = title->font(); tf.setPixelSize(tt::font_hero); tf.setBold(true);
     title->setFont(tf);
     layout->addWidget(title);
 

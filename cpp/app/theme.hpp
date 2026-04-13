@@ -93,6 +93,7 @@ constexpr const char* accent_special = "#9a7ad6";  // purple — computed/formul
 // Subtle fills for highlighted regions (e.g. staged-change backgrounds).
 constexpr const char* fill_primary_soft = "#1c3a5e";  // blue-tinted dark fill
 constexpr const char* fill_primary_mid  = "#2a4a6e";  // brighter blue fill
+constexpr const char* fill_ok_mid       = "#3da06a";  // brighter green fill (hover on accent_ok buttons)
 
 // ---------------------------------------------------------------------------
 // Type scale — pixel sizes.
