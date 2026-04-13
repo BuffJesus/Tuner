@@ -88,6 +88,7 @@
 #include "tuner_core/live_capture_session.hpp"
 #include "tuner_core/live_trigger_logger.hpp"
 #include "tuner_core/virtual_dyno.hpp"
+#include "tuner_core/boost_table_generator.hpp"
 #include "tuner_core/mock_ecu_runtime.hpp"
 #include "tuner_core/math_expression_evaluator.hpp"
 
@@ -9053,6 +9054,17 @@ QWidget* build_setup_tab(
                 auto idle = irg::generate(idle_ctx, irg::CalibrationIntent::FIRST_START);
                 try { edit_svc->replace_list("iacCLValues", idle.rpm_targets); } catch (...) {}
 
+                // Boost target + duty tables (forced induction only).
+                if (wr.induction > 0) {
+                    namespace btg = tuner_core::boost_table_generator;
+                    btg::BoostGeneratorContext boost_ctx;
+                    boost_ctx.target_boost_kpa = boost_kpa;
+                    boost_ctx.intercooled = wr.intercooler_present;
+                    auto boost = btg::generate(boost_ctx);
+                    try { edit_svc->replace_list("boostTable", boost.target_values); } catch (...) {}
+                    try { edit_svc->replace_list("boostDutyTable", boost.duty_values); } catch (...) {}
+                }
+
                 // Thermistor calibration — generate CLT + IAT lookup tables.
                 {
                     namespace tc = tuner_core::thermistor_calibration;
@@ -9087,19 +9099,34 @@ QWidget* build_setup_tab(
                 // Post-wizard guidance — tell the operator what to do next.
                 // This is the "guided power" moment: the wizard did the hard
                 // work, now guide them through the first steps.
+                // Build the list of what was generated.
+                std::string generated = "Generated tables:\n";
+                generated += "  \xe2\x80\xa2 VE Table (volumetric efficiency)\n";
+                generated += "  \xe2\x80\xa2 AFR Target Table (air-fuel ratio targets)\n";
+                generated += "  \xe2\x80\xa2 Spark Advance Table (ignition timing)\n";
+                generated += "  \xe2\x80\xa2 Warmup Enrichment curve\n";
+                generated += "  \xe2\x80\xa2 Cranking Enrichment curve\n";
+                generated += "  \xe2\x80\xa2 Idle RPM Targets\n";
+                if (wr.induction > 0)
+                    generated += "  \xe2\x80\xa2 Boost Target + Duty Tables\n";
+                generated += "\n";
+
+                std::string msg =
+                    "Your engine is configured!\n\n" + generated +
+                    "Next steps:\n\n"
+                    "1. Review the generated tables on the TUNE tab (Alt+1)\n"
+                    "   \xe2\x80\x94 check the VE table shape and spark advance curve\n"
+                    "2. Connect to your ECU (File \xe2\x86\x92 Connect to ECU)\n"
+                    "3. Write the tune to ECU RAM (Ctrl+W)\n"
+                    "4. Start the engine and verify idle\n"
+                    "   \xe2\x80\x94 if it won\xe2\x80\x99t start, check trigger settings first\n"
+                    "5. Use LOGGING to capture data while driving\n"
+                    "6. Use ASSIST \xe2\x86\x92 VE Analyze to refine the tune\n\n"
+                    "The starter tune is conservative \xe2\x80\x94 expect to refine it "
+                    "through a few drive-and-analyze cycles.";
                 QMessageBox::information(container,
                     QString::fromUtf8("Setup Complete"),
-                    QString::fromUtf8(
-                        "Your engine is configured and starter tables have been generated.\n\n"
-                        "Next steps:\n\n"
-                        "1. Switch to the TUNE tab (Alt+1) to review the generated tables\n"
-                        "2. Connect to your ECU (File \xe2\x86\x92 Connect to ECU)\n"
-                        "3. Write the tune to ECU RAM (Ctrl+W)\n"
-                        "4. Start the engine and verify idle\n"
-                        "5. Use the LOGGING tab to capture data while driving\n"
-                        "6. Use ASSIST \xe2\x86\x92 VE Analyze to refine the VE table\n\n"
-                        "The starter tune is conservative \xe2\x80\x94 expect to refine it "
-                        "through a few drive-and-analyze cycles."));
+                    QString::fromUtf8(msg.c_str()));
 
                 // Switch to TUNE tab so the operator can see their new tables.
                 if (auto* sb = container->window()->findChild<QListWidget*>())
