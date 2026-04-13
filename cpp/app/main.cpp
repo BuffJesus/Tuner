@@ -6131,18 +6131,85 @@ QWidget* build_live_tab(
 
             // Humanize command name: strip "cmd_test_" prefix, replace _ with space.
             auto humanize_cmd = [](const std::string& name) -> std::string {
+                // Known command → human-readable mapping.
+                static const std::vector<std::pair<std::string, std::string>> known = {
+                    {"cmdStopTestMode",     "Stop Test Mode"},
+                    {"cmdEnableTestMode",   "Enable Test Mode"},
+                    {"cmdtestinj1on",       "Injector 1 ON"},
+                    {"cmdtestinj1off",      "Injector 1 OFF"},
+                    {"cmdtestinj1Pulsed",   "Injector 1 Pulse"},
+                    {"cmdtestinj2on",       "Injector 2 ON"},
+                    {"cmdtestinj2off",      "Injector 2 OFF"},
+                    {"cmdtestinj2Pulsed",   "Injector 2 Pulse"},
+                    {"cmdtestinj3on",       "Injector 3 ON"},
+                    {"cmdtestinj3off",      "Injector 3 OFF"},
+                    {"cmdtestinj3Pulsed",   "Injector 3 Pulse"},
+                    {"cmdtestinj4on",       "Injector 4 ON"},
+                    {"cmdtestinj4off",      "Injector 4 OFF"},
+                    {"cmdtestinj4Pulsed",   "Injector 4 Pulse"},
+                    {"cmdtestinj5on",       "Injector 5 ON"},
+                    {"cmdtestinj5off",      "Injector 5 OFF"},
+                    {"cmdtestinj6on",       "Injector 6 ON"},
+                    {"cmdtestinj6off",      "Injector 6 OFF"},
+                    {"cmdtestinj7on",       "Injector 7 ON"},
+                    {"cmdtestinj7off",      "Injector 7 OFF"},
+                    {"cmdtestinj8on",       "Injector 8 ON"},
+                    {"cmdtestinj8off",      "Injector 8 OFF"},
+                    {"cmdtestspk1on",       "Spark 1 ON"},
+                    {"cmdtestspk1off",      "Spark 1 OFF"},
+                    {"cmdtestspk1Pulsed",   "Spark 1 Pulse"},
+                    {"cmdtestspk2on",       "Spark 2 ON"},
+                    {"cmdtestspk2off",      "Spark 2 OFF"},
+                    {"cmdtestspk2Pulsed",   "Spark 2 Pulse"},
+                    {"cmdtestspk3on",       "Spark 3 ON"},
+                    {"cmdtestspk3off",      "Spark 3 OFF"},
+                    {"cmdtestspk3Pulsed",   "Spark 3 Pulse"},
+                    {"cmdtestspk4on",       "Spark 4 ON"},
+                    {"cmdtestspk4off",      "Spark 4 OFF"},
+                    {"cmdtestspk4Pulsed",   "Spark 4 Pulse"},
+                    {"cmdtestFan",          "Cooling Fan"},
+                    {"cmdtestFuelPump",     "Fuel Pump"},
+                    {"cmdtestIdleUp",       "Idle Up"},
+                    {"cmdtestVVT",          "VVT Solenoid"},
+                    {"cmdtestBoost",        "Boost Solenoid"},
+                };
+                for (const auto& [key, human] : known)
+                    if (name == key) return human;
+
+                // Fallback: strip prefix, split camelCase + numbers.
                 std::string s = name;
-                // Strip common prefixes.
-                for (const char* prefix : {"cmd_test_", "cmd_", "test_"}) {
+                for (const char* prefix : {"cmdtest", "cmd_test_", "cmd_", "test_", "cmd"}) {
                     if (s.find(prefix) == 0) {
                         s = s.substr(std::strlen(prefix));
                         break;
                     }
                 }
-                for (auto& ch : s) if (ch == '_') ch = ' ';
-                if (!s.empty()) s[0] = static_cast<char>(
-                    std::toupper(static_cast<unsigned char>(s[0])));
-                return s;
+                // Insert spaces before capitals and between letters/digits.
+                std::string result;
+                for (size_t i = 0; i < s.size(); ++i) {
+                    char c = s[i];
+                    if (i > 0) {
+                        bool prev_lower = std::islower(static_cast<unsigned char>(s[i-1]));
+                        bool curr_upper = std::isupper(static_cast<unsigned char>(c));
+                        bool prev_alpha = std::isalpha(static_cast<unsigned char>(s[i-1]));
+                        bool curr_digit = std::isdigit(static_cast<unsigned char>(c));
+                        if ((prev_lower && curr_upper) || (prev_alpha && curr_digit))
+                            result += ' ';
+                    }
+                    if (c == '_') { result += ' '; continue; }
+                    result += c;
+                }
+                if (!result.empty()) result[0] = static_cast<char>(
+                    std::toupper(static_cast<unsigned char>(result[0])));
+                // Uppercase common abbreviations.
+                for (const char* abbr : {"on", "off", "ON", "OFF"}) {
+                    auto pos = result.rfind(abbr);
+                    if (pos != std::string::npos && pos == result.size() - std::strlen(abbr)) {
+                        for (size_t j = pos; j < result.size(); ++j)
+                            result[j] = static_cast<char>(std::toupper(static_cast<unsigned char>(result[j])));
+                    }
+                }
+                return result;
             };
 
             auto* test_status = new QLabel(QString::fromUtf8("Select a test to run"));
