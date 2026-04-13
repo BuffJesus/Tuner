@@ -11345,24 +11345,31 @@ public:
                     }
                 }
 
-                auto* ini_field = make_field("INI Definition:");
+                auto* def_field = make_field("Definition:");
                 {
-                    auto ini_path = find_production_ini();
-                    if (!ini_path.empty())
-                        ini_field->setEditText(QString::fromUtf8(ini_path.string().c_str()));
+                    // Prefer native .tunerdef, fall back to INI.
+                    auto native_def = find_native_definition();
+                    if (!native_def.empty())
+                        def_field->setEditText(QString::fromUtf8(native_def.string().c_str()));
+                    else {
+                        auto ini_path = find_production_ini();
+                        if (!ini_path.empty())
+                            def_field->setEditText(QString::fromUtf8(ini_path.string().c_str()));
+                    }
                 }
-                // Wire INI browse button.
+                // Wire definition browse button.
                 {
                     auto* row_layout = static_cast<QHBoxLayout*>(form->itemAt(form->count() - 1)->layout());
                     auto* browse_btn = qobject_cast<QPushButton*>(row_layout->itemAt(2)->widget());
                     if (browse_btn) {
                         QObject::connect(browse_btn, &QPushButton::clicked,
-                                         [dlg, ini_field]() {
+                                         [dlg, def_field]() {
                             auto path = QFileDialog::getOpenFileName(dlg,
                                 QString::fromUtf8("Select ECU Definition"),
                                 QString(),
-                                QString::fromUtf8("INI Files (*.ini);;All Files (*)"));
-                            if (!path.isEmpty()) ini_field->setEditText(path);
+                                QString::fromUtf8(
+                                    "Native Definition (*.tunerdef);;Legacy INI (*.ini);;All Files (*)"));
+                            if (!path.isEmpty()) def_field->setEditText(path);
                         });
                     }
                 }
@@ -11415,10 +11422,10 @@ public:
 
                 QObject::connect(cancel_btn, &QPushButton::clicked, dlg, &QDialog::reject);
                 QObject::connect(create_btn, &QPushButton::clicked,
-                                 [dlg, name_field, dir_field, ini_field, tune_field]() {
+                                 [dlg, name_field, dir_field, def_field, tune_field]() {
                     std::string name = name_field->currentText().toStdString();
                     std::string dir = dir_field->currentText().toStdString();
-                    std::string ini = ini_field->currentText().toStdString();
+                    std::string def_path = def_field->currentText().toStdString();
                     std::string tune = tune_field->currentText().toStdString();
 
                     if (name.empty() || dir.empty()) return;
@@ -11433,8 +11440,8 @@ public:
                     if (out) {
                         out << "# Tuner project file\n";
                         out << "projectName=" << name << "\n";
-                        if (!ini.empty() && ini != "(create empty)")
-                            out << "iniFile=" << ini << "\n";
+                        if (!def_path.empty() && def_path != "(create empty)")
+                            out << "definitionFile=" << def_path << "\n";
                         out << "activeSettings=\n";
                         out.close();
                     }
@@ -11443,9 +11450,23 @@ public:
                     QSettings settings;
                     settings.setValue(kCurrentProjectNameKey,
                         QString::fromUtf8(name.c_str()));
-                    if (!ini.empty() && ini != "(create empty)")
-                        settings.setValue(kCurrentProjectIniKey,
-                            QString::fromUtf8(ini.c_str()));
+
+                    // Detect if the definition is native (.tunerdef) or
+                    // legacy INI and save to the appropriate QSettings key.
+                    if (!def_path.empty() && def_path != "(create empty)") {
+                        std::string ext = std::filesystem::path(def_path).extension().string();
+                        for (auto& c : ext) c = static_cast<char>(
+                            std::tolower(static_cast<unsigned char>(c)));
+                        if (ext == ".tunerdef") {
+                            settings.setValue("projects/current/tunerdef",
+                                QString::fromUtf8(def_path.c_str()));
+                            // Clear legacy INI key.
+                            settings.setValue(kCurrentProjectIniKey, QString());
+                        } else {
+                            settings.setValue(kCurrentProjectIniKey,
+                                QString::fromUtf8(def_path.c_str()));
+                        }
+                    }
                     // Set tune path if user selected one, clear if empty.
                     if (!tune.empty() && tune != "(create empty)")
                         settings.setValue(kCurrentProjectTuneKey,
