@@ -2165,8 +2165,9 @@ QWidget* build_tune_tab(
                 rp.msq_path = native_tune_path.string();
                 rp.signature = tune_file->signature;
                 rp.last_opened = today_iso();
-                auto ini_p = find_production_ini();
-                if (!ini_p.empty()) rp.ini_path = ini_p.string();
+                auto def_p = find_native_definition();
+                if (!def_p.empty()) rp.ini_path = def_p.string();
+                else { auto ip = find_production_ini(); if (!ip.empty()) rp.ini_path = ip.string(); }
                 push_recent_project(rp);
                 save_current_project(rp);
                 *current_project = rp;
@@ -2306,10 +2307,10 @@ QWidget* build_tune_tab(
         }
     };
 
-    auto ini_path = find_production_ini();
-    if (!ini_path.empty()) {
+    auto def_opt = load_active_definition();
+    if (def_opt.has_value()) {
         try {
-            auto def = tuner_core::compile_ecu_definition_file(ini_path);
+            auto& def = *def_opt;
             *ecu_def = def;  // Store for handler use.
             auto compiled = dlns::compile_pages(def.menus, def.dialogs, def.table_editors);
             // Add curve editor pages. Each CurveEditor in the INI becomes
@@ -5467,15 +5468,13 @@ QWidget* build_live_tab(
     auto formula_arrays = std::make_shared<mee::ArrayMap>();
     auto front_page_indicators = std::make_shared<std::vector<tuner_core::IniFrontPageIndicator>>();
     {
-        auto ini_path = find_production_ini();
-        if (!ini_path.empty()) {
-            try {
-                auto def = tuner_core::compile_ecu_definition_file(ini_path);
+        {
+            auto def_opt = load_active_definition();
+            if (def_opt.has_value()) {
+                auto& def = *def_opt;
                 *formula_channels = def.output_channels.formula_channels;
                 *formula_arrays = def.output_channels.arrays;
                 *front_page_indicators = def.front_page.indicators;
-            } catch (...) {
-                // Fall through — formula strip just shows "—" when empty.
             }
         }
     }
@@ -5651,13 +5650,12 @@ QWidget* build_live_tab(
     // Try INI-driven layout.
     if (!front_page_indicators->empty()) {
         // front_page_indicators was already loaded — check gauges too.
-        auto ini_path = find_production_ini();
-        if (!ini_path.empty()) {
-            try {
-                auto def = tuner_core::compile_ecu_definition_file(ini_path);
+        {
+            auto def_opt_g = load_active_definition();
+            if (def_opt_g.has_value()) {
+                auto& def = *def_opt_g;
                 if (!def.front_page.gauges.empty() &&
                     !def.gauge_configurations.gauges.empty()) {
-                    // Check QSettings for saved gauge selection.
                     QSettings settings;
                     std::string saved = settings.value(
                         "live/gauge_selection", "").toString().toStdString();
@@ -5678,7 +5676,7 @@ QWidget* build_live_tab(
                     dash = build_ini_layout(&selected_slots,
                         &def.gauge_configurations.gauges);
                 }
-            } catch (...) {}
+            }
         }
     }
     if (dash.widgets.empty()) dash = dln::default_layout();
@@ -5708,13 +5706,9 @@ QWidget* build_live_tab(
     // Load INI gauge catalog for the config dialog source picker.
     auto gauge_catalog = std::make_shared<std::vector<tuner_core::IniGaugeConfiguration>>();
     {
-        auto ini_path = find_production_ini();
-        if (!ini_path.empty()) {
-            try {
-                auto def = tuner_core::compile_ecu_definition_file(ini_path);
-                *gauge_catalog = def.gauge_configurations.gauges;
-            } catch (...) {}
-        }
+        auto def_opt_gc = load_active_definition();
+        if (def_opt_gc.has_value())
+            *gauge_catalog = def_opt_gc->gauge_configurations.gauges;
     }
 
     auto rebuild_dashboard = std::make_shared<std::function<void()>>();
@@ -6241,12 +6235,9 @@ QWidget* build_live_tab(
     {
         auto test_commands = std::make_shared<std::vector<tuner_core::IniControllerCommand>>();
         {
-            auto ini_path = find_production_ini();
-            if (!ini_path.empty()) {
-                try {
-                    auto def = tuner_core::compile_ecu_definition_file(ini_path);
-                    *test_commands = def.controller_commands.commands;
-                } catch (...) {}
+            auto def_opt = load_active_definition();
+            if (def_opt.has_value()) {
+                *test_commands = def_opt->controller_commands.commands;
             }
         }
 
@@ -9420,23 +9411,14 @@ QWidget* build_triggers_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
 
         if (!ecu_conn || !ecu_conn->connected || !ecu_conn->controller) return;
 
-        // Find the logger definition from the INI.
-        auto ini_path = find_production_ini();
-        if (ini_path.empty()) {
+        // Find logger definitions from the active definition.
+        auto def_opt = load_active_definition();
+        if (!def_opt.has_value()) {
             source_label->setText(QString::fromUtf8(
-                "No INI loaded \xe2\x80\x94 cannot determine logger format"));
+                "No definition loaded \xe2\x80\x94 cannot determine logger format"));
             return;
         }
-
-        tuner_core::IniLoggerDefinitionSection loggers;
-        try {
-            auto def = tuner_core::compile_ecu_definition_file(ini_path);
-            loggers = def.logger_definitions;
-        } catch (...) {
-            source_label->setText(QString::fromUtf8(
-                "Failed to parse logger definitions from INI"));
-            return;
-        }
+        auto loggers = def_opt->logger_definitions;
 
         if (loggers.loggers.empty()) {
             source_label->setText(QString::fromUtf8(
@@ -9582,10 +9564,10 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
         if (!restored) {
             // Build from INI output channels.
             std::vector<dlp::ChannelDef> defs;
-            auto ini_path = find_production_ini();
-            if (!ini_path.empty()) {
-                try {
-                    auto def = tuner_core::compile_ecu_definition_file(ini_path);
+            {
+                auto def_opt = load_active_definition();
+                if (def_opt.has_value()) {
+                    auto& def = *def_opt;
                     for (const auto& ch : def.output_channels.channels) {
                         dlp::ChannelDef d;
                         d.name = ch.name;
@@ -9594,7 +9576,7 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
                         d.digits = ch.digits;
                         defs.push_back(d);
                     }
-                } catch (...) {}
+                }
             }
             if (defs.empty()) {
                 defs = {
@@ -9999,12 +9981,12 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
                 "\n... and %d more channels",
                 static_cast<int>(profile->channels.size()) - shown);
         }
-        auto ini_path = find_production_ini();
+        bool has_def = !find_native_definition().empty() || !find_production_ini().empty();
         char title[128];
         std::snprintf(title, sizeof(title),
             "Logging Profile \xe2\x80\x94 %d channels from %s",
             static_cast<int>(profile->channels.size()),
-            ini_path.empty() ? "defaults" : "loaded INI");
+            has_def ? "loaded definition" : "defaults");
         layout->addWidget(make_info_card(title, ch_buf, tt::accent_primary));
     }
 
@@ -11692,15 +11674,13 @@ public:
             auto* def_settings_action = file_menu->addAction("Definition &Settings...");
             QObject::connect(def_settings_action, &QAction::triggered,
                              [this, shared_workspace, reload_active_project]() {
-                auto ini_path = find_production_ini();
-                if (ini_path.empty()) {
+                auto def_opt_s = load_active_definition();
+                if (!def_opt_s.has_value()) {
                     QMessageBox::information(this, "No Definition",
-                        QString::fromUtf8("No INI definition loaded."));
+                        QString::fromUtf8("No definition loaded."));
                     return;
                 }
-                tuner_core::NativeEcuDefinition def;
-                try { def = tuner_core::compile_ecu_definition_file(ini_path); }
-                catch (...) { return; }
+                auto def = std::move(*def_opt_s);
 
                 if (def.setting_groups.groups.empty()) {
                     QMessageBox::information(this, "No Settings",
@@ -11851,22 +11831,16 @@ public:
                 if (open_connect_dialog(this, ecu_conn, conn_label)) {
                     connect_action->setEnabled(false);
                     disconnect_action->setEnabled(true);
-                    // Build channel layouts from the loaded INI for
-                    // runtime packet decoding.
-                    auto ini_path = find_production_ini();
-                    if (!ini_path.empty()) {
-                        try {
-                            auto def = tuner_core::compile_ecu_definition_file(ini_path);
-                            build_channel_layouts(ecu_conn, &def);
-                            // Defer page reads to avoid blocking the UI.
-                            // Pages are read on-demand via read_page_slice()
-                            // when bit-field writes need current data.
-                            // A full read_all_pages would freeze the UI for
-                            // 15+ seconds on a real ECU connection.
+                    // Build channel layouts from the active definition
+                    // for runtime packet decoding.
+                    {
+                        auto def_opt_c = load_active_definition();
+                        if (def_opt_c.has_value()) {
+                            build_channel_layouts(ecu_conn, &*def_opt_c);
                             std::printf("[connect] Channel layouts built, "
                                 "page reads deferred to on-demand\n");
                             std::fflush(stdout);
-                        } catch (...) {}
+                        }
                     }
                 }
             };
