@@ -10983,6 +10983,16 @@ public:
                     {"Ctrl+W", "Write staged changes to RAM"},
                     {"Ctrl+B", "Burn to flash"},
                 }},
+                {"Table editing", 0, "available on the Tune tab", {
+                    {"Ctrl+Z", "Undo last cell edit"},
+                    {"Ctrl+Y", "Redo cell edit"},
+                    {"Ctrl+C", "Copy selection"},
+                    {"Ctrl+V", "Paste from clipboard"},
+                    {"Ctrl+D", "Fill down"},
+                    {"+/-",    "Increment / decrement cell"},
+                    {"I",      "Interpolate selection"},
+                    {"S",      "Smooth selection"},
+                }},
                 {"Files", -1, nullptr, {
                     {"Ctrl+S", "Save as .tuner (native JSON)"},
                 }},
@@ -11578,7 +11588,17 @@ public:
             *connect_callback = open_connect;
             QObject::connect(connect_action, &QAction::triggered, open_connect);
             QObject::connect(disconnect_action, &QAction::triggered,
-                             [ecu_conn, conn_label, connect_action, disconnect_action]() {
+                             [this, ecu_conn, conn_label, connect_action, disconnect_action]() {
+                if (!ecu_conn->dirty_pages.empty()) {
+                    auto answer = QMessageBox::warning(this,
+                        QString::fromUtf8("Disconnect"),
+                        QString::fromUtf8(
+                            "Changes written to RAM have not been burned to flash.\n"
+                            "Disconnect anyway? Unburned changes will be lost on ECU power cycle."),
+                        QMessageBox::Ok | QMessageBox::Cancel,
+                        QMessageBox::Cancel);
+                    if (answer != QMessageBox::Ok) return;
+                }
                 ecu_conn->close();
                 connect_action->setEnabled(true);
                 disconnect_action->setEnabled(false);
