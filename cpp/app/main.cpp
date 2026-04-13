@@ -6104,6 +6104,7 @@ QWidget* build_live_tab(
             static const KnownCmd known_cmds[] = {
                 {"cmdEnableTestMode",   "Enable Test Mode",  "control"},
                 {"cmdStopTestMode",     "Stop Test Mode",    "control"},
+                // Injectors 1-8 (sequential V8 / 8-cyl support).
                 {"cmdtestinj1on",       "Inj 1 ON",         "injector"},
                 {"cmdtestinj1off",      "Inj 1 OFF",        "injector"},
                 {"cmdtestinj2on",       "Inj 2 ON",         "injector"},
@@ -6112,6 +6113,15 @@ QWidget* build_live_tab(
                 {"cmdtestinj3off",      "Inj 3 OFF",        "injector"},
                 {"cmdtestinj4on",       "Inj 4 ON",         "injector"},
                 {"cmdtestinj4off",      "Inj 4 OFF",        "injector"},
+                {"cmdtestinj5on",       "Inj 5 ON",         "injector"},
+                {"cmdtestinj5off",      "Inj 5 OFF",        "injector"},
+                {"cmdtestinj6on",       "Inj 6 ON",         "injector"},
+                {"cmdtestinj6off",      "Inj 6 OFF",        "injector"},
+                {"cmdtestinj7on",       "Inj 7 ON",         "injector"},
+                {"cmdtestinj7off",      "Inj 7 OFF",        "injector"},
+                {"cmdtestinj8on",       "Inj 8 ON",         "injector"},
+                {"cmdtestinj8off",      "Inj 8 OFF",        "injector"},
+                // Spark 1-8 (COP on V8 / 8-cyl).
                 {"cmdtestspk1on",       "Spark 1 ON",       "spark"},
                 {"cmdtestspk1off",      "Spark 1 OFF",      "spark"},
                 {"cmdtestspk2on",       "Spark 2 ON",       "spark"},
@@ -6120,6 +6130,15 @@ QWidget* build_live_tab(
                 {"cmdtestspk3off",      "Spark 3 OFF",      "spark"},
                 {"cmdtestspk4on",       "Spark 4 ON",       "spark"},
                 {"cmdtestspk4off",      "Spark 4 OFF",      "spark"},
+                {"cmdtestspk5on",       "Spark 5 ON",       "spark"},
+                {"cmdtestspk5off",      "Spark 5 OFF",      "spark"},
+                {"cmdtestspk6on",       "Spark 6 ON",       "spark"},
+                {"cmdtestspk6off",      "Spark 6 OFF",      "spark"},
+                {"cmdtestspk7on",       "Spark 7 ON",       "spark"},
+                {"cmdtestspk7off",      "Spark 7 OFF",      "spark"},
+                {"cmdtestspk8on",       "Spark 8 ON",       "spark"},
+                {"cmdtestspk8off",      "Spark 8 OFF",      "spark"},
+                // Auxiliary outputs.
                 {"cmdtestFan",          "Cooling Fan",       "aux"},
                 {"cmdtestFuelPump",     "Fuel Pump",         "aux"},
                 {"cmdtestIdleUp",       "Idle Up",           "aux"},
@@ -9352,7 +9371,7 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
     // and saves it. On subsequent runs, restores the saved profile so
     // channel enabled/disabled state and ordering are preserved.
     auto profile = std::make_shared<dlp::Profile>();
-    std::vector<std::string> profile_channel_names;
+    auto profile_channel_names = std::make_shared<std::vector<std::string>>();
     {
         QSettings settings;
         std::string saved_json = settings.value(
@@ -9398,7 +9417,7 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
                 QString::fromUtf8(json.c_str()));
         }
         for (const auto& ch : profile->enabled_channels())
-            profile_channel_names.push_back(ch.name);
+            profile_channel_names->push_back(ch.name);
     }
 
     // Per-channel digit map for CSV formatting.
@@ -9513,7 +9532,7 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
         if (path.isEmpty()) return;
 
         auto columns = lcs::ordered_column_names(
-            profile_channel_names, *records);
+            *profile_channel_names, *records);
         auto csv = lcs::format_csv(*records, columns, *format_digits);
 
         std::ofstream out(path.toStdString(),
@@ -9556,7 +9575,7 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
         lcs::CapturedRecord rec;
         rec.elapsed_ms = elapsed_ms;
         // Use profile channel order for consistent column ordering.
-        for (const auto& name : profile_channel_names) {
+        for (const auto& name : *profile_channel_names) {
             auto it = snap.find(name);
             if (it != snap.end()) {
                 rec.keys.push_back(name);
@@ -9591,7 +9610,182 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
     });
     capture_timer->start(200);  // 200ms — matches LIVE tab poll rate.
 
-    // ---- Channel profile display ----
+    // ---- Profile manager — switch, add, delete ----
+    // Multi-profile support with collection persistence.
+    auto all_profiles = std::make_shared<std::vector<dlp::Profile>>();
+    auto active_name = std::make_shared<std::string>(profile->name);
+    all_profiles->push_back(*profile);
+
+    // Try loading saved collection from QSettings.
+    {
+        QSettings settings;
+        std::string saved_coll = settings.value(
+            "logging/profiles_collection", "").toString().toStdString();
+        if (!saved_coll.empty()) {
+            try {
+                auto [profs, aname] = dlp::deserialize_collection(saved_coll);
+                if (!profs.empty()) {
+                    *all_profiles = std::move(profs);
+                    *active_name = aname;
+                    // Find the active profile and use it.
+                    for (const auto& p : *all_profiles) {
+                        if (p.name == *active_name) {
+                            *profile = p;
+                            break;
+                        }
+                    }
+                }
+            } catch (...) {}
+        }
+    }
+
+    // Helper: save current collection to QSettings.
+    auto save_profiles = [all_profiles, active_name]() {
+        QSettings settings;
+        auto json = dlp::serialize_collection(*all_profiles, *active_name);
+        settings.setValue("logging/profiles_collection",
+            QString::fromUtf8(json.c_str()));
+    };
+
+    // Profile selector row.
+    auto* profile_row = new QHBoxLayout;
+    profile_row->setSpacing(tt::space_sm);
+    {
+        auto* lbl = new QLabel(QString::fromUtf8("Profile:"));
+        char ls[96];
+        std::snprintf(ls, sizeof(ls),
+            "QLabel { color: %s; font-size: %dpx; font-weight: bold; }",
+            tt::text_secondary, tt::font_body);
+        lbl->setStyleSheet(QString::fromUtf8(ls));
+        profile_row->addWidget(lbl);
+    }
+    auto* profile_combo = new QComboBox;
+    {
+        char cs[192];
+        std::snprintf(cs, sizeof(cs),
+            "QComboBox { background: %s; color: %s; border: 1px solid %s; "
+            "border-radius: %dpx; padding: %dpx %dpx; font-size: %dpx; }",
+            tt::bg_elevated, tt::text_primary, tt::border,
+            tt::radius_sm, tt::space_xs, tt::space_sm, tt::font_body);
+        profile_combo->setStyleSheet(QString::fromUtf8(cs));
+    }
+    for (const auto& p : *all_profiles)
+        profile_combo->addItem(QString::fromUtf8(p.name.c_str()));
+    // Select active.
+    for (int i = 0; i < profile_combo->count(); ++i) {
+        if (profile_combo->itemText(i).toStdString() == *active_name) {
+            profile_combo->setCurrentIndex(i);
+            break;
+        }
+    }
+    profile_row->addWidget(profile_combo, 1);
+
+    // Add profile button.
+    auto* add_prof_btn = new QPushButton(QString::fromUtf8("+"));
+    add_prof_btn->setFixedWidth(28);
+    add_prof_btn->setCursor(Qt::PointingHandCursor);
+    {
+        char s[192];
+        std::snprintf(s, sizeof(s),
+            "QPushButton { background: %s; color: %s; border: 1px solid %s; "
+            "border-radius: %dpx; font-size: %dpx; font-weight: bold; }"
+            "QPushButton:hover { background: %s; }",
+            tt::bg_elevated, tt::accent_ok, tt::border,
+            tt::radius_sm, tt::font_body, tt::fill_primary_mid);
+        add_prof_btn->setStyleSheet(QString::fromUtf8(s));
+    }
+
+    // Delete profile button.
+    auto* del_prof_btn = new QPushButton(QString::fromUtf8("\xe2\x88\x92"));  // −
+    del_prof_btn->setFixedWidth(28);
+    del_prof_btn->setCursor(Qt::PointingHandCursor);
+    {
+        char s[192];
+        std::snprintf(s, sizeof(s),
+            "QPushButton { background: %s; color: %s; border: 1px solid %s; "
+            "border-radius: %dpx; font-size: %dpx; font-weight: bold; }"
+            "QPushButton:hover { background: %s; }",
+            tt::bg_elevated, tt::accent_danger, tt::border,
+            tt::radius_sm, tt::font_body, tt::fill_primary_mid);
+        del_prof_btn->setStyleSheet(QString::fromUtf8(s));
+    }
+    del_prof_btn->setEnabled(all_profiles->size() > 1);
+
+    profile_row->addWidget(add_prof_btn);
+    profile_row->addWidget(del_prof_btn);
+    layout->addLayout(profile_row);
+
+    // Channel count label.
+    auto* channel_info = new QLabel;
+    {
+        char ci[128];
+        std::snprintf(ci, sizeof(ci),
+            "<span style='color: %s; font-size: %dpx;'>%d channels enabled</span>",
+            tt::text_muted, tt::font_small,
+            static_cast<int>(profile->enabled_channels().size()));
+        channel_info->setTextFormat(Qt::RichText);
+        channel_info->setText(QString::fromUtf8(ci));
+    }
+    layout->addWidget(channel_info);
+
+    // Switch profile.
+    QObject::connect(profile_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                     [profile_combo, all_profiles, active_name, profile,
+                      profile_channel_names, channel_info, save_profiles](int idx) {
+        if (idx < 0 || idx >= static_cast<int>(all_profiles->size())) return;
+        *profile = (*all_profiles)[idx];
+        *active_name = profile->name;
+        profile_channel_names->clear();
+        for (const auto& ch : profile->enabled_channels())
+            profile_channel_names->push_back(ch.name);
+        char ci[128];
+        std::snprintf(ci, sizeof(ci),
+            "<span style='color: %s; font-size: %dpx;'>%d channels enabled</span>",
+            tt::text_muted, tt::font_small,
+            static_cast<int>(profile->enabled_channels().size()));
+        channel_info->setText(QString::fromUtf8(ci));
+        save_profiles();
+    });
+
+    // Add new profile (duplicate current).
+    QObject::connect(add_prof_btn, &QPushButton::clicked,
+                     [profile_combo, all_profiles, profile, active_name,
+                      del_prof_btn, save_profiles]() {
+        // Generate unique name.
+        std::string base = profile->name + " Copy";
+        std::string name = base;
+        int n = 1;
+        while (true) {
+            bool found = false;
+            for (const auto& p : *all_profiles)
+                if (p.name == name) { found = true; break; }
+            if (!found) break;
+            char buf[64]; std::snprintf(buf, sizeof(buf), "%s %d", base.c_str(), ++n);
+            name = buf;
+        }
+        dlp::Profile np = *profile;
+        np.name = name;
+        all_profiles->push_back(np);
+        profile_combo->addItem(QString::fromUtf8(name.c_str()));
+        profile_combo->setCurrentIndex(profile_combo->count() - 1);
+        del_prof_btn->setEnabled(all_profiles->size() > 1);
+        save_profiles();
+    });
+
+    // Delete current profile.
+    QObject::connect(del_prof_btn, &QPushButton::clicked,
+                     [profile_combo, all_profiles, active_name,
+                      del_prof_btn, save_profiles]() {
+        if (all_profiles->size() <= 1) return;
+        int idx = profile_combo->currentIndex();
+        if (idx < 0 || idx >= static_cast<int>(all_profiles->size())) return;
+        all_profiles->erase(all_profiles->begin() + idx);
+        profile_combo->removeItem(idx);
+        del_prof_btn->setEnabled(all_profiles->size() > 1);
+        save_profiles();
+    });
+
+    // Legacy channel display — show first few channels.
     {
         char ch_buf[2048]; int coff = 0;
         int shown = std::min(static_cast<int>(profile->channels.size()), 24);
