@@ -8197,6 +8197,20 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
         layout->addLayout(row);
         return combo;
     };
+    // Guidance note — brief contextual explanation at the top of each
+    // step. Tells the operator WHY this step matters and what to focus on.
+    // Uses accent_primary so it reads as guidance, not background chrome.
+    auto make_guidance = [](QVBoxLayout* layout, const char* text) {
+        auto* g = new QLabel;
+        g->setTextFormat(Qt::RichText);
+        g->setWordWrap(true);
+        char buf[384];
+        std::snprintf(buf, sizeof(buf),
+            "<span style='color: %s; font-size: %dpx;'>%s</span>",
+            tt::accent_primary, tt::font_body, text);
+        g->setText(QString::fromUtf8(buf));
+        layout->addWidget(g);
+    };
     auto make_hint = [](QVBoxLayout* layout, const char* text) {
         auto* h = new QLabel;
         h->setTextFormat(Qt::RichText);
@@ -8214,6 +8228,8 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
     auto* p1l = new QVBoxLayout(p1);
     p1l->setSpacing(tt::space_sm);
     p1l->addWidget(make_step_header("Step 1 of 6 \xe2\x80\x94 Engine"));
+    make_guidance(p1l, "Tell us about your engine. These basics shape everything \xe2\x80\x94 "
+                       "the VE table, fuel calculations, and trigger setup all start here.");
     auto* cyl_edit = make_row(p1l, "Cylinders:");
     cyl_edit->setText("6");
     auto* disp_edit = make_row(p1l, "Displacement (cc):");
@@ -8269,6 +8285,8 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
     auto* p2l = new QVBoxLayout(p2);
     p2l->setSpacing(tt::space_sm);
     p2l->addWidget(make_step_header("Step 2 of 6 \xe2\x80\x94 Induction"));
+    make_guidance(p2l, "How does air get into the engine? Naturally aspirated, turbo, or supercharged. "
+                       "This determines how the VE table handles boost and the AFR targets under load.");
     auto* induction_combo = make_combo_row(p2l, "Topology:");
     induction_combo->addItem("Naturally Aspirated");
     induction_combo->addItem("Single Turbo");
@@ -8326,6 +8344,8 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
     auto* p3l = new QVBoxLayout(p3);
     p3l->setSpacing(tt::space_sm);
     p3l->addWidget(make_step_header("Step 3 of 6 \xe2\x80\x94 Injectors"));
+    make_guidance(p3l, "Your injector specs directly affect fuel delivery. "
+                       "Select a preset if you know your injectors, or enter values manually.");
     auto* inj_preset_combo = make_combo_row(p3l, "Injector Preset:");
     for (int i = 0; i < kInjectorPresetCount; ++i)
         inj_preset_combo->addItem(QString::fromUtf8(kInjectorPresets[i].label));
@@ -8405,6 +8425,8 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
     auto* p4l = new QVBoxLayout(p4);
     p4l->setSpacing(tt::space_sm);
     p4l->addWidget(make_step_header("Step 4 of 6 \xe2\x80\x94 Trigger & Ignition"));
+    make_guidance(p4l, "The trigger wheel tells the ECU where the engine is in its rotation. "
+                       "Most Speeduino builds use a 36-1 missing tooth wheel. Get this wrong and the engine won\xe2\x80\x99t start.");
     auto* teeth_edit = make_row(p4l, "Trigger Teeth:");
     teeth_edit->setText("36");
     auto* missing_edit = make_row(p4l, "Missing Teeth:");
@@ -8465,6 +8487,8 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
     auto* p5l = new QVBoxLayout(p5);
     p5l->setSpacing(tt::space_sm);
     p5l->addWidget(make_step_header("Step 5 of 6 \xe2\x80\x94 Sensors"));
+    make_guidance(p5l, "Sensors are the ECU\xe2\x80\x99s eyes. Wideband O2 is essential for tuning. "
+                       "MAP range must match your installed sensor. Thermistor presets handle the math.");
     auto* ego_combo = make_combo_row(p5l, "O2 Sensor Type:");
     ego_combo->addItem("Disabled");
     ego_combo->addItem("Narrowband");
@@ -8575,6 +8599,8 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
     auto* p6l = new QVBoxLayout(p6);
     p6l->setSpacing(tt::space_sm);
     p6l->addWidget(make_step_header("Step 6 of 6 \xe2\x80\x94 Review"));
+    make_guidance(p6l, "Review your settings below. When you click Finish, the wizard will "
+                       "generate starter VE, AFR, spark, warmup, and cranking tables for your engine.");
     auto* review_label = new QLabel;
     review_label->setTextFormat(Qt::RichText);
     review_label->setWordWrap(true);
@@ -9057,6 +9083,27 @@ QWidget* build_setup_tab(
                         }
                     }
                 }
+
+                // Post-wizard guidance — tell the operator what to do next.
+                // This is the "guided power" moment: the wizard did the hard
+                // work, now guide them through the first steps.
+                QMessageBox::information(container,
+                    QString::fromUtf8("Setup Complete"),
+                    QString::fromUtf8(
+                        "Your engine is configured and starter tables have been generated.\n\n"
+                        "Next steps:\n\n"
+                        "1. Switch to the TUNE tab (Alt+1) to review the generated tables\n"
+                        "2. Connect to your ECU (File \xe2\x86\x92 Connect to ECU)\n"
+                        "3. Write the tune to ECU RAM (Ctrl+W)\n"
+                        "4. Start the engine and verify idle\n"
+                        "5. Use the LOGGING tab to capture data while driving\n"
+                        "6. Use ASSIST \xe2\x86\x92 VE Analyze to refine the VE table\n\n"
+                        "The starter tune is conservative \xe2\x80\x94 expect to refine it "
+                        "through a few drive-and-analyze cycles."));
+
+                // Switch to TUNE tab so the operator can see their new tables.
+                if (auto* sb = container->window()->findChild<QListWidget*>())
+                    sb->setCurrentRow(0);
             }
         });
         layout->addWidget(wizard_btn);
@@ -11825,8 +11872,19 @@ public:
                 });
 
                 if (dlg->exec() == QDialog::Accepted) {
-                    // Reload to pick up the new project.
+                    // Reload to pick up the new project, then
+                    // immediately open the Engine Setup Wizard.
+                    // This is the "guided power" flow: create project
+                    // → wizard configures the engine → generates base
+                    // tune → operator lands on the TUNE tab ready to
+                    // refine. No confusion about what to do next.
                     reload_active_project();
+                    QTimer::singleShot(300, [this]() {
+                        // Switch to Setup tab and open wizard.
+                        if (auto* sb = this->findChild<QListWidget*>())
+                            sb->setCurrentRow(3);
+                        open_engine_setup_wizard(this);
+                    });
                 }
                 dlg->deleteLater();
             });
