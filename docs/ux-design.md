@@ -1,8 +1,8 @@
-# UX Design: Beyond TunerStudio
+# UX Design — Guided Power
 
 ## Design Philosophy
 
-TunerStudio is powerful but assumes expertise. Every surface shows raw parameter names, cryptic units, and walls of numbers. A first-time Speeduino user opens it and faces 50+ menu items with no guidance on what to change or in what order.
+Legacy tuning software is powerful but assumes expertise. Every surface shows raw parameter names, cryptic units, and walls of numbers. A first-time Speeduino user opens it and faces 50+ menu items with no guidance on what to change or in what order.
 
 Our opportunity: **guided power**. The same information TunerStudio shows, organized around what the operator is trying to accomplish — not around the firmware's internal page/offset structure. Power users still get direct access to everything; new users get context and guidance that disappears as they gain confidence.
 

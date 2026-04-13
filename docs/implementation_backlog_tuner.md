@@ -1,6 +1,9 @@
 # Tuner Backlog
 
-Scope note: this backlog remains focused on firmware/session/packaging hardening. Recent hardware-workflow, reqFuel, validation, and setup-wizard progress is tracked in `docs/tuning-roadmap.md`.
+> **Note:** This backlog originated during the Python phase. Code references
+> to Python classes are stale — the equivalent logic now lives in the C++ Qt
+> app (`cpp/app/main.cpp`) and `tuner_core` services. The conceptual items
+> remain valid. See `docs/tuning-roadmap.md` for the current roadmap.
 
 - [ ] TN-001 Session connect rollback
   Summary: Make failed connect attempts leave a clean disconnected state.

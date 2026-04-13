@@ -1,21 +1,19 @@
 # Architecture
 
+## Overview
+
+Native C++ Qt 6 desktop application built on the `tuner_core` static library.
+
 ## Layers
 
-- `domain`
-  Typed ECU, tune, session, sync, firmware, runtime, and setup models.
-- `parsers`
-  INI, MSQ, and project ingestion.
-- `transports`
-  Raw I/O behind a narrow interface: serial, TCP, UDP, mock.
-- `comms`
-  Protocol framing, CRC, controller clients, Speeduino raw protocol, XCP.
-- `services`
-  Business rules, orchestration, layout compilation, evidence/replay, flashing, setup helpers.
-- `plugins`
-  Python-native extension seam.
-- `ui`
-  PySide6 widgets and application shell.
+- `tuner_core` (static library, 173 source files)
+  INI/MSQ/native parsers, protocol codecs, table generators, analysis services,
+  dashboard layout, gauge zones, telemetry decoders. Pure logic, no Qt dependency.
+- `transports` (within tuner_core)
+  Serial (Win32 COM), TCP (Winsock2 with Speeduino framing), mock.
+- `app` (Qt 6 application)
+  Single-file Qt shell (`main.cpp`) assembling tuner_core services into a tabbed UI.
+  Theme tokens in `theme.hpp`.
 
 ## Dependency Rules
 
