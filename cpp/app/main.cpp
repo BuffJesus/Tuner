@@ -4549,10 +4549,20 @@ protected:
         constexpr double START = 225.0;
         constexpr double PI = 3.14159265358979323846;
 
-        // Background circle.
+        // Outer bezel ring — subtle metallic edge.
         p.setPen(Qt::NoPen);
-        p.setBrush(QColor(24, 27, 34));
-        p.drawEllipse(QPointF(cx, cy), r + track_w * 0.6, r + track_w * 0.6);
+        {
+            QRadialGradient bezel(cx, cy, r + track_w * 0.9);
+            bezel.setColorAt(0.85, QColor(34, 38, 48));
+            bezel.setColorAt(0.95, QColor(52, 56, 66));
+            bezel.setColorAt(1.0,  QColor(28, 32, 40));
+            p.setBrush(bezel);
+            p.drawEllipse(QPointF(cx, cy), r + track_w * 0.9, r + track_w * 0.9);
+        }
+
+        // Background circle.
+        p.setBrush(QColor(18, 21, 28));
+        p.drawEllipse(QPointF(cx, cy), r + track_w * 0.5, r + track_w * 0.5);
 
         // Background arc track.
         QRectF arc_rect(cx - r, cy - r, r * 2, r * 2);
@@ -4585,19 +4595,22 @@ protected:
             }
         }
 
-        // Major tick marks.
-        for (int i = 0; i <= 8; ++i) {
-            double frac = i / 8.0;
+        // Minor tick marks (40 subdivisions).
+        for (int i = 0; i <= 40; ++i) {
+            double frac = i / 40.0;
             double angle = (START - frac * SWEEP) * PI / 180.0;
             double outer = r - track_w * 0.5;
-            double inner = outer - r * 0.09;
-            p.setPen(QPen(QColor(90, 96, 110), std::max(1.0, side * 0.012)));
+            bool major = (i % 5 == 0);
+            double inner = major ? outer - r * 0.10 : outer - r * 0.05;
+            double pen_w = major ? std::max(1.5, side * 0.014) : std::max(0.8, side * 0.006);
+            QColor tick_color = major ? QColor(110, 116, 130) : QColor(60, 64, 72);
+            p.setPen(QPen(tick_color, pen_w));
             p.drawLine(
                 QPointF(cx + outer * std::cos(angle), cy - outer * std::sin(angle)),
                 QPointF(cx + inner * std::cos(angle), cy - inner * std::sin(angle)));
 
-            // Tick labels.
-            if (span > 0) {
+            // Tick labels on major marks only.
+            if (major && span > 0) {
                 double val = cfg_.min_value + frac * span;
                 char lbl[16];
                 if (val == static_cast<int>(val) && std::abs(val) < 100000)
@@ -4605,12 +4618,12 @@ protected:
                 else
                     std::snprintf(lbl, sizeof(lbl), "%.0f", val);
                 QFont tf;
-                tf.setPixelSize(std::max(7, static_cast<int>(side * 0.065)));
+                tf.setPixelSize(std::max(8, static_cast<int>(side * 0.07)));
                 p.setFont(tf);
-                p.setPen(QColor(90, 96, 110));
-                double label_r = inner - r * 0.08;
+                p.setPen(QColor(140, 146, 160));
+                double label_r = inner - r * 0.09;
                 QPointF lp(cx + label_r * std::cos(angle), cy - label_r * std::sin(angle));
-                p.drawText(QRectF(lp.x() - 20, lp.y() - 8, 40, 16),
+                p.drawText(QRectF(lp.x() - 22, lp.y() - 9, 44, 18),
                            Qt::AlignCenter, QString::fromUtf8(lbl));
             }
         }
@@ -4630,20 +4643,40 @@ protected:
                 }
             }
 
-            QPen np(nc);
-            np.setWidthF(std::max(1.5, side * 0.025));
-            np.setCapStyle(Qt::RoundCap);
-            p.setPen(np);
-            p.drawLine(QPointF(cx, cy),
-                       QPointF(cx + tip * std::cos(angle), cy - tip * std::sin(angle)));
-
-            // Hub.
-            double hub_r = r * 0.08;
+            // Tapered needle — triangle polygon for a premium look.
+            double needle_w = std::max(2.0, side * 0.025);
+            double perp = angle + PI / 2.0;
+            QPointF tip_pt(cx + tip * std::cos(angle), cy - tip * std::sin(angle));
+            QPointF base_l(cx + needle_w * std::cos(perp), cy - needle_w * std::sin(perp));
+            QPointF base_r(cx - needle_w * std::cos(perp), cy + needle_w * std::sin(perp));
+            // Needle shadow/glow.
+            {
+                QColor glow = nc;
+                glow.setAlpha(40);
+                p.setPen(Qt::NoPen);
+                p.setBrush(glow);
+                QPointF glow_pts[3] = {
+                    QPointF(tip_pt.x() + 1, tip_pt.y() + 1),
+                    QPointF(base_l.x() + 1, base_l.y() + 1),
+                    QPointF(base_r.x() + 1, base_r.y() + 1)
+                };
+                p.drawPolygon(glow_pts, 3);
+            }
+            // Needle body.
             p.setPen(Qt::NoPen);
-            p.setBrush(QColor(45, 48, 56));
-            p.drawEllipse(QPointF(cx, cy), hub_r, hub_r);
             p.setBrush(nc);
-            p.drawEllipse(QPointF(cx, cy), hub_r * 0.5, hub_r * 0.5);
+            QPointF needle_pts[3] = { tip_pt, base_l, base_r };
+            p.drawPolygon(needle_pts, 3);
+
+            // Hub — double ring with colored center.
+            double hub_r = r * 0.10;
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor(38, 42, 52));
+            p.drawEllipse(QPointF(cx, cy), hub_r, hub_r);
+            p.setBrush(QColor(52, 56, 66));
+            p.drawEllipse(QPointF(cx, cy), hub_r * 0.7, hub_r * 0.7);
+            p.setBrush(nc);
+            p.drawEllipse(QPointF(cx, cy), hub_r * 0.4, hub_r * 0.4);
         }
 
         // Value readout.
