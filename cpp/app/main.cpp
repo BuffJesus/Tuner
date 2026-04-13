@@ -155,6 +155,7 @@ namespace tt = tuner_theme;
 #include <QDateTime>
 #include <QDir>
 #include <QSettings>
+#include <QCheckBox>
 #include <QClipboard>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -6712,11 +6713,21 @@ struct WizardResult {
     int induction = 0;  // 0=NA, 1=single turbo, 2=twin turbo, 3=supercharged
     double boost_target_psi = 14.0;
     bool intercooler_present = false;
+    int turbo_type = 0;          // 0=journal, 1=ball bearing
+    double ar_ratio = 0.63;
+    double comp_trim = 56.0;
+    double turbine_trim = 76.0;
     // Step 3: Injectors
     double injector_flow = 440.0;
     double dead_time_ms = 0.5;
     double req_fuel_ms = 8.0;
     double stoich = 14.7;
+    int ae_mode = 0;             // 0=TPS-based, 1=MAP-based, 2=disabled
+    double ae_threshold = 10.0;  // TPS delta %
+    double ae_amount = 2.0;      // enrichment ms
+    int fuel_system = 0;         // 0=return, 1=returnless
+    double rail_pressure_kpa = 300.0;
+    int dead_time_comp = 0;      // 0=fixed, 1=voltage curve
     // Step 4: Trigger / Ignition
     int trigger_teeth = 36;
     int missing_teeth = 1;
@@ -7245,7 +7256,11 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
                       dwell_run_edit, dwell_crank_edit,
                       ego_combo, wb_combo,
                       map_min_edit, map_max_edit,
-                      clt_combo, iat_combo, board_combo]() {
+                      clt_combo, iat_combo, board_combo,
+                      turbo_type_combo, ar_edit, comp_trim_edit, turbine_trim_edit,
+                      ae_combo, ae_threshold_edit, ae_amount_edit,
+                      fuel_pressure_combo, rail_pressure_edit, comp_mode_combo,
+                      baro_combo]() {
         int idx = pages->currentIndex();
         if (idx < pages->count() - 1) {
             pages->setCurrentIndex(idx + 1);
@@ -7261,9 +7276,19 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
             result.induction = induction_combo->currentIndex();
             try { result.boost_target_psi = std::stod(boost_edit->text().toStdString()); } catch (...) {}
             result.intercooler_present = (intercooler_combo->currentIndex() == 1);
+            result.turbo_type = turbo_type_combo->currentIndex();
+            try { result.ar_ratio = std::stod(ar_edit->text().toStdString()); } catch (...) {}
+            try { result.comp_trim = std::stod(comp_trim_edit->text().toStdString()); } catch (...) {}
+            try { result.turbine_trim = std::stod(turbine_trim_edit->text().toStdString()); } catch (...) {}
             try { result.injector_flow = std::stod(inj_flow_edit->text().toStdString()); } catch (...) {}
             try { result.dead_time_ms = std::stod(dead_time_edit->text().toStdString()); } catch (...) {}
             try { result.stoich = std::stod(stoich_edit->text().toStdString()); } catch (...) {}
+            result.ae_mode = ae_combo->currentIndex();
+            try { result.ae_threshold = std::stod(ae_threshold_edit->text().toStdString()); } catch (...) {}
+            try { result.ae_amount = std::stod(ae_amount_edit->text().toStdString()); } catch (...) {}
+            result.fuel_system = fuel_pressure_combo->currentIndex();
+            try { result.rail_pressure_kpa = std::stod(rail_pressure_edit->text().toStdString()); } catch (...) {}
+            result.dead_time_comp = comp_mode_combo->currentIndex();
             try { result.trigger_teeth = std::stoi(teeth_edit->text().toStdString()); } catch (...) {}
             try { result.missing_teeth = std::stoi(missing_edit->text().toStdString()); } catch (...) {}
             result.spark_mode = spark_combo->currentIndex();
@@ -7416,6 +7441,16 @@ QWidget* build_setup_tab(
                 stage_s("egoType", wr.ego_type);
                 stage_s("mapMin", wr.map_min);
                 stage_s("mapMax", wr.map_max);
+                // Acceleration enrichment.
+                if (wr.ae_mode < 2) {
+                    stage_s("aeMode", wr.ae_mode);  // 0=TPS, 1=MAP
+                    stage_s("taeThresh", wr.ae_threshold);
+                    stage_s("taeAmount", wr.ae_amount);
+                }
+                // Fuel system — rail pressure for returnless compensation.
+                if (wr.fuel_system == 1) {
+                    stage_s("fuelPressure", wr.rail_pressure_kpa);
+                }
 
                 // ---- Generate starter tables ----
                 namespace vg = tuner_core::ve_table_generator;
@@ -9958,6 +9993,157 @@ public:
                     }
                 }
             }
+            // Definition Settings — toggle INI [SettingGroups] flags.
+            auto* def_settings_action = file_menu->addAction("Definition &Settings...");
+            QObject::connect(def_settings_action, &QAction::triggered,
+                             [this, shared_workspace, reload_active_project]() {
+                auto ini_path = find_production_ini();
+                if (ini_path.empty()) {
+                    QMessageBox::information(this, "No Definition",
+                        QString::fromUtf8("No INI definition loaded."));
+                    return;
+                }
+                tuner_core::NativeEcuDefinition def;
+                try { def = tuner_core::compile_ecu_definition_file(ini_path); }
+                catch (...) { return; }
+
+                if (def.setting_groups.groups.empty()) {
+                    QMessageBox::information(this, "No Settings",
+                        QString::fromUtf8("This definition has no configurable settings."));
+                    return;
+                }
+
+                // Load current active_settings from QSettings.
+                QSettings settings;
+                std::string saved = settings.value(
+                    "projects/current/activeSettings", "").toString().toStdString();
+                std::set<std::string> active;
+                {
+                    std::istringstream ss(saved);
+                    std::string tok;
+                    while (std::getline(ss, tok, ',')) {
+                        while (!tok.empty() && tok.front() == ' ') tok.erase(tok.begin());
+                        while (!tok.empty() && tok.back() == ' ') tok.pop_back();
+                        if (!tok.empty()) active.insert(tok);
+                    }
+                }
+
+                // Build dialog with checkboxes / radio groups.
+                auto* dlg = new QDialog(this);
+                dlg->setWindowTitle("Definition Settings");
+                dlg->setMinimumWidth(400);
+                {
+                    char ds[128];
+                    std::snprintf(ds, sizeof(ds),
+                        "QDialog { background: %s; }", tt::bg_base);
+                    dlg->setStyleSheet(QString::fromUtf8(ds));
+                }
+                auto* dl = new QVBoxLayout(dlg);
+                dl->setContentsMargins(tt::space_lg, tt::space_lg, tt::space_lg, tt::space_lg);
+                dl->setSpacing(tt::space_md);
+
+                struct SettingBinding {
+                    std::string group_symbol;
+                    std::vector<std::string> option_symbols;
+                    QComboBox* combo = nullptr;     // multi-option
+                    QCheckBox* check = nullptr;     // boolean flag
+                };
+                std::vector<SettingBinding> bindings;
+
+                for (const auto& grp : def.setting_groups.groups) {
+                    if (grp.options.empty()) {
+                        // Boolean flag.
+                        auto* cb = new QCheckBox(QString::fromUtf8(grp.label.c_str()));
+                        cb->setChecked(active.count(grp.symbol) > 0);
+                        {
+                            char s[128];
+                            std::snprintf(s, sizeof(s),
+                                "QCheckBox { color: %s; font-size: %dpx; }",
+                                tt::text_primary, tt::font_body);
+                            cb->setStyleSheet(QString::fromUtf8(s));
+                        }
+                        dl->addWidget(cb);
+                        SettingBinding sb;
+                        sb.group_symbol = grp.symbol;
+                        sb.check = cb;
+                        bindings.push_back(std::move(sb));
+                    } else {
+                        // Multi-option group.
+                        auto* label = new QLabel(QString::fromUtf8(grp.label.c_str()));
+                        {
+                            char s[128];
+                            std::snprintf(s, sizeof(s),
+                                "QLabel { color: %s; font-size: %dpx; font-weight: bold; }",
+                                tt::text_secondary, tt::font_body);
+                            label->setStyleSheet(QString::fromUtf8(s));
+                        }
+                        dl->addWidget(label);
+                        auto* combo = new QComboBox;
+                        int current_idx = 0;
+                        SettingBinding sb;
+                        sb.group_symbol = grp.symbol;
+                        for (int i = 0; i < static_cast<int>(grp.options.size()); ++i) {
+                            const auto& opt = grp.options[i];
+                            combo->addItem(QString::fromUtf8(opt.label.c_str()));
+                            sb.option_symbols.push_back(opt.symbol);
+                            if (active.count(opt.symbol) > 0) current_idx = i;
+                        }
+                        combo->setCurrentIndex(current_idx);
+                        {
+                            char s[256];
+                            std::snprintf(s, sizeof(s),
+                                "QComboBox { background: %s; color: %s; border: 1px solid %s; "
+                                "border-radius: %dpx; padding: 4px 8px; font-size: %dpx; }",
+                                tt::bg_elevated, tt::text_primary, tt::border,
+                                tt::radius_sm, tt::font_body);
+                            combo->setStyleSheet(QString::fromUtf8(s));
+                        }
+                        dl->addWidget(combo);
+                        sb.combo = combo;
+                        bindings.push_back(std::move(sb));
+                    }
+                }
+
+                // OK / Cancel.
+                auto* btn_row = new QHBoxLayout;
+                btn_row->addStretch(1);
+                auto* ok_btn = new QPushButton("OK");
+                auto* cancel_btn = new QPushButton("Cancel");
+                btn_row->addWidget(ok_btn);
+                btn_row->addWidget(cancel_btn);
+                dl->addLayout(btn_row);
+
+                QObject::connect(cancel_btn, &QPushButton::clicked, dlg, &QDialog::reject);
+                QObject::connect(ok_btn, &QPushButton::clicked,
+                                 [dlg, bindings]() {
+                    // Collect new active_settings.
+                    std::set<std::string> new_active;
+                    for (const auto& b : bindings) {
+                        if (b.check) {
+                            if (b.check->isChecked())
+                                new_active.insert(b.group_symbol);
+                        } else if (b.combo && !b.option_symbols.empty()) {
+                            int idx = b.combo->currentIndex();
+                            if (idx >= 0 && idx < static_cast<int>(b.option_symbols.size()))
+                                new_active.insert(b.option_symbols[idx]);
+                        }
+                    }
+                    // Save to QSettings.
+                    std::string joined;
+                    for (const auto& s : new_active) {
+                        if (!joined.empty()) joined += ",";
+                        joined += s;
+                    }
+                    QSettings settings;
+                    settings.setValue("projects/current/activeSettings",
+                        QString::fromUtf8(joined.c_str()));
+                    dlg->accept();
+                });
+
+                dlg->exec();
+                dlg->deleteLater();
+            });
+
             file_menu->addSeparator();
 
             // Connect / Disconnect ECU actions.
