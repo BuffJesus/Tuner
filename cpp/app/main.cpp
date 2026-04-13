@@ -1479,6 +1479,128 @@ bool open_connect_dialog(QWidget* parent,
     tcp_port_row->addWidget(tcp_port_edit, 1);
     tcp_layout->addLayout(tcp_port_row);
 
+    // EcuHub UDP discovery — scan for devices on port 21846.
+    auto* scan_row = new QHBoxLayout;
+    auto* scan_btn = new QPushButton(QString::fromUtf8("Scan Network"));
+    scan_btn->setCursor(Qt::PointingHandCursor);
+    auto* scan_status = new QLabel;
+    {
+        char ss[128];
+        std::snprintf(ss, sizeof(ss),
+            "QLabel { color: %s; font-size: %dpx; }",
+            tt::text_muted, tt::font_small);
+        scan_status->setStyleSheet(QString::fromUtf8(ss));
+    }
+    scan_row->addWidget(scan_btn);
+    scan_row->addWidget(scan_status, 1);
+    tcp_layout->addLayout(scan_row);
+
+    QObject::connect(scan_btn, &QPushButton::clicked,
+                     [host_edit, tcp_port_edit, scan_status, scan_btn]() {
+        scan_status->setText(QString::fromUtf8("Scanning..."));
+        scan_btn->setEnabled(false);
+        QApplication::processEvents();
+
+#ifdef _WIN32
+        // Broadcast DISCOVER_SLAVE_SERVER on UDP port 21846.
+        SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (sock == INVALID_SOCKET) {
+            scan_status->setText(QString::fromUtf8("Socket error"));
+            scan_btn->setEnabled(true);
+            return;
+        }
+
+        // Enable broadcast.
+        int bcast = 1;
+        setsockopt(sock, SOL_SOCKET, SO_BROADCAST,
+                   reinterpret_cast<const char*>(&bcast), sizeof(bcast));
+
+        // Set receive timeout to 2 seconds.
+        DWORD timeout_ms = 2000;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+                   reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
+
+        // Bind to any port.
+        sockaddr_in local{};
+        local.sin_family = AF_INET;
+        local.sin_port = 0;
+        local.sin_addr.s_addr = htonl(INADDR_ANY);
+        bind(sock, reinterpret_cast<sockaddr*>(&local), sizeof(local));
+
+        // Send discovery message.
+        const char* msg = "DISCOVER_SLAVE_SERVER";
+        sockaddr_in dest{};
+        dest.sin_family = AF_INET;
+        dest.sin_port = htons(21846);
+        dest.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+        sendto(sock, msg, static_cast<int>(std::strlen(msg)), 0,
+               reinterpret_cast<sockaddr*>(&dest), sizeof(dest));
+
+        // Collect responses (2-second window).
+        struct DiscoveredDevice {
+            std::string name;
+            std::string ip;
+            int port = 2000;
+        };
+        std::vector<DiscoveredDevice> devices;
+
+        char buf[2048];
+        sockaddr_in from{};
+        int from_len = sizeof(from);
+        while (true) {
+            int n = recvfrom(sock, buf, sizeof(buf) - 1, 0,
+                             reinterpret_cast<sockaddr*>(&from), &from_len);
+            if (n <= 0) break;
+            buf[n] = '\0';
+
+            // Parse response — key:value lines.
+            DiscoveredDevice dev;
+            char ip_buf[64];
+            inet_ntop(AF_INET, &from.sin_addr, ip_buf, sizeof(ip_buf));
+            dev.ip = ip_buf;
+
+            std::istringstream stream(buf);
+            std::string line;
+            while (std::getline(stream, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                auto colon = line.find(':');
+                if (colon == std::string::npos) continue;
+                std::string key = line.substr(0, colon);
+                std::string val = line.substr(colon + 1);
+                while (!val.empty() && val.front() == ' ') val.erase(val.begin());
+                if (key == "name" || key == "slave") dev.name = val;
+                if (key == "port") {
+                    try { dev.port = std::stoi(val); } catch (...) {}
+                }
+            }
+            if (dev.name.empty()) dev.name = dev.ip;
+            devices.push_back(std::move(dev));
+        }
+        closesocket(sock);
+
+        if (devices.empty()) {
+            scan_status->setText(QString::fromUtf8(
+                "No devices found \xe2\x80\x94 check WiFi connection"));
+        } else {
+            // Use first device.
+            host_edit->setText(QString::fromUtf8(devices[0].ip.c_str()));
+            char port_buf[16];
+            std::snprintf(port_buf, sizeof(port_buf), "%d", devices[0].port);
+            tcp_port_edit->setText(QString::fromUtf8(port_buf));
+
+            char found[128];
+            std::snprintf(found, sizeof(found),
+                "\xe2\x9c\x85 Found: %s (%s:%d)",
+                devices[0].name.c_str(), devices[0].ip.c_str(),
+                devices[0].port);
+            scan_status->setText(QString::fromUtf8(found));
+        }
+#else
+        scan_status->setText(QString::fromUtf8("UDP discovery not available on this platform"));
+#endif
+        scan_btn->setEnabled(true);
+    });
+
     layout->addWidget(tcp_group);
     tcp_group->hide();  // Serial is default.
 
@@ -4718,10 +4840,108 @@ QWidget* make_info_card(const char* heading, const char* body,
 
 using NavigateCallback = std::function<void(int page_index, const std::string& hint)>;
 
+// Dashboard JSON serialization — hand-rolled for the known flat schema.
+std::string dashboard_layout_to_json(const tuner_core::dashboard_layout::Layout& layout) {
+    namespace dln = tuner_core::dashboard_layout;
+    std::string json = "{\"name\":\"";
+    json += layout.name;
+    json += "\",\"widgets\":[";
+    for (size_t i = 0; i < layout.widgets.size(); ++i) {
+        if (i > 0) json += ",";
+        const auto& w = layout.widgets[i];
+        char buf[512];
+        std::snprintf(buf, sizeof(buf),
+            "{\"widget_id\":\"%s\",\"kind\":\"%s\",\"title\":\"%s\","
+            "\"source\":\"%s\",\"units\":\"%s\","
+            "\"x\":%.0f,\"y\":%.0f,\"width\":%.0f,\"height\":%.0f,"
+            "\"min_value\":%.6g,\"max_value\":%.6g,\"color_zones\":[",
+            w.widget_id.c_str(), w.kind.c_str(), w.title.c_str(),
+            w.source.c_str(), w.units.c_str(),
+            w.x, w.y, w.width, w.height,
+            w.min_value, w.max_value);
+        json += buf;
+        for (size_t z = 0; z < w.color_zones.size(); ++z) {
+            if (z > 0) json += ",";
+            char zb[64];
+            std::snprintf(zb, sizeof(zb),
+                "{\"lo\":%.6g,\"hi\":%.6g,\"color\":\"%s\"}",
+                w.color_zones[z].lo, w.color_zones[z].hi,
+                w.color_zones[z].color.c_str());
+            json += zb;
+        }
+        json += "]}";
+    }
+    json += "]}";
+    return json;
+}
+
+tuner_core::dashboard_layout::Layout dashboard_layout_from_json(const std::string& text) {
+    namespace dln = tuner_core::dashboard_layout;
+    dln::Layout layout;
+    // Extract name.
+    auto name_pos = text.find("\"name\":\"");
+    if (name_pos != std::string::npos) {
+        auto start = name_pos + 8;
+        auto end = text.find('"', start);
+        if (end != std::string::npos) layout.name = text.substr(start, end - start);
+    }
+    // Extract widgets array.
+    auto widgets_pos = text.find("\"widgets\":[");
+    if (widgets_pos == std::string::npos) return layout;
+
+    // Helper to extract a string field value.
+    auto extract_str = [](const std::string& obj, const std::string& key) -> std::string {
+        auto pos = obj.find("\"" + key + "\":\"");
+        if (pos == std::string::npos) return {};
+        auto start = pos + key.size() + 4;
+        auto end = obj.find('"', start);
+        return (end != std::string::npos) ? obj.substr(start, end - start) : std::string{};
+    };
+    auto extract_num = [](const std::string& obj, const std::string& key, double def = 0.0) -> double {
+        auto pos = obj.find("\"" + key + "\":");
+        if (pos == std::string::npos) return def;
+        auto start = pos + key.size() + 3;
+        try { return std::stod(obj.substr(start)); } catch (...) { return def; }
+    };
+
+    // Walk widget objects by finding matching braces.
+    size_t pos = widgets_pos + 11;
+    while (pos < text.size()) {
+        auto obj_start = text.find('{', pos);
+        if (obj_start == std::string::npos) break;
+        // Find matching close brace (skip nested zone objects).
+        int depth = 0;
+        size_t obj_end = obj_start;
+        for (size_t i = obj_start; i < text.size(); ++i) {
+            if (text[i] == '{') depth++;
+            if (text[i] == '}') { depth--; if (depth == 0) { obj_end = i; break; } }
+        }
+        std::string obj = text.substr(obj_start, obj_end - obj_start + 1);
+
+        dln::Widget w;
+        w.widget_id = extract_str(obj, "widget_id");
+        w.kind = extract_str(obj, "kind");
+        w.title = extract_str(obj, "title");
+        w.source = extract_str(obj, "source");
+        w.units = extract_str(obj, "units");
+        w.x = extract_num(obj, "x");
+        w.y = extract_num(obj, "y");
+        w.width = extract_num(obj, "width", 1);
+        w.height = extract_num(obj, "height", 1);
+        w.min_value = extract_num(obj, "min_value");
+        w.max_value = extract_num(obj, "max_value", 100);
+        if (!w.widget_id.empty()) layout.widgets.push_back(std::move(w));
+        pos = obj_end + 1;
+    }
+    return layout;
+}
+
 QWidget* build_live_tab(
     std::shared_ptr<EcuConnection> ecu_conn = nullptr,
     NavigateCallback on_navigate = nullptr,
-    std::shared_ptr<LiveDataHttpServer> http_server = nullptr) {
+    std::shared_ptr<LiveDataHttpServer> http_server = nullptr,
+    std::shared_ptr<tuner_core::dashboard_layout::Layout> shared_dash_out = nullptr,
+    std::shared_ptr<std::function<void()>> rebuild_dashboard_out = nullptr) {
     auto* scroll = new QScrollArea;
     scroll->setWidgetResizable(true);
     scroll->setStyleSheet("QScrollArea { border: none; }");
@@ -4998,8 +5218,7 @@ QWidget* build_live_tab(
         }
     }
     if (dash.widgets.empty()) dash = dln::default_layout();
-    auto* dash_grid = new QGridLayout;
-    dash_grid->setSpacing(4);
+    auto shared_dash = std::make_shared<dln::Layout>(std::move(dash));
 
     // Shared state for the timer callback.
     struct GaugeBinding {
@@ -5015,53 +5234,219 @@ QWidget* build_live_tab(
     auto bindings = std::make_shared<std::vector<GaugeBinding>>();
     auto mock_ecu = std::make_shared<mer::MockEcu>(42);
 
-    for (const auto& w : dash.widgets) {
-        int gx = static_cast<int>(w.x);
-        int gy = static_cast<int>(w.y);
-        int gw = static_cast<int>(w.width);
-        int gh = static_cast<int>(w.height);
-
-        GaugeBinding binding;
-        binding.source = w.source;
-        binding.title = w.title;
-        binding.units = w.units;
-        binding.zones = w.color_zones;
-        binding.font_size = (gh > 1) ? 28 : 18;
-
-        if (w.kind == "dial") {
-            DialGaugeWidget::Config cfg;
-            cfg.title = w.title; cfg.units = w.units;
-            cfg.min_value = w.min_value; cfg.max_value = w.max_value;
-            for (const auto& z : w.color_zones)
-                cfg.zones.push_back({z.lo, z.hi, z.color});
-            auto* gauge = new DialGaugeWidget(cfg);
-            if (on_navigate) {
-                gauge->set_click_callback([on_navigate](const std::string& title) {
-                    // Navigate to TUNE page (index 0) with the gauge title as hint.
-                    on_navigate(0, title);
-                });
-            }
-            dash_grid->addWidget(gauge, gy, gx, gh, gw);
-            binding.dial = gauge;
-        } else {
-            auto* cell = new QLabel;
-            cell->setTextFormat(Qt::RichText);
-            cell->setAlignment(Qt::AlignCenter);
-            cell->setMinimumHeight(gh > 1 ? 100 : 50);
-            // Initial placeholder styling — `accent_primary` (blue)
-            // until the first timer tick reassigns a zone-based
-            // accent. See `number_card_style` in theme.hpp for the
-            // full rationale.
-            cell->setStyleSheet(QString::fromUtf8(
-                tt::number_card_style(tt::accent_primary).c_str()));
-            dash_grid->addWidget(cell, gy, gx, gh, gw);
-            binding.card = cell;
-        }
-        bindings->push_back(std::move(binding));
-    }
+    auto* dash_grid = new QGridLayout;
+    dash_grid->setSpacing(4);
     auto* dash_container = new QWidget;
     dash_container->setLayout(dash_grid);
+
+    // Rebuild dashboard gauges from shared_dash layout. Called on
+    // initial build and after config/save-load/drag-drop changes.
+    auto rebuild_dashboard = std::make_shared<std::function<void()>>();
+    *rebuild_dashboard = [dash_grid, bindings, shared_dash, on_navigate]() {
+        // Clear existing gauges.
+        bindings->clear();
+        while (auto* item = dash_grid->takeAt(0)) {
+            if (item->widget()) item->widget()->hide();
+            // deleteLater is safe; hide prevents visual glitch.
+            if (item->widget()) item->widget()->deleteLater();
+            delete item;
+        }
+        // Rebuild from layout.
+        for (const auto& w : shared_dash->widgets) {
+            int gx = static_cast<int>(w.x);
+            int gy = static_cast<int>(w.y);
+            int gw = static_cast<int>(w.width);
+            int gh = static_cast<int>(w.height);
+
+            GaugeBinding binding;
+            binding.source = w.source;
+            binding.title = w.title;
+            binding.units = w.units;
+            binding.zones = w.color_zones;
+            binding.font_size = (gh > 1) ? 28 : 18;
+
+            if (w.kind == "dial") {
+                DialGaugeWidget::Config cfg;
+                cfg.title = w.title; cfg.units = w.units;
+                cfg.min_value = w.min_value; cfg.max_value = w.max_value;
+                for (const auto& z : w.color_zones)
+                    cfg.zones.push_back({z.lo, z.hi, z.color});
+                auto* gauge = new DialGaugeWidget(cfg);
+                if (on_navigate) {
+                    gauge->set_click_callback([on_navigate](const std::string& title) {
+                        on_navigate(0, title);
+                    });
+                }
+                dash_grid->addWidget(gauge, gy, gx, gh, gw);
+                binding.dial = gauge;
+            } else {
+                auto* cell = new QLabel;
+                cell->setTextFormat(Qt::RichText);
+                cell->setAlignment(Qt::AlignCenter);
+                cell->setMinimumHeight(gh > 1 ? 100 : 50);
+                cell->setStyleSheet(QString::fromUtf8(
+                    tt::number_card_style(tt::accent_primary).c_str()));
+                dash_grid->addWidget(cell, gy, gx, gh, gw);
+                binding.card = cell;
+            }
+            bindings->push_back(std::move(binding));
+        }
+    };
+
+    // Initial build.
+    (*rebuild_dashboard)();
     layout->addWidget(dash_container);
+
+    // Fullscreen dashboard — frameless, stays-on-top window with
+    // larger fonts. Escape or double-click to close. F11 shortcut.
+    auto fs_dialog = std::make_shared<QPointer<QDialog>>();
+    auto open_fullscreen = [container, shared_dash, bindings, mock_ecu,
+                            ecu_conn, fs_dialog]() {
+        if (!fs_dialog->isNull()) return;  // already open
+
+        auto* dlg = new QDialog(nullptr);  // no parent = independent window
+        dlg->setWindowFlags(Qt::Window | Qt::FramelessWindowHint
+                            | Qt::WindowStaysOnTopHint);
+        dlg->showFullScreen();
+        {
+            char s[64];
+            std::snprintf(s, sizeof(s), "QDialog { background: %s; }", tt::bg_deep);
+            dlg->setStyleSheet(QString::fromUtf8(s));
+        }
+        auto* dl = new QVBoxLayout(dlg);
+        dl->setContentsMargins(tt::space_xl, tt::space_xl, tt::space_xl, tt::space_xl);
+        dl->setSpacing(4);
+
+        auto* grid = new QGridLayout;
+        grid->setSpacing(6);
+
+        // Build gauge widgets at 1.5x font scale.
+        auto fs_bindings = std::make_shared<std::vector<GaugeBinding>>();
+        for (const auto& w : shared_dash->widgets) {
+            int gx = static_cast<int>(w.x);
+            int gy = static_cast<int>(w.y);
+            int gw = static_cast<int>(w.width);
+            int gh = static_cast<int>(w.height);
+
+            GaugeBinding binding;
+            binding.source = w.source;
+            binding.title = w.title;
+            binding.units = w.units;
+            binding.zones = w.color_zones;
+            binding.font_size = (gh > 1) ? 42 : 24;  // 1.5x scale
+
+            if (w.kind == "dial") {
+                DialGaugeWidget::Config cfg;
+                cfg.title = w.title; cfg.units = w.units;
+                cfg.min_value = w.min_value; cfg.max_value = w.max_value;
+                for (const auto& z : w.color_zones)
+                    cfg.zones.push_back({z.lo, z.hi, z.color});
+                auto* gauge = new DialGaugeWidget(cfg);
+                gauge->setMinimumSize(200, 200);
+                grid->addWidget(gauge, gy, gx, gh, gw);
+                binding.dial = gauge;
+            } else {
+                auto* cell = new QLabel;
+                cell->setTextFormat(Qt::RichText);
+                cell->setAlignment(Qt::AlignCenter);
+                cell->setMinimumHeight(gh > 1 ? 150 : 80);
+                cell->setStyleSheet(QString::fromUtf8(
+                    tt::number_card_style(tt::accent_primary).c_str()));
+                grid->addWidget(cell, gy, gx, gh, gw);
+                binding.card = cell;
+            }
+            fs_bindings->push_back(std::move(binding));
+        }
+        dl->addLayout(grid);
+
+        // Hint label.
+        auto* hint = new QLabel(QString::fromUtf8(
+            "Press Escape or double-click to exit fullscreen"));
+        {
+            char s[128];
+            std::snprintf(s, sizeof(s),
+                "QLabel { color: %s; font-size: %dpx; }",
+                tt::text_dim, tt::font_small);
+            hint->setStyleSheet(QString::fromUtf8(s));
+        }
+        hint->setAlignment(Qt::AlignCenter);
+        dl->addWidget(hint);
+
+        *fs_dialog = dlg;
+
+        // Update timer — piggyback on the same 200ms tick via a
+        // dedicated timer in the fullscreen dialog.
+        auto* fs_timer = new QTimer(dlg);
+        QObject::connect(fs_timer, &QTimer::timeout,
+                         [fs_bindings, mock_ecu, ecu_conn]() {
+            auto snap = mock_ecu->poll();
+            if (ecu_conn && ecu_conn->connected) {
+                for (const auto& [name, val] : ecu_conn->runtime)
+                    snap.channels[name] = val;
+            }
+            for (auto& b : *fs_bindings) {
+                double v = snap.get(b.source);
+                if (b.dial) {
+                    b.dial->set_value(v);
+                } else if (b.card) {
+                    // Simplified number card update.
+                    char html[256];
+                    std::snprintf(html, sizeof(html),
+                        "<div style='text-align:center;'>"
+                        "<span style='font-size: %dpx; font-weight: bold; "
+                        "color: %s;'>%.1f</span><br>"
+                        "<span style='font-size: %dpx; color: %s;'>%s %s</span>"
+                        "</div>",
+                        b.font_size, tt::text_primary, v,
+                        tt::font_body, tt::text_muted,
+                        b.title.c_str(), b.units.c_str());
+                    b.card->setText(QString::fromUtf8(html));
+                }
+            }
+        });
+        fs_timer->start(200);
+
+        // Close on Escape.
+        auto* esc = new QShortcut(QKeySequence(Qt::Key_Escape), dlg);
+        QObject::connect(esc, &QShortcut::activated, dlg, &QDialog::close);
+
+        dlg->show();
+    };
+
+    // F11 shortcut.
+    auto* fs_shortcut = new QShortcut(QKeySequence(Qt::Key_F11), container);
+    QObject::connect(fs_shortcut, &QShortcut::activated, open_fullscreen);
+
+    // Fullscreen button.
+    auto* fs_btn = new QPushButton(QString::fromUtf8("Fullscreen (F11)"));
+    fs_btn->setCursor(Qt::PointingHandCursor);
+    {
+        char bs[256];
+        std::snprintf(bs, sizeof(bs),
+            "QPushButton { background: %s; color: %s; border: 1px solid %s; "
+            "border-radius: %dpx; padding: 4px 12px; font-size: %dpx; }"
+            "QPushButton:hover { background: %s; }",
+            tt::bg_elevated, tt::text_primary, tt::border,
+            tt::radius_sm, tt::font_small, tt::fill_primary_mid);
+        fs_btn->setStyleSheet(QString::fromUtf8(bs));
+    }
+    QObject::connect(fs_btn, &QPushButton::clicked, open_fullscreen);
+    layout->addWidget(fs_btn);
+
+    // Export shared state for File menu save/load integration.
+    if (shared_dash_out) {
+        // Copy the layout data into the caller's shared_ptr.
+        *shared_dash_out = *shared_dash;
+    }
+    if (rebuild_dashboard_out) {
+        // Wire the rebuild function so the caller can trigger rebuilds.
+        *rebuild_dashboard_out = [shared_dash, rebuild_dashboard,
+                                  shared_dash_out]() {
+            // Sync from the caller's copy back to our local copy and rebuild.
+            if (shared_dash_out) *shared_dash = *shared_dash_out;
+            (*rebuild_dashboard)();
+        };
+    }
 
     // Timer: update all gauges every 200ms. When a real ECU
     // connection is active, poll it for runtime data; otherwise
@@ -9345,6 +9730,8 @@ public:
         // visibility one glance away.
         auto shared_workspace = std::make_shared<tuner_core::workspace_state::Workspace>();
         auto ecu_conn = std::make_shared<EcuConnection>();
+        auto shared_dash = std::make_shared<tuner_core::dashboard_layout::Layout>();
+        auto rebuild_dashboard = std::make_shared<std::function<void()>>();
 
         // HTTP Live-Data API — serves channel data to browser dashboards.
         auto http_server = std::make_shared<LiveDataHttpServer>();
@@ -9467,7 +9854,8 @@ public:
         }
         std::printf("[ctor] tune ok\n"); std::fflush(stdout);
         debug_log("TunerMainWindow tune tab built");
-        stack->addWidget(build_live_tab(ecu_conn, navigate, http_server));
+        stack->addWidget(build_live_tab(ecu_conn, navigate, http_server,
+            shared_dash, rebuild_dashboard));
         std::printf("[ctor] live ok\n"); std::fflush(stdout);
         stack->addWidget(build_flash_tab(ecu_conn));
         std::printf("[ctor] flash ok\n"); std::fflush(stdout);
@@ -10205,6 +10593,54 @@ public:
                 }
             }
             // Definition Settings — toggle INI [SettingGroups] flags.
+            // Dashboard save/load.
+            auto* save_dash_action = file_menu->addAction("Save &Dashboard...");
+            QObject::connect(save_dash_action, &QAction::triggered,
+                             [this, shared_dash]() {
+                if (!shared_dash || shared_dash->widgets.empty()) return;
+                QSettings settings;
+                QString last_dir = settings.value("dashboard/lastDir",
+                    QDir::homePath()).toString();
+                auto path = QFileDialog::getSaveFileName(this,
+                    QString::fromUtf8("Save Dashboard Layout"),
+                    last_dir,
+                    QString::fromUtf8("Dashboard (*.json)"));
+                if (path.isEmpty()) return;
+                auto json = dashboard_layout_to_json(*shared_dash);
+                std::ofstream out(path.toStdString(), std::ios::out | std::ios::binary);
+                if (out) {
+                    out.write(json.data(), static_cast<std::streamsize>(json.size()));
+                    out.close();
+                    settings.setValue("dashboard/lastDir",
+                        QFileInfo(path).absolutePath());
+                }
+            });
+
+            auto* load_dash_action = file_menu->addAction("&Load Dashboard...");
+            QObject::connect(load_dash_action, &QAction::triggered,
+                             [this, shared_dash, rebuild_dashboard]() {
+                QSettings settings;
+                QString last_dir = settings.value("dashboard/lastDir",
+                    QDir::homePath()).toString();
+                auto path = QFileDialog::getOpenFileName(this,
+                    QString::fromUtf8("Load Dashboard Layout"),
+                    last_dir,
+                    QString::fromUtf8("Dashboard (*.json);;All Files (*)"));
+                if (path.isEmpty()) return;
+                std::ifstream in(path.toStdString(), std::ios::in | std::ios::binary);
+                if (!in) return;
+                std::string text((std::istreambuf_iterator<char>(in)),
+                                 std::istreambuf_iterator<char>());
+                in.close();
+                auto loaded = dashboard_layout_from_json(text);
+                if (loaded.widgets.empty()) return;
+                *shared_dash = std::move(loaded);
+                (*rebuild_dashboard)();
+                settings.setValue("dashboard/lastDir",
+                    QFileInfo(path).absolutePath());
+            });
+
+            file_menu->addSeparator();
             auto* def_settings_action = file_menu->addAction("Definition &Settings...");
             QObject::connect(def_settings_action, &QAction::triggered,
                              [this, shared_workspace, reload_active_project]() {
