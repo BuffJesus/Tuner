@@ -469,6 +469,28 @@ std::optional<T> json_to_opt(const json& j, const char* key) {
 
 }  // anon
 
+// Humanize a camelCase firmware identifier to a readable label.
+// "aseTaperTime" → "ASE Taper Time", "wueRates" → "WUE Rates"
+static std::string humanize_name(const std::string& raw) {
+    std::string result;
+    for (std::size_t i = 0; i < raw.size(); ++i) {
+        char c = raw[i];
+        if (c == '_') { result += ' '; continue; }
+        if (i > 0) {
+            bool prev_lower = std::islower(static_cast<unsigned char>(raw[i-1]));
+            bool curr_upper = std::isupper(static_cast<unsigned char>(c));
+            bool prev_alpha = std::isalpha(static_cast<unsigned char>(raw[i-1]));
+            bool curr_digit = std::isdigit(static_cast<unsigned char>(c));
+            if ((prev_lower && curr_upper) || (prev_alpha && curr_digit))
+                result += ' ';
+        }
+        result += c;
+    }
+    if (!result.empty())
+        result[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(result[0])));
+    return result;
+}
+
 std::string dump_definition_v2(const NativeEcuDefinition& def, int indent) {
     json doc;
     doc["schema_version"] = "2.0";

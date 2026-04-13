@@ -419,7 +419,7 @@ struct EcuConnection {
 // LiveDataHttpServer — background HTTP server for external dashboard
 // consumers. Serves live ECU channel data as JSON on port 8080 so
 // browser-based dashboards (Airbear web UI, phones, tablets, Raspberry
-// Pi) can display gauges without TunerStudio. Three endpoints:
+// Pi) can display gauges on the local network. Three endpoints:
 //   GET /api/channels       — all channel name:value pairs
 //   GET /api/channels/{name} — single channel with units
 //   GET /api/status         — connection state + signature
@@ -2042,7 +2042,7 @@ QWidget* build_tune_tab(
         // Original cell styles — saved before selection highlight so we
         // can restore them when selection changes.
         std::vector<std::vector<std::string>> base_styles;
-        // Increment step for +/- keys (matches TunerStudio default).
+        // Increment step for +/- keys.
         double increment = 1.0;
         // Drag selection state.
         bool dragging = false;
@@ -2119,7 +2119,7 @@ QWidget* build_tune_tab(
     auto ecu_def = std::make_shared<tuner_core::NativeEcuDefinition>();
     // Load tune values — prefer native .tuner format, fall back to .msq.
     // The .tuner format is human-readable JSON with trimmed precision and
-    // compact table rows; the .msq format is legacy TunerStudio XML.
+    // compact table rows; the .msq format is legacy XML.
     // Both feed the same EditService downstream.
     namespace lte = tuner_core::local_tune_edit;
     auto tune_file = std::make_shared<lte::TuneFile>();
@@ -5500,7 +5500,7 @@ QWidget* build_live_tab(
 
     // ---- FrontPage indicator strip ----
     // Boolean indicator chips from INI [FrontPage] section. Evaluated
-    // against live runtime data on each 200ms tick. Mirrors TunerStudio's
+    // against live runtime data on each 200ms tick. Mirrors the legacy
     // status indicator row (running, sync, error, flood, etc.).
     struct IndicatorBinding {
         std::string expression;
@@ -5516,7 +5516,7 @@ QWidget* build_live_tab(
 
     // Map INI color names → theme hex values.
     // Map INI color names to dark-theme-appropriate values.
-    // The INI uses TunerStudio's light-theme palette (white bg + black text
+    // The INI uses the legacy light-theme palette (white bg + black text
     // for off-state, colored bg for on-state). We remap "white" bg to the
     // dark theme's inset panel color so off-state chips blend into the
     // chrome instead of glowing like headlights.
@@ -10388,8 +10388,8 @@ QWidget* build_history_tab() {
 
     auto* list = new QListWidget;
     static const char* services[] = {
-        "01. visibility_expression - TunerStudio INI {expr} evaluator",
-        "02. required_fuel_calculator - TunerStudio reqFuel formula",
+        "01. visibility_expression - INI {expr} evaluator",
+        "02. required_fuel_calculator - reqFuel formula",
         "03. table_edit - fill / fill_down / interpolate / smooth / paste",
         "04. sample_gate_helpers - channel resolver + lambda/AFR + apply_operator",
         "05. autotune_filter_gate_evaluator - std_DeadLambda / axis bounds / parametric",
@@ -10462,7 +10462,7 @@ QWidget* build_history_tab() {
         "72. ve_analyze_accumulator - VE stateful accumulator with RPM/MAP cell mapping",
         "73. tuning_page_builder - compiles definition into grouped page model",
         "74. datalog_import - CSV datalog import with time detection + channel extraction",
-        "75. msq_value_formatter - TunerStudio-compatible MSQ value formatting",
+        "75. msq_value_formatter - legacy MSQ value formatting",
         "76. workspace_state - page state machine (clean/staged/written/burned)",
         "77. native_tune_writer - .tuner JSON export/import (native format step 1)",
         "78. project_file - .tunerproj JSON project metadata (native format step 2)",
@@ -12288,8 +12288,8 @@ public:
                         "A modern workstation for Speeduino engines.<br>"
                         "Native C++ Qt 6 build \xe2\x80\x94 Phase 14.</span><br><br>"
                         "<span style='color: %s; font-size: %dpx;'>"
-                        "The same information TunerStudio shows,<br>"
-                        "organized around what the operator is<br>"
+                        "Everything you need to tune a Speeduino,<br>"
+                        "organized around what you\xe2\x80\x99re<br>"
                         "trying to accomplish."
                         "</span>"
                         "</div>",
