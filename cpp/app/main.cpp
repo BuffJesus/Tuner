@@ -4507,6 +4507,7 @@ public:
     };
 
     using ClickCallback = std::function<void(const std::string& title)>;
+    using ConfigCallback = std::function<void(const std::string& widget_id)>;
 
     explicit DialGaugeWidget(const Config& cfg, QWidget* parent = nullptr)
         : QWidget(parent), cfg_(cfg) {
@@ -4517,10 +4518,21 @@ public:
     void set_value(double v) { value_ = v; has_value_ = true; update(); }
     void clear_value() { has_value_ = false; update(); }
     void set_click_callback(ClickCallback cb) { click_cb_ = std::move(cb); }
+    void set_config_callback(ConfigCallback cb) { config_cb_ = std::move(cb); }
+    void set_widget_id(const std::string& id) { widget_id_ = id; }
 
 protected:
     void mousePressEvent(QMouseEvent*) override {
         if (click_cb_) click_cb_(cfg_.title);
+    }
+
+    void contextMenuEvent(QContextMenuEvent* ev) override {
+        if (!config_cb_) return;
+        auto* menu = new QMenu(this);
+        auto* action = menu->addAction("Configure Gauge...");
+        QObject::connect(action, &QAction::triggered,
+                         [this]() { if (config_cb_) config_cb_(widget_id_); });
+        menu->popup(ev->globalPos());
     }
 
     void paintEvent(QPaintEvent*) override {
@@ -4678,6 +4690,8 @@ private:
     double value_ = 0;
     bool has_value_ = false;
     ClickCallback click_cb_;
+    ConfigCallback config_cb_;
+    std::string widget_id_;
 };
 
 // ---------------------------------------------------------------------------
