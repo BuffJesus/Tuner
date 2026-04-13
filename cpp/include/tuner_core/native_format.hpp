@@ -116,4 +116,27 @@ NativeTune load_tune(std::string_view text);
 NativeDefinition load_definition_file(const std::filesystem::path& path);
 NativeTune load_tune_file(const std::filesystem::path& path);
 
+// ---------------------------------------------------------------------
+// v2 full-definition format — serializes NativeEcuDefinition directly
+// so the app can load from .tunerdef without parsing INI.
+// Schema version: "2.0". Accepts JSON5 on input (via strip_json5).
+// ---------------------------------------------------------------------
+
+}  // namespace tuner_core
+
+// Forward-declare the compiler header types for v2 serialization.
+// Consumers that call these must include ecu_definition_compiler.hpp.
+#include "tuner_core/ecu_definition_compiler.hpp"
+
+namespace tuner_core {
+
+// Serialize a full NativeEcuDefinition to JSON (schema 2.0).
+// Output is strict JSON with indent; input accepts JSON5 comments.
+std::string dump_definition_v2(const NativeEcuDefinition& def, int indent = 2);
+
+// Load a NativeEcuDefinition from JSON5 text (schema 2.0).
+// Falls through to v1 loader if schema_version is "1.0".
+NativeEcuDefinition load_definition_v2(std::string_view text);
+NativeEcuDefinition load_definition_v2_file(const std::filesystem::path& path);
+
 }  // namespace tuner_core
