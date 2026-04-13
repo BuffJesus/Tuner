@@ -11300,19 +11300,53 @@ public:
                     if (!ini_path.empty())
                         ini_field->setEditText(QString::fromUtf8(ini_path.string().c_str()));
                 }
+                // Wire INI browse button.
+                {
+                    auto* row_layout = static_cast<QHBoxLayout*>(form->itemAt(form->count() - 1)->layout());
+                    auto* browse_btn = qobject_cast<QPushButton*>(row_layout->itemAt(2)->widget());
+                    if (browse_btn) {
+                        QObject::connect(browse_btn, &QPushButton::clicked,
+                                         [dlg, ini_field]() {
+                            auto path = QFileDialog::getOpenFileName(dlg,
+                                QString::fromUtf8("Select ECU Definition"),
+                                QString(),
+                                QString::fromUtf8("INI Files (*.ini);;All Files (*)"));
+                            if (!path.isEmpty()) ini_field->setEditText(path);
+                        });
+                    }
+                }
 
-                auto* tune_field = make_field("Tune File (.msq):");
+                auto* tune_field = make_field("Tune File:");
                 tune_field->setEditText(QString::fromUtf8("(create empty)"));
+                // Wire tune browse button.
+                {
+                    auto* row_layout = static_cast<QHBoxLayout*>(form->itemAt(form->count() - 1)->layout());
+                    auto* browse_btn = qobject_cast<QPushButton*>(row_layout->itemAt(2)->widget());
+                    if (browse_btn) {
+                        QObject::connect(browse_btn, &QPushButton::clicked,
+                                         [dlg, tune_field]() {
+                            auto path = QFileDialog::getOpenFileName(dlg,
+                                QString::fromUtf8("Select Tune File"),
+                                QString(),
+                                QString::fromUtf8(
+                                    "Native Tune (*.tuner);;MSQ Tune (*.msq);;All Files (*)"));
+                            if (!path.isEmpty()) tune_field->setEditText(path);
+                        });
+                    }
+                }
 
                 // Hint.
                 auto* hint = new QLabel;
                 hint->setWordWrap(true);
                 {
-                    char h[256];
+                    char h[384];
                     std::snprintf(h, sizeof(h),
                         "<span style='color: %s; font-size: %dpx;'>"
                         "Creates a project directory with a .project file. "
-                        "Run the Engine Setup Wizard after to generate a base tune.</span>",
+                        "Use the browse buttons to select your INI and tune files. "
+                        "Native .tuner format is preferred over legacy .msq. "
+                        "Leave tune as '(create empty)' and run the Engine Setup Wizard "
+                        "to generate a base tune.</span>",
                         tt::text_dim, tt::font_small);
                     hint->setTextFormat(Qt::RichText);
                     hint->setText(QString::fromUtf8(h));
@@ -11330,10 +11364,11 @@ public:
 
                 QObject::connect(cancel_btn, &QPushButton::clicked, dlg, &QDialog::reject);
                 QObject::connect(create_btn, &QPushButton::clicked,
-                                 [dlg, name_field, dir_field, ini_field]() {
+                                 [dlg, name_field, dir_field, ini_field, tune_field]() {
                     std::string name = name_field->currentText().toStdString();
                     std::string dir = dir_field->currentText().toStdString();
                     std::string ini = ini_field->currentText().toStdString();
+                    std::string tune = tune_field->currentText().toStdString();
 
                     if (name.empty() || dir.empty()) return;
 
@@ -11354,15 +11389,18 @@ public:
                     }
 
                     // Save to QSettings as current project.
-                    // Clear the tune path so the new project starts
-                    // fresh instead of loading the previous project's tune.
                     QSettings settings;
                     settings.setValue(kCurrentProjectNameKey,
                         QString::fromUtf8(name.c_str()));
                     if (!ini.empty() && ini != "(create empty)")
                         settings.setValue(kCurrentProjectIniKey,
                             QString::fromUtf8(ini.c_str()));
-                    settings.setValue(kCurrentProjectTuneKey, QString());
+                    // Set tune path if user selected one, clear if empty.
+                    if (!tune.empty() && tune != "(create empty)")
+                        settings.setValue(kCurrentProjectTuneKey,
+                            QString::fromUtf8(tune.c_str()));
+                    else
+                        settings.setValue(kCurrentProjectTuneKey, QString());
                     settings.setValue(kCurrentProjectSigKey, QString());
 
                     dlg->accept();
