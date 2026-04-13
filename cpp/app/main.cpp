@@ -8272,6 +8272,34 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
     p1l->addWidget(seq_note);
     QObject::connect(inj_layout_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
                      [seq_note](int idx) { seq_note->setVisible(idx == 2); });
+    // Staged injection auto-detect — if injector count > cylinder count,
+    // the build is running staged injectors (primary + secondary bank).
+    auto* staged_note = new QLabel;
+    staged_note->setTextFormat(Qt::RichText);
+    staged_note->setWordWrap(true);
+    staged_note->hide();
+    p1l->addWidget(staged_note);
+    auto update_staged_note = [staged_note, cyl_edit, inj_count_edit]() {
+        int nc = 0, ni = 0;
+        try { nc = std::stoi(cyl_edit->text().toStdString()); } catch (...) {}
+        try { ni = std::stoi(inj_count_edit->text().toStdString()); } catch (...) {}
+        if (ni > nc && nc > 0) {
+            char sn[256];
+            std::snprintf(sn, sizeof(sn),
+                "<span style='color: %s; font-size: %dpx;'>"
+                "\xe2\x84\xb9 Staged injection detected (%d injectors on %d cyl) "
+                "\xe2\x80\x94 secondary bank staging will be configured.</span>",
+                tt::accent_primary, tt::font_small, ni, nc);
+            staged_note->setText(QString::fromUtf8(sn));
+            staged_note->show();
+        } else {
+            staged_note->hide();
+        }
+    };
+    QObject::connect(cyl_edit, &QLineEdit::textChanged,
+                     [update_staged_note](const QString&) { update_staged_note(); });
+    QObject::connect(inj_count_edit, &QLineEdit::textChanged,
+                     [update_staged_note](const QString&) { update_staged_note(); });
     auto* intent_combo = make_combo_row(p1l, "Calibration Intent:");
     intent_combo->addItem("First Start (conservative)");
     intent_combo->addItem("Drivable Base (moderate)");
@@ -8438,25 +8466,33 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
     spark_combo->addItem("Wasted COP");
     spark_combo->addItem("Sequential");
     // Cam trigger input — required for sequential injection/ignition.
-    auto* cam_combo = make_combo_row(p4l, "Cam / Sync Input:");
+    // Inline row so we can hide label + combo together (make_combo_row
+    // adds them to a throwaway QHBoxLayout).
+    auto* cam_row_widget = new QWidget;
+    auto* cam_row = new QHBoxLayout(cam_row_widget);
+    cam_row->setContentsMargins(0, 0, 0, 0);
+    auto* cam_label = new QLabel("Cam / Sync Input:");
+    cam_label->setFixedWidth(180);
+    cam_row->addWidget(cam_label);
+    auto* cam_combo = new QComboBox;
+    cam_combo->setMinimumWidth(200);
     cam_combo->addItem("None");
     cam_combo->addItem("VR Sensor");
     cam_combo->addItem("Hall Effect");
-    cam_combo->hide();
+    cam_row->addWidget(cam_combo, 1);
+    p4l->addWidget(cam_row_widget);
+    cam_row_widget->hide();
     // Show cam input when injection OR ignition is sequential.
-    auto update_cam_vis = [cam_combo, inj_layout_combo, spark_combo]() {
+    auto update_cam_vis = [cam_row_widget, inj_layout_combo, spark_combo]() {
         bool need_cam = (inj_layout_combo->currentIndex() == 2)
                      || (spark_combo->currentIndex() == 3);
-        cam_combo->setVisible(need_cam);
-        // Also show the label (parent row).
-        if (auto* parent_row = cam_combo->parentWidget())
-            parent_row->setVisible(need_cam);
+        cam_row_widget->setVisible(need_cam);
     };
     QObject::connect(spark_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
                      [update_cam_vis](int) { update_cam_vis(); });
-    // Also wire from Step 1's injection mode change (deferred — Step 1
-    // combo isn't in scope here, but the initial state is handled by
-    // evaluating on page show).
+    // Cross-step wire: Step 1 injection mode → Step 4 cam visibility.
+    QObject::connect(inj_layout_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                     [update_cam_vis](int) { update_cam_vis(); });
     // Ignition coil presets.
     auto* coil_combo = make_combo_row(p4l, "Coil Preset:");
     coil_combo->addItem("Custom / Manual Entry");
@@ -8466,6 +8502,31 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
     dwell_run_edit->setText("3.0");
     auto* dwell_crank_edit = make_row(p4l, "Cranking Dwell (ms):");
     dwell_crank_edit->setText("4.5");
+    // Dwell warning — > 6ms is unusual for modern coils. Flag it so the
+    // operator knows to double-check the coil spec before burning.
+    auto* dwell_warn = new QLabel;
+    dwell_warn->setTextFormat(Qt::RichText);
+    dwell_warn->setWordWrap(true);
+    dwell_warn->hide();
+    p4l->addWidget(dwell_warn);
+    auto update_dwell_warn = [dwell_warn, dwell_run_edit]() {
+        double d = 0;
+        try { d = std::stod(dwell_run_edit->text().toStdString()); } catch (...) {}
+        if (d > 6.0) {
+            char msg[256];
+            std::snprintf(msg, sizeof(msg),
+                "<span style='color: %s; font-size: %dpx;'>"
+                "\xe2\x9a\xa0\xef\xb8\x8f Dwell %.1f ms is high \xe2\x80\x94 verify "
+                "coil specs. Typical modern coils run 2.5\xe2\x80\x93" "4 ms.</span>",
+                tt::accent_warning, tt::font_small, d);
+            dwell_warn->setText(QString::fromUtf8(msg));
+            dwell_warn->show();
+        } else {
+            dwell_warn->hide();
+        }
+    };
+    QObject::connect(dwell_run_edit, &QLineEdit::textChanged,
+                     [update_dwell_warn](const QString&) { update_dwell_warn(); });
     QObject::connect(coil_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
                      [dwell_run_edit, dwell_crank_edit](int idx) {
         if (idx <= 0) return;
@@ -8979,6 +9040,15 @@ QWidget* build_setup_tab(
                     stage_s("afrProtectDeviation", wr.afr_protection_max);
                     stage_s("afrProtectCutTime", wr.afr_protection_cut_time);
                 }
+                // Oil pressure sensor.
+                if (wr.oil_pressure_enabled) {
+                    stage_s("oilPressureEnable", 1.0);
+                    stage_s("oilPressureMin", wr.oil_pressure_min);
+                    stage_s("oilPressureMax", wr.oil_pressure_max);
+                }
+                // Sensor filters.
+                stage_s("ADCFILTER_CLT", wr.clt_filter);
+                stage_s("ADCFILTER_IAT", wr.iat_filter);
 
                 // ---- Generate starter tables ----
                 namespace vg = tuner_core::ve_table_generator;
