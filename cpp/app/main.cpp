@@ -1384,7 +1384,7 @@ bool open_connect_dialog(QWidget* parent,
     dlg->setWindowTitle("Connect to ECU");
     dlg->setFixedSize(380, 260);
     {
-        char ds[256];
+        char ds[768];
         std::snprintf(ds, sizeof(ds),
             "QDialog { background: %s; }"
             "QLabel { color: %s; font-size: %dpx; }"
@@ -11354,12 +11354,16 @@ public:
                     }
 
                     // Save to QSettings as current project.
+                    // Clear the tune path so the new project starts
+                    // fresh instead of loading the previous project's tune.
                     QSettings settings;
                     settings.setValue(kCurrentProjectNameKey,
                         QString::fromUtf8(name.c_str()));
                     if (!ini.empty() && ini != "(create empty)")
                         settings.setValue(kCurrentProjectIniKey,
                             QString::fromUtf8(ini.c_str()));
+                    settings.setValue(kCurrentProjectTuneKey, QString());
+                    settings.setValue(kCurrentProjectSigKey, QString());
 
                     dlg->accept();
                 });
@@ -11689,12 +11693,13 @@ public:
                         try {
                             auto def = tuner_core::compile_ecu_definition_file(ini_path);
                             build_channel_layouts(ecu_conn, &def);
-                            // Read all ECU pages into cache so bit-field
-                            // writes have current data and the workspace
-                            // can detect ECU-vs-local mismatches.
-                            int pages_read = ecu_conn->read_all_pages(def);
-                            std::printf("[connect] Read %d page(s) from ECU\n",
-                                pages_read);
+                            // Defer page reads to avoid blocking the UI.
+                            // Pages are read on-demand via read_page_slice()
+                            // when bit-field writes need current data.
+                            // A full read_all_pages would freeze the UI for
+                            // 15+ seconds on a real ECU connection.
+                            std::printf("[connect] Channel layouts built, "
+                                "page reads deferred to on-demand\n");
                             std::fflush(stdout);
                         } catch (...) {}
                     }
