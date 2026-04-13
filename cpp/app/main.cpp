@@ -284,9 +284,12 @@ struct EcuConnection {
             }
             return true;
         } catch (...) {
-            // Connection lost — mark disconnected.
+            // Connection lost — mark disconnected and log for debug.
             connected = false;
             try { controller->disconnect(); } catch (...) {}
+            // debug_log not in scope here; console log only.
+            std::printf("[live] ECU connection lost\n");
+            std::fflush(stdout);
             return false;
         }
     }
@@ -2639,7 +2642,14 @@ QWidget* build_tune_tab(
 
         double new_val;
         try { new_val = std::stod(editor->text().toStdString()); }
-        catch (...) { editor->hide(); return; }
+        catch (...) {
+            // Flash the cell editor red briefly to signal invalid input.
+            editor->setStyleSheet(QString::fromUtf8(
+                "QLineEdit { background: #3d2020; color: #e08080; "
+                "border: 2px solid #d65a5a; }"));
+            QTimer::singleShot(800, editor, [editor]() { editor->hide(); });
+            return;
+        }
 
         // Flat index — row_index_map handles y-inversion.
         int model_row = (r < static_cast<int>(crosshair->row_index_map.size()))
@@ -3183,15 +3193,49 @@ QWidget* build_tune_tab(
                         row->addWidget(units);
                     }
 
-                    // Wire edit → stage on enter.
+                    // Wire edit → stage on enter, with range validation.
                     std::string param_name = f.parameter_name;
                     std::string page_target = target;
+                    // Capture min/max from definition for inline validation.
+                    double sc_min = -1e9, sc_max = 1e9;
+                    bool has_range = false;
+                    {
+                        auto sc_it = scalar_by_name.find(f.parameter_name);
+                        if (sc_it != scalar_by_name.end()) {
+                            if (sc_it->second->min_value.has_value()) {
+                                sc_min = *sc_it->second->min_value;
+                                has_range = true;
+                            }
+                            if (sc_it->second->max_value.has_value()) {
+                                sc_max = *sc_it->second->max_value;
+                                has_range = true;
+                            }
+                        }
+                    }
                     QObject::connect(edit, &QLineEdit::editingFinished,
                                      [edit, edit_svc, param_name, page_target,
                                       workspace, on_staged_changed,
                                       refresh_page_chip, refresh_review_button,
-                                      refresh_tree_state_indicators]() {
+                                      refresh_tree_state_indicators,
+                                      sc_min, sc_max, has_range]() {
                         std::string new_val = edit->text().toStdString();
+                        // Range validation.
+                        if (has_range) {
+                            try {
+                                double nv = std::stod(new_val);
+                                if (nv < sc_min || nv > sc_max) {
+                                    char tip[128];
+                                    std::snprintf(tip, sizeof(tip),
+                                        "Out of range: %.4g \xe2\x80\x93 %.4g",
+                                        sc_min, sc_max);
+                                    edit->setToolTip(QString::fromUtf8(tip));
+                                    edit->setStyleSheet(QString::fromUtf8(
+                                        tt::scalar_editor_style(
+                                            tt::EditorState::Warning).c_str()));
+                                    // Still stage — warning only, not blocking.
+                                }
+                            } catch (...) {}
+                        }
                         try {
                             edit_svc->stage_scalar_value(param_name, new_val);
                             workspace->stage_edit(page_target, param_name);
@@ -4409,6 +4453,16 @@ QWidget* build_tune_tab(
                           page_staged_chip, ecu_conn]() {
             namespace wsns = tuner_core::workspace_state;
 
+            // Confirmation — burn is irreversible.
+            auto answer = QMessageBox::warning(dialog,
+                QString::fromUtf8("Burn to Flash"),
+                QString::fromUtf8(
+                    "Permanently write all changes to ECU flash memory?\n"
+                    "This cannot be undone."),
+                QMessageBox::Ok | QMessageBox::Cancel,
+                QMessageBox::Cancel);
+            if (answer != QMessageBox::Ok) return;
+
             // If connected, burn each dirty page to flash.
             bool live = ecu_conn && ecu_conn->connected && ecu_conn->controller;
             if (live && !ecu_conn->dirty_pages.empty()) {
@@ -4446,6 +4500,14 @@ QWidget* build_tune_tab(
                           refresh_review_button, refresh_tree_state_indicators,
                           on_staged_changed,
                           page_staged_chip, visible_editors]() {
+            auto answer = QMessageBox::question(dialog,
+                QString::fromUtf8("Revert All"),
+                QString::fromUtf8(
+                    "Discard all staged changes?\n"
+                    "This will undo every edit since the last burn."),
+                QMessageBox::Ok | QMessageBox::Cancel,
+                QMessageBox::Cancel);
+            if (answer != QMessageBox::Ok) return;
             edit_svc->revert_all();
             workspace->revert_all();
             // Sub-slice 94 bugfix: reset every visible QLineEdit back
