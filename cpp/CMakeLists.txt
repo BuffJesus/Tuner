@@ -141,6 +141,7 @@ add_library(tuner_core STATIC
     src/ignition_trigger_cross_validation.cpp
     src/ts_dash_file.cpp
     src/wue_analyze_accumulator.cpp
+    src/virtual_dyno.cpp
     src/ve_analyze_accumulator.cpp
     src/tuning_page_builder.cpp
     src/datalog_import.cpp

@@ -87,6 +87,7 @@
 #include "tuner_core/live_analyze_session.hpp"
 #include "tuner_core/live_capture_session.hpp"
 #include "tuner_core/live_trigger_logger.hpp"
+#include "tuner_core/virtual_dyno.hpp"
 #include "tuner_core/mock_ecu_runtime.hpp"
 #include "tuner_core/math_expression_evaluator.hpp"
 
@@ -7593,6 +7594,207 @@ QWidget* build_assist_tab(
             live_status->setText(QString::fromUtf8(
                 "Reset \xe2\x80\x94 press Start to begin new session"));
         });
+    }
+
+    // ---- Virtual Dyno ----
+    // Estimates torque and HP from ECU sensor data during a WOT pull.
+    {
+        namespace vd = tuner_core::virtual_dyno;
+
+        auto* dyno_header = new QLabel("Virtual Dyno");
+        QFont dhf = dyno_header->font(); dhf.setBold(true); dhf.setPixelSize(tt::font_heading);
+        dyno_header->setFont(dhf);
+        dyno_header->setStyleSheet(QString::fromUtf8("margin-top: 12px;"));
+        outer->addWidget(dyno_header);
+
+        auto* dyno_note = new QLabel(
+            "Estimates torque and horsepower from ECU sensor data during a "
+            "WOT pull. Import a datalog CSV with RPM, MAP, IAT, and AFR "
+            "columns, or use the last captured log.");
+        dyno_note->setWordWrap(true);
+        {
+            char ws[64];
+            std::snprintf(ws, sizeof(ws), "color: %s;", tt::text_muted);
+            dyno_note->setStyleSheet(QString::fromUtf8(ws));
+        }
+        outer->addWidget(dyno_note);
+
+        // Engine spec fields (inline, from wizard values or defaults).
+        auto* dyno_card = new QWidget;
+        auto* dyno_layout = new QVBoxLayout(dyno_card);
+        dyno_layout->setContentsMargins(tt::space_md, tt::space_sm, tt::space_md, tt::space_sm);
+        dyno_layout->setSpacing(tt::space_sm);
+        dyno_card->setStyleSheet(QString::fromUtf8(tt::card_style().c_str()));
+
+        auto* dyno_result_label = new QLabel(QString::fromUtf8(
+            "Import a WOT pull CSV to see results"));
+        dyno_result_label->setWordWrap(true);
+        {
+            char s[96];
+            std::snprintf(s, sizeof(s),
+                "QLabel { color: %s; font-size: %dpx; border: none; }",
+                tt::text_secondary, tt::font_body);
+            dyno_result_label->setStyleSheet(QString::fromUtf8(s));
+        }
+
+        // Dyno curve display — text-based table for now (no chart widget).
+        auto* dyno_curve_label = new QLabel;
+        dyno_curve_label->setTextFormat(Qt::RichText);
+        dyno_curve_label->setWordWrap(true);
+        {
+            char s[128];
+            std::snprintf(s, sizeof(s),
+                "QLabel { color: %s; font-size: %dpx; font-family: monospace; border: none; }",
+                tt::text_primary, tt::font_small);
+            dyno_curve_label->setStyleSheet(QString::fromUtf8(s));
+        }
+
+        // Import WOT button.
+        auto* dyno_import_btn = new QPushButton(QString::fromUtf8("Import WOT Pull CSV..."));
+        dyno_import_btn->setCursor(Qt::PointingHandCursor);
+        {
+            char bs[256];
+            std::snprintf(bs, sizeof(bs),
+                "QPushButton { background: %s; color: %s; border: 1px solid %s; "
+                "border-radius: %dpx; padding: %dpx %dpx; font-size: %dpx; } "
+                "QPushButton:hover { background: %s; }",
+                tt::bg_elevated, tt::text_primary, tt::border,
+                tt::radius_sm, tt::space_xs, tt::space_md, tt::font_small,
+                tt::fill_primary_mid);
+            dyno_import_btn->setStyleSheet(QString::fromUtf8(bs));
+        }
+
+        QObject::connect(dyno_import_btn, &QPushButton::clicked,
+                         [container, dyno_result_label, dyno_curve_label]() {
+            auto path = QFileDialog::getOpenFileName(container,
+                QString::fromUtf8("Import WOT Pull CSV"),
+                QDir::homePath(),
+                QString::fromUtf8("CSV Files (*.csv);;All Files (*)"));
+            if (path.isEmpty()) return;
+
+            // Read and parse CSV.
+            std::ifstream in(path.toStdString(), std::ios::in | std::ios::binary);
+            if (!in) return;
+            std::string header_line;
+            if (!std::getline(in, header_line)) return;
+            if (!header_line.empty() && header_line.back() == '\r')
+                header_line.pop_back();
+
+            // Find column indices.
+            std::vector<std::string> cols;
+            {
+                std::istringstream hs(header_line);
+                std::string col;
+                while (std::getline(hs, col, ',')) {
+                    while (!col.empty() && col.front() == ' ') col.erase(col.begin());
+                    while (!col.empty() && col.back() == ' ') col.pop_back();
+                    std::string lower = col;
+                    for (auto& c : lower) c = static_cast<char>(
+                        std::tolower(static_cast<unsigned char>(c)));
+                    cols.push_back(lower);
+                }
+            }
+
+            int rpm_i = -1, map_i = -1, iat_i = -1, afr_i = -1;
+            for (int i = 0; i < static_cast<int>(cols.size()); ++i) {
+                if (cols[i] == "rpm") rpm_i = i;
+                else if (cols[i] == "map" || cols[i] == "fuelload") map_i = i;
+                else if (cols[i] == "iat") iat_i = i;
+                else if (cols[i] == "afr" || cols[i] == "afr1") afr_i = i;
+            }
+            if (rpm_i < 0 || map_i < 0 || afr_i < 0) {
+                dyno_result_label->setText(QString::fromUtf8(
+                    "CSV missing required columns (rpm, map, afr)"));
+                return;
+            }
+
+            // Parse rows — filter to WOT (TPS > 90% or MAP > 90 kPa).
+            std::vector<vd::DataPoint> data;
+            std::string line;
+            while (std::getline(in, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line.empty()) continue;
+                std::vector<std::string> vals;
+                {
+                    std::istringstream ls(line);
+                    std::string cell;
+                    while (std::getline(ls, cell, ',')) {
+                        while (!cell.empty() && cell.front() == ' ') cell.erase(cell.begin());
+                        while (!cell.empty() && cell.back() == ' ') cell.pop_back();
+                        vals.push_back(cell);
+                    }
+                }
+                auto safe_d = [&vals](int idx) -> double {
+                    if (idx < 0 || idx >= static_cast<int>(vals.size())) return 0;
+                    try { return std::stod(vals[idx]); } catch (...) { return 0; }
+                };
+
+                double rpm = safe_d(rpm_i);
+                double map_v = safe_d(map_i);
+                double afr = safe_d(afr_i);
+                double iat = (iat_i >= 0) ? safe_d(iat_i) : 25.0;
+
+                // WOT filter: MAP > 90 kPa or high RPM + high MAP.
+                if (map_v < 90 || rpm < 1500 || afr < 8 || afr > 25) continue;
+
+                vd::DataPoint dp;
+                dp.rpm = rpm;
+                dp.map_kpa = map_v;
+                dp.iat_celsius = iat;
+                dp.afr = afr;
+                data.push_back(dp);
+            }
+            in.close();
+
+            if (data.empty()) {
+                dyno_result_label->setText(QString::fromUtf8(
+                    "No WOT data found (MAP > 90 kPa, RPM > 1500)"));
+                return;
+            }
+
+            // Run calculation.
+            vd::EngineSpec spec;
+            spec.displacement_cc = 2000;  // TODO: read from tune
+            spec.cylinders = 6;
+            auto result = vd::calculate(data, spec);
+
+            dyno_result_label->setText(QString::fromUtf8(
+                result.summary_text.c_str()));
+
+            // Build text-based curve display.
+            char curve_buf[2048];
+            int off = 0;
+            off += std::snprintf(curve_buf + off, sizeof(curve_buf) - off,
+                "<table style='border-collapse: collapse;'>"
+                "<tr><th style='padding: 2px 8px; color: %s;'>RPM</th>"
+                "<th style='padding: 2px 8px; color: %s;'>Torque (Nm)</th>"
+                "<th style='padding: 2px 8px; color: %s;'>HP</th></tr>",
+                tt::text_muted, tt::text_muted, tt::text_muted);
+
+            for (const auto& p : result.points) {
+                bool is_peak_t = (std::abs(p.rpm - result.peak_torque_rpm) < 50);
+                bool is_peak_h = (std::abs(p.rpm - result.peak_hp_rpm) < 50);
+                const char* t_color = is_peak_t ? tt::accent_ok : tt::text_primary;
+                const char* h_color = is_peak_h ? tt::accent_ok : tt::text_primary;
+                off += std::snprintf(curve_buf + off, sizeof(curve_buf) - off,
+                    "<tr>"
+                    "<td style='padding: 2px 8px; color: %s;'>%.0f</td>"
+                    "<td style='padding: 2px 8px; color: %s;'>%.1f%s</td>"
+                    "<td style='padding: 2px 8px; color: %s;'>%.1f%s</td>"
+                    "</tr>",
+                    tt::text_secondary, p.rpm,
+                    t_color, p.torque_nm, is_peak_t ? " \xe2\x9c\xb6" : "",
+                    h_color, p.horsepower, is_peak_h ? " \xe2\x9c\xb6" : "");
+                if (off >= static_cast<int>(sizeof(curve_buf) - 200)) break;
+            }
+            off += std::snprintf(curve_buf + off, sizeof(curve_buf) - off, "</table>");
+            dyno_curve_label->setText(QString::fromUtf8(curve_buf));
+        });
+
+        dyno_layout->addWidget(dyno_import_btn);
+        dyno_layout->addWidget(dyno_result_label);
+        dyno_layout->addWidget(dyno_curve_label);
+        outer->addWidget(dyno_card);
     }
 
     // ---- WUE Analyze demo (unchanged) ----
