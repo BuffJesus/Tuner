@@ -172,6 +172,7 @@ namespace tt = tuner_theme;
 #include <QWidget>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -181,6 +182,7 @@ namespace tt = tuner_theme;
 #include <fstream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <string>
@@ -192,6 +194,8 @@ namespace tt = tuner_theme;
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #endif
 
@@ -403,6 +407,195 @@ struct EcuConnection {
         runtime.clear();
         page_cache.clear();
         dirty_pages.clear();
+    }
+};
+
+// ---------------------------------------------------------------------------
+// LiveDataHttpServer — background HTTP server for external dashboard
+// consumers. Serves live ECU channel data as JSON on port 8080 so
+// browser-based dashboards (Airbear web UI, phones, tablets, Raspberry
+// Pi) can display gauges without TunerStudio. Three endpoints:
+//   GET /api/channels       — all channel name:value pairs
+//   GET /api/channels/{name} — single channel with units
+//   GET /api/status         — connection state + signature
+// CORS headers on every response for cross-origin browser access.
+// ---------------------------------------------------------------------------
+
+class LiveDataHttpServer {
+public:
+    template<typename MapT>
+    void update_snapshot(const MapT& channels,
+                         bool connected, const std::string& signature) {
+        std::lock_guard<std::mutex> lock(mu_);
+        channels_.clear();
+        for (const auto& [k, v] : channels) channels_[k] = v;
+        connected_ = connected;
+        signature_ = signature;
+    }
+
+    void start(int port = 8080) {
+        if (running_) return;
+        port_ = port;
+        running_ = true;
+        thread_ = std::thread([this]() { run(); });
+    }
+
+    void stop() {
+        running_ = false;
+        // Connect to self to unblock accept().
+#ifdef _WIN32
+        SOCKET wake = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (wake != INVALID_SOCKET) {
+            sockaddr_in addr{};
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(static_cast<u_short>(port_));
+            addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            connect(wake, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+            closesocket(wake);
+        }
+#endif
+        if (thread_.joinable()) thread_.join();
+    }
+
+    ~LiveDataHttpServer() { stop(); }
+
+private:
+    std::unordered_map<std::string, double> channels_;
+    bool connected_ = false;
+    std::string signature_;
+    std::mutex mu_;
+    std::atomic<bool> running_{false};
+    std::thread thread_;
+    int port_ = 8080;
+
+    void run() {
+#ifdef _WIN32
+        SOCKET srv = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (srv == INVALID_SOCKET) { running_ = false; return; }
+
+        // Allow port reuse.
+        int opt = 1;
+        setsockopt(srv, SOL_SOCKET, SO_REUSEADDR,
+                   reinterpret_cast<const char*>(&opt), sizeof(opt));
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(static_cast<u_short>(port_));
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+        if (bind(srv, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+            closesocket(srv); running_ = false; return;
+        }
+        if (listen(srv, 4) != 0) {
+            closesocket(srv); running_ = false; return;
+        }
+
+        while (running_) {
+            SOCKET client = accept(srv, nullptr, nullptr);
+            if (client == INVALID_SOCKET) continue;
+            if (!running_) { closesocket(client); break; }
+            handle_request(client);
+            closesocket(client);
+        }
+        closesocket(srv);
+#endif
+    }
+
+    void handle_request(
+#ifdef _WIN32
+        SOCKET client
+#else
+        int client
+#endif
+    ) {
+        // Read request (just the first line is enough).
+        char buf[2048];
+        int n = recv(client, buf, sizeof(buf) - 1, 0);
+        if (n <= 0) return;
+        buf[n] = '\0';
+
+        // Parse method + path from "GET /path HTTP/1.1\r\n..."
+        std::string req(buf);
+        std::string path;
+        if (req.size() > 4 && req.substr(0, 4) == "GET ") {
+            auto end = req.find(' ', 4);
+            if (end != std::string::npos)
+                path = req.substr(4, end - 4);
+        }
+
+        std::string body;
+        std::string content_type = "application/json";
+        int status = 200;
+
+        if (path == "/api/channels") {
+            body = build_channels_json();
+        } else if (path.find("/api/channels/") == 0) {
+            std::string name = path.substr(14);
+            body = build_channel_json(name);
+            if (body.empty()) { status = 404; body = "{\"error\":\"channel not found\"}"; }
+        } else if (path == "/api/status") {
+            body = build_status_json();
+        } else {
+            status = 404;
+            body = "{\"error\":\"not found\",\"endpoints\":[\"/api/channels\",\"/api/status\"]}";
+        }
+
+        // Build HTTP response with CORS headers.
+        char header[512];
+        std::snprintf(header, sizeof(header),
+            "HTTP/1.1 %d %s\r\n"
+            "Content-Type: %s\r\n"
+            "Content-Length: %d\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Access-Control-Allow-Methods: GET, OPTIONS\r\n"
+            "Access-Control-Allow-Headers: Content-Type\r\n"
+            "Connection: close\r\n"
+            "\r\n",
+            status, status == 200 ? "OK" : "Not Found",
+            content_type.c_str(),
+            static_cast<int>(body.size()));
+
+        std::string response = std::string(header) + body;
+        send(client, response.c_str(),
+             static_cast<int>(response.size()), 0);
+    }
+
+    std::string build_channels_json() {
+        std::lock_guard<std::mutex> lock(mu_);
+        std::string json = "{";
+        bool first = true;
+        for (const auto& [name, val] : channels_) {
+            if (!first) json += ",";
+            first = false;
+            char entry[128];
+            std::snprintf(entry, sizeof(entry), "\"%s\":%.6g",
+                          name.c_str(), val);
+            json += entry;
+        }
+        json += "}";
+        return json;
+    }
+
+    std::string build_channel_json(const std::string& name) {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = channels_.find(name);
+        if (it == channels_.end()) return {};
+        char json[256];
+        std::snprintf(json, sizeof(json),
+            "{\"name\":\"%s\",\"value\":%.6g}",
+            name.c_str(), it->second);
+        return json;
+    }
+
+    std::string build_status_json() {
+        std::lock_guard<std::mutex> lock(mu_);
+        char json[512];
+        std::snprintf(json, sizeof(json),
+            "{\"connected\":%s,\"signature\":\"%s\",\"channels\":%d}",
+            connected_ ? "true" : "false",
+            signature_.c_str(),
+            static_cast<int>(channels_.size()));
+        return json;
     }
 };
 
@@ -4527,7 +4720,8 @@ using NavigateCallback = std::function<void(int page_index, const std::string& h
 
 QWidget* build_live_tab(
     std::shared_ptr<EcuConnection> ecu_conn = nullptr,
-    NavigateCallback on_navigate = nullptr) {
+    NavigateCallback on_navigate = nullptr,
+    std::shared_ptr<LiveDataHttpServer> http_server = nullptr) {
     auto* scroll = new QScrollArea;
     scroll->setWidgetResizable(true);
     scroll->setStyleSheet("QScrollArea { border: none; }");
@@ -4875,7 +5069,7 @@ QWidget* build_live_tab(
     auto* timer = new QTimer(container);
     QObject::connect(timer, &QTimer::timeout,
                      [bindings, mock_ecu, ecu_conn, phase_label, formula_strip,
-                      formula_channels, formula_arrays]() {
+                      formula_channels, formula_arrays, http_server]() {
         // Attempt real ECU poll first.
         bool using_real = false;
         if (ecu_conn && ecu_conn->connected) {
@@ -4907,7 +5101,18 @@ QWidget* build_live_tab(
             if (!snap.channels.count("nSquirts"))   snap.channels["nSquirts"] = 2.0;
             if (!snap.channels.count("nCylinders")) snap.channels["nCylinders"] = 6.0;
             mee::enrich(snap.channels, *formula_channels, formula_arrays.get());
+        }
 
+        // Feed HTTP Live-Data API with the current snapshot.
+        if (http_server) {
+            std::string sig;
+            if (ecu_conn && ecu_conn->connected)
+                sig = ecu_conn->info.signature;
+            http_server->update_snapshot(snap.channels,
+                ecu_conn && ecu_conn->connected, sig);
+        }
+
+        if (!formula_channels->empty()) {
             // Update the formula-channel strip with four headline values.
             // Every computed channel uses the `accent_special` purple token
             // to signal "derived" — hardware channels in the gauge cluster
@@ -9141,6 +9346,12 @@ public:
         auto shared_workspace = std::make_shared<tuner_core::workspace_state::Workspace>();
         auto ecu_conn = std::make_shared<EcuConnection>();
 
+        // HTTP Live-Data API — serves channel data to browser dashboards.
+        auto http_server = std::make_shared<LiveDataHttpServer>();
+        http_server->start(8080);
+        std::printf("[ctor] HTTP Live-Data API started on port 8080\n");
+        std::fflush(stdout);
+
         // Connection indicator label — created early so the File menu
         // connect/disconnect lambdas can capture the pointer. Added to
         // the sidebar layout later in the constructor.
@@ -9256,7 +9467,7 @@ public:
         }
         std::printf("[ctor] tune ok\n"); std::fflush(stdout);
         debug_log("TunerMainWindow tune tab built");
-        stack->addWidget(build_live_tab(ecu_conn, navigate));
+        stack->addWidget(build_live_tab(ecu_conn, navigate, http_server));
         std::printf("[ctor] live ok\n"); std::fflush(stdout);
         stack->addWidget(build_flash_tab(ecu_conn));
         std::printf("[ctor] flash ok\n"); std::fflush(stdout);
