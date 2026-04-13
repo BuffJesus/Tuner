@@ -2969,6 +2969,56 @@ QWidget* build_tune_tab(
                 return te::paste_region(vals, cols, sel, clipboard_text);
             });
         });
+
+        // Arrow key navigation — move the single-cell selection within
+        // the table grid. Essential for keyboard-driven table editing
+        // (navigate with arrows, type value, Enter, move, repeat).
+        auto move_sel = [crosshair](int dr, int dc) {
+            if (!crosshair->has_selection()) return;
+            int r = crosshair->sel_top + dr;
+            int c = crosshair->sel_left + dc;
+            r = std::clamp(r, 0, crosshair->rows - 1);
+            c = std::clamp(c, 0, crosshair->cols - 1);
+            crosshair->set_selection(r, c, r, c);
+        };
+        auto* up_sc = new QShortcut(QKeySequence(Qt::Key_Up), container);
+        up_sc->setContext(Qt::WidgetWithChildrenShortcut);
+        QObject::connect(up_sc, &QShortcut::activated, [move_sel]() { move_sel(-1, 0); });
+
+        auto* down_sc = new QShortcut(QKeySequence(Qt::Key_Down), container);
+        down_sc->setContext(Qt::WidgetWithChildrenShortcut);
+        QObject::connect(down_sc, &QShortcut::activated, [move_sel]() { move_sel(1, 0); });
+
+        auto* left_sc = new QShortcut(QKeySequence(Qt::Key_Left), container);
+        left_sc->setContext(Qt::WidgetWithChildrenShortcut);
+        QObject::connect(left_sc, &QShortcut::activated, [move_sel]() { move_sel(0, -1); });
+
+        auto* right_sc = new QShortcut(QKeySequence(Qt::Key_Right), container);
+        right_sc->setContext(Qt::WidgetWithChildrenShortcut);
+        QObject::connect(right_sc, &QShortcut::activated, [move_sel]() { move_sel(0, 1); });
+
+        // Enter — open cell editor at current selection.
+        auto* enter_sc = new QShortcut(QKeySequence(Qt::Key_Return), container);
+        enter_sc->setContext(Qt::WidgetWithChildrenShortcut);
+        QObject::connect(enter_sc, &QShortcut::activated, [crosshair]() {
+            if (!crosshair->has_selection()) return;
+            int r = crosshair->sel_top;
+            int c = crosshair->sel_left;
+            if (r < static_cast<int>(crosshair->cell_labels.size())
+                && c < static_cast<int>(crosshair->cell_labels[r].size())) {
+                auto* lbl = crosshair->cell_labels[r][c];
+                auto* ed = crosshair->cell_editor;
+                if (!ed || !lbl || crosshair->z_param.empty()) return;
+                QPoint pos = lbl->mapTo(ed->parentWidget(), QPoint(0, 0));
+                ed->setGeometry(pos.x(), pos.y(), lbl->width(), lbl->height());
+                ed->setText(lbl->text());
+                ed->show();
+                ed->setFocus();
+                ed->selectAll();
+                crosshair->edit_row = r;
+                crosshair->edit_col = c;
+            }
+        });
     }
 
     // Selection handler — reads from the side map only, NEVER calls
@@ -11047,6 +11097,8 @@ public:
                     {"Ctrl+B", "Burn to flash"},
                 }},
                 {"Table editing", 0, "available on the Tune tab", {
+                    {"\xe2\x86\x90\xe2\x86\x91\xe2\x86\x93\xe2\x86\x92", "Navigate cells"},
+                    {"Enter",  "Edit selected cell"},
                     {"Ctrl+Z", "Undo last cell edit"},
                     {"Ctrl+Y", "Redo cell edit"},
                     {"Ctrl+C", "Copy selection"},
