@@ -2679,11 +2679,27 @@ QWidget* build_tune_tab(
     // Uses display-row -> model-row mapping so the heatmap stays aligned
     // with the same visual orientation after transforms, paste, or
     // history navigation.
+    namespace tr_ns = tuner_core::table_rendering;
     auto refresh_visible_table = [crosshair, edit_svc]() {
         if (crosshair->z_param.empty()) return;
         auto* tv = edit_svc->get_value(crosshair->z_param);
         if (!tv || !std::holds_alternative<std::vector<double>>(tv->value)) return;
         const auto& vals = std::get<std::vector<double>>(tv->value);
+
+        // Recompute heatmap colors from current values.
+        namespace tv_ns = tuner_core::table_view;
+        tv_ns::ShapeHints hints;
+        hints.rows = crosshair->rows;
+        hints.cols = crosshair->cols;
+        auto model_opt = tv_ns::build_table_model(
+            std::span<const double>(vals.data(), vals.size()), hints);
+        std::vector<std::string> empty_labels;
+        std::optional<tr_ns::RenderModel> render_opt;
+        if (model_opt.has_value()) {
+            render_opt = tr_ns::build_render_model(*model_opt, empty_labels, empty_labels, true);
+        }
+
+        int cell_font = tt::font_micro;
         for (int r = 0; r < static_cast<int>(crosshair->cell_labels.size()); ++r) {
             std::size_t model_r =
                 (r < static_cast<int>(crosshair->row_index_map.size()))
@@ -2696,6 +2712,21 @@ QWidget* build_tune_tab(
                 char buf[16];
                 std::snprintf(buf, sizeof(buf), "%.4g", vals[flat]);
                 crosshair->cell_labels[r][c]->setText(QString::fromUtf8(buf));
+
+                // Update heatmap color.
+                if (render_opt.has_value()
+                    && model_r < render_opt->rows
+                    && static_cast<std::size_t>(c) < render_opt->columns) {
+                    const auto& cell = render_opt->cells[model_r][c];
+                    char style_buf[256];
+                    std::snprintf(style_buf, sizeof(style_buf),
+                        "background-color: %s; color: %s; border: none; "
+                        "padding: 1px; font-size: %dpx; font-family: monospace;",
+                        cell.background_hex.c_str(), cell.foreground_hex.c_str(), cell_font);
+                    crosshair->base_styles[r][c] = style_buf;
+                    crosshair->cell_labels[r][c]->setStyleSheet(
+                        QString::fromUtf8(style_buf));
+                }
             }
         }
         if (crosshair->has_selection()) {
@@ -10494,7 +10525,8 @@ public:
             }
         }
         // tune_signature is populated by build_tune_tab above.
-        auto save_as_native_handler = [this, shared_edit_svc, save_path, tune_signature]() {
+        auto save_as_native_handler = [this, shared_edit_svc, save_path, tune_signature,
+                                       shared_workspace, refresh_tune_badge]() {
             namespace ntw = tuner_core::native_tune_writer;
             // Build the tune from the live edit service.
             auto tune = ntw::from_edit_service(
@@ -10523,9 +10555,17 @@ public:
             out.close();
             *save_path = path;
 
+            // The save captured current staged values as the new tune
+            // file. Clear staged state so the UI reflects "saved — no
+            // pending changes". The operator can always re-edit.
+            shared_edit_svc->revert_all();
+            shared_workspace->revert_all();
+            refresh_tune_badge();
+
             // Brief status bar confirmation.
+            auto fname = std::filesystem::path(path).filename().string();
             statusBar()->showMessage(
-                QString::fromUtf8(("Saved: " + path).c_str()), 3000);
+                QString::fromUtf8(("\xe2\x9c\x85 Saved: " + fname).c_str()), 5000);
         };
 
         // Alt+1..8 sidebar navigation is wired via the View menu's
