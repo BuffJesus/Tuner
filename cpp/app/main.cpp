@@ -10703,6 +10703,12 @@ public:
             add_entry("\xf0\x9f\x94\xa5", "Burn to Flash",   "Write RAM to permanent flash storage", "Ctrl+B", "actions", 0);
             add_entry("\xf0\x9f\xa7\xaa", "Start VE Analyze","Begin live VE correction session",      nullptr,  "actions", 4);
 
+            add_entry("\xf0\x9f\x93\x82", "New Project",      "Create a new project directory",        nullptr,  "actions", -10);
+            add_entry("\xf0\x9f\x92\xbe", "Save Dashboard",  "Save gauge layout to JSON file",       nullptr,  "actions", -11);
+            add_entry("\xf0\x9f\x93\x82", "Load Dashboard",  "Load gauge layout from JSON file",     nullptr,  "actions", -12);
+            add_entry("\xe2\x9a\x99",     "Definition Settings", "Toggle INI feature flags",          nullptr,  "actions", -13);
+            add_entry("\xf0\x9f\x96\xa5",  "Fullscreen Dashboard", "Full-screen gauge display",      "F11",    "actions", 1);
+
             // --- Connection ---
             add_header("CONNECTION");
             add_entry("\xf0\x9f\x94\x8c", "Connect to ECU",  "Serial or WiFi connection",   nullptr, "connection", -1);
@@ -10831,7 +10837,7 @@ public:
             });
 
             // Navigate on Enter or double-click.
-            auto navigate_selected = [dialog, results, entries, sidebar, connect_callback]() {
+            auto navigate_selected = [dialog, results, entries, sidebar, connect_callback, this]() {
                 auto* item = results->currentItem();
                 if (!item) return;
                 int row = results->row(item);
@@ -10843,6 +10849,23 @@ public:
                         (*connect_callback)();
                     } else if (page == -3) {
                         // Disconnect — no-op if not connected.
+                    } else if (page <= -10 && page >= -13) {
+                        // Trigger File menu action by title.
+                        const char* titles[] = {
+                            "New Project", "Save Dashboard",
+                            "Load Dashboard", "Definition Settings"};
+                        int idx = -(page + 10);
+                        if (idx >= 0 && idx < 4) {
+                            for (auto* action : this->findChildren<QAction*>()) {
+                                if (action->text().contains(
+                                    QString::fromUtf8(titles[idx]))) {
+                                    QTimer::singleShot(0, [action]() {
+                                        action->trigger();
+                                    });
+                                    break;
+                                }
+                            }
+                        }
                     } else if (page >= 0) {
                         sidebar->setCurrentRow(page);
                     }
@@ -12342,13 +12365,20 @@ int main(int argc, char* argv[]) {
             });
         }
         if (want_new_project) {
-            // "New Project" → switch to Setup tab and open the wizard.
+            // "New Project" → open the File → New Project dialog,
+            // then switch to Setup tab for the wizard.
             QTimer::singleShot(200, [&window]() {
-                // Switch to Setup tab (index 3).
+                // Trigger the File → New Project action if it exists.
+                auto actions = window.findChildren<QAction*>();
+                for (auto* action : actions) {
+                    if (action->text().contains("New Project")) {
+                        action->trigger();
+                        break;
+                    }
+                }
+                // Switch to Setup tab (index 3) for the wizard.
                 if (auto* sidebar = window.findChild<QListWidget*>())
                     sidebar->setCurrentRow(3);
-                // Open the engine setup wizard.
-                open_engine_setup_wizard(&window);
             });
         }
         debug_log("main window shown");
