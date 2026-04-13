@@ -1,7 +1,13 @@
+// Speeduino DropBear (Teensy 4.1) definition — semantic schema.
+// JSON5 format: comments describe the purpose of each section.
 {
   "schema_version": "1.0",
   "name": "speeduino 202501-T41",
   "firmware_signature": "speeduino 202501-T41",
+
+  /* Parameters: every tunable scalar, enum, and bit field.
+     Each entry maps a semantic_id to its legacy INI constant name,
+     display label, units, and allowed range. */
   "parameters": [
     {
       "semantic_id": "aseTaperTime",

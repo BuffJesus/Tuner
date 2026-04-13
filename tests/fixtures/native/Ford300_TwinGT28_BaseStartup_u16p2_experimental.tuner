@@ -1,3 +1,4 @@
+// Ford300_TwinGT28_BaseStartup_u16p2_experimental.tuner — native Tuner format (JSON5).
 {
   "schema_version": "1.0",
   "definition_signature": "speeduino 202501-T41-U16P2",

@@ -19,6 +19,69 @@ namespace {
 
 using json = nlohmann::ordered_json;
 
+// JSON5 preprocessor — strips features that nlohmann/json can't parse:
+//   - // line comments
+//   - /* block comments */
+//   - trailing commas before ] and }
+// This lets us accept JSON5 input without a separate parser library.
+// The output is valid strict JSON that nlohmann/json can parse.
+std::string strip_json5(std::string_view input) {
+    std::string out;
+    out.reserve(input.size());
+    std::size_t i = 0;
+    bool in_string = false;
+    while (i < input.size()) {
+        char c = input[i];
+        // Track string boundaries (skip escaped quotes).
+        if (c == '"' && (i == 0 || input[i - 1] != '\\')) {
+            in_string = !in_string;
+            out += c;
+            ++i;
+            continue;
+        }
+        if (in_string) {
+            out += c;
+            ++i;
+            continue;
+        }
+        // Line comment: // ... \n
+        if (c == '/' && i + 1 < input.size() && input[i + 1] == '/') {
+            i += 2;
+            while (i < input.size() && input[i] != '\n') ++i;
+            continue;
+        }
+        // Block comment: /* ... */
+        if (c == '/' && i + 1 < input.size() && input[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < input.size() && !(input[i] == '*' && input[i + 1] == '/'))
+                ++i;
+            if (i + 1 < input.size()) i += 2;  // skip */
+            continue;
+        }
+        out += c;
+        ++i;
+    }
+    // Strip trailing commas before ] and }.
+    // Walk backwards from each ] or } and remove the preceding comma
+    // (skipping whitespace).
+    std::string result;
+    result.reserve(out.size());
+    for (std::size_t j = 0; j < out.size(); ++j) {
+        char ch = out[j];
+        if (ch == ']' || ch == '}') {
+            // Remove trailing comma from result.
+            std::size_t k = result.size();
+            while (k > 0 && (result[k - 1] == ' ' || result[k - 1] == '\t'
+                             || result[k - 1] == '\n' || result[k - 1] == '\r'))
+                --k;
+            if (k > 0 && result[k - 1] == ',')
+                result.erase(k - 1, 1);
+        }
+        result += ch;
+    }
+    return result;
+}
+
 std::string read_file(const std::filesystem::path& path) {
     std::ifstream stream(path, std::ios::binary);
     if (!stream) {
@@ -286,9 +349,10 @@ std::string dump_tune(const NativeTune& tune, int indent) {
 NativeDefinition load_definition(std::string_view text) {
     json data;
     try {
-        data = json::parse(text);
+        auto clean = strip_json5(text);
+        data = json::parse(clean);
     } catch (const json::parse_error& e) {
-        throw std::runtime_error(std::string("Invalid native JSON: ") + e.what());
+        throw std::runtime_error(std::string("Invalid native JSON/JSON5: ") + e.what());
     }
     if (!data.is_object()) {
         throw std::runtime_error("Native file root must be a JSON object.");
@@ -327,7 +391,8 @@ NativeDefinition load_definition(std::string_view text) {
 NativeTune load_tune(std::string_view text) {
     json data;
     try {
-        data = json::parse(text);
+        auto clean = strip_json5(text);
+        data = json::parse(clean);
     } catch (const json::parse_error& e) {
         throw std::runtime_error(std::string("Invalid native JSON: ") + e.what());
     }

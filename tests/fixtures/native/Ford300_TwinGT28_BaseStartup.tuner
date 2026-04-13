@@ -1,7 +1,10 @@
+// Ford 300 Twin GT28 — base startup tune.
+// JSON5 format: comments and trailing commas are allowed.
 {
   "schema_version": "1.0",
   "definition_signature": "speeduino 202501-T41",
   "values": {
+    // --- After-Start Enrichment ---
     "aseTaperTime": 1,
     "aeColdPct": 100,
     "aeColdTaperMin": 0,
