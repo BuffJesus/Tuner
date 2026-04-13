@@ -630,6 +630,23 @@ void debug_log(const std::string& message) {
 // Helpers
 // ---------------------------------------------------------------------------
 
+// Find a native .tunerdef v2 file (preferred over INI).
+std::filesystem::path find_native_definition() {
+    // Check QSettings for a project-level definition path.
+    QSettings settings;
+    auto def_path = settings.value("projects/current/tunerdef", "").toString().toStdString();
+    if (!def_path.empty() && std::filesystem::exists(def_path)) return def_path;
+    // Search fixture directory.
+    const char* candidates[] = {
+        "tests/fixtures/native/Ford300_TwinGT28_BaseStartup.tunerdef",
+        "../tests/fixtures/native/Ford300_TwinGT28_BaseStartup.tunerdef",
+        "../../tests/fixtures/native/Ford300_TwinGT28_BaseStartup.tunerdef",
+    };
+    for (const char* c : candidates)
+        if (std::filesystem::exists(c)) return c;
+    return {};
+}
+
 std::filesystem::path find_production_ini() {
     auto selected = selected_ini_path();
     if (!selected.empty()) return selected;
@@ -686,6 +703,40 @@ std::filesystem::path find_native_tune() {
         if (std::filesystem::exists(c)) return c;
     }
     return {};
+}
+
+// Load the active ECU definition — prefers native .tunerdef v2,
+// falls back to legacy INI parsing. This is the ONE place in the
+// app that decides how to load a definition. All call sites should
+// use this instead of calling compile_ecu_definition_file directly.
+std::optional<tuner_core::NativeEcuDefinition> load_active_definition() {
+    // Try native .tunerdef v2 first.
+    auto native_path = find_native_definition();
+    if (!native_path.empty()) {
+        try {
+            auto def = tuner_core::load_definition_v2_file(native_path);
+            std::printf("[def] Loaded native .tunerdef v2: %s\n",
+                native_path.string().c_str());
+            std::fflush(stdout);
+            return def;
+        } catch (const std::exception& e) {
+            std::printf("[def] v2 load failed (%s), falling back to INI\n",
+                e.what());
+            std::fflush(stdout);
+        }
+    }
+    // Fall back to legacy INI.
+    auto ini_path = find_production_ini();
+    if (!ini_path.empty()) {
+        try {
+            auto def = tuner_core::compile_ecu_definition_file(ini_path);
+            std::printf("[def] Loaded legacy INI: %s\n",
+                ini_path.string().c_str());
+            std::fflush(stdout);
+            return def;
+        } catch (...) {}
+    }
+    return std::nullopt;
 }
 
 // ---------------------------------------------------------------------------
@@ -11559,6 +11610,61 @@ public:
                 (*rebuild_dashboard)();
                 settings.setValue("dashboard/lastDir",
                     QFileInfo(path).absolutePath());
+            });
+
+            file_menu->addSeparator();
+            // Import INI → Export as .tunerdef v2 (one-time migration).
+            auto* import_ini_action = file_menu->addAction("&Import Legacy INI...");
+            QObject::connect(import_ini_action, &QAction::triggered, [this]() {
+                auto ini_path = QFileDialog::getOpenFileName(this,
+                    QString::fromUtf8("Import Legacy INI Definition"),
+                    QString(),
+                    QString::fromUtf8("INI Files (*.ini);;All Files (*)"));
+                if (ini_path.isEmpty()) return;
+
+                try {
+                    auto def = tuner_core::compile_ecu_definition_file(
+                        ini_path.toStdString());
+                    auto json = tuner_core::dump_definition_v2(def);
+
+                    // Suggest output path next to the INI.
+                    auto ini_fs = std::filesystem::path(ini_path.toStdString());
+                    auto suggested = ini_fs.parent_path() / (ini_fs.stem().string() + ".tunerdef");
+
+                    auto out_path = QFileDialog::getSaveFileName(this,
+                        QString::fromUtf8("Save Native Definition"),
+                        QString::fromUtf8(suggested.string().c_str()),
+                        QString::fromUtf8("Native Definition (*.tunerdef)"));
+                    if (out_path.isEmpty()) return;
+
+                    std::ofstream out(out_path.toStdString(),
+                        std::ios::out | std::ios::binary);
+                    if (out) {
+                        // Prepend JSON5 header comment.
+                        std::string header = "// Imported from: "
+                            + ini_fs.filename().string()
+                            + "\n// Native Tuner definition (JSON5, schema 2.0)\n";
+                        out.write(header.data(), static_cast<std::streamsize>(header.size()));
+                        out.write(json.data(), static_cast<std::streamsize>(json.size()));
+                        out.close();
+
+                        // Set as current project definition.
+                        QSettings settings;
+                        settings.setValue("projects/current/tunerdef",
+                            out_path);
+                        settings.setValue(kCurrentProjectIniKey,
+                            QString::fromUtf8(ini_path.toStdString().c_str()));
+
+                        statusBar()->showMessage(
+                            QString::fromUtf8(("\xe2\x9c\x85 Exported: "
+                                + std::filesystem::path(out_path.toStdString())
+                                    .filename().string()).c_str()), 5000);
+                    }
+                } catch (const std::exception& e) {
+                    QMessageBox::warning(this,
+                        QString::fromUtf8("Import Failed"),
+                        QString::fromUtf8(e.what()));
+                }
             });
 
             file_menu->addSeparator();
