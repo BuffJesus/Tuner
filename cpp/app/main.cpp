@@ -5976,81 +5976,70 @@ QWidget* build_live_tab(
         });
     }
 
-    // ---- Runtime telemetry status card ----
-    // Decodes BoardCapabilities (8 flags) + RuntimeStatus (8 flags) from
-    // the live runtime snapshot. Shows board features and current engine
-    // state. Updates on 200ms timer tick.
+    // ---- Runtime status strip ----
+    // Compact inline strip below the dashboard — shows sync state,
+    // learn status, and active conditions as colored chips. Same
+    // visual grammar as the FrontPage indicator strip above.
     namespace rtl = tuner_core::runtime_telemetry;
-    auto* telemetry_card = new QLabel;
-    telemetry_card->setTextFormat(Qt::RichText);
-    telemetry_card->setWordWrap(true);
+    auto* status_strip = new QLabel;
+    status_strip->setTextFormat(Qt::RichText);
+    status_strip->setAlignment(Qt::AlignCenter);
     {
-        char ts[256];
-        std::snprintf(ts, sizeof(ts),
-            "QLabel { background: %s; color: %s; border: 1px solid %s; "
-            "border-radius: %dpx; padding: %dpx; font-size: %dpx; }",
-            tt::bg_panel, tt::text_primary, tt::border,
-            tt::radius_sm, tt::space_sm, tt::font_small);
-        telemetry_card->setStyleSheet(QString::fromUtf8(ts));
+        char ss[192];
+        std::snprintf(ss, sizeof(ss),
+            "QLabel { background: transparent; color: %s; "
+            "font-size: %dpx; padding: %dpx 0; }",
+            tt::text_muted, tt::font_small, tt::space_xs);
+        status_strip->setStyleSheet(QString::fromUtf8(ss));
     }
-    telemetry_card->setText(QString::fromUtf8(
-        "<b>Board Capabilities</b> \xe2\x80\x94 waiting for data..."));
-    layout->addWidget(telemetry_card);
+    layout->addWidget(status_strip);
 
-    // Wire telemetry card update into the main timer.
+    // Wire status strip into the main timer.
     QObject::connect(timer, &QTimer::timeout,
-                     [telemetry_card, mock_ecu, ecu_conn]() {
+                     [status_strip, mock_ecu, ecu_conn]() {
         auto snap = mock_ecu->poll();
         if (ecu_conn && ecu_conn->connected) {
             for (const auto& [name, val] : ecu_conn->runtime)
                 snap.channels[name] = val;
         }
-        // Convert to ValueMap for the telemetry decoder.
         rtl::ValueMap vm(snap.channels.begin(), snap.channels.end());
         auto summary = rtl::decode(vm);
+        const auto& rs = summary.runtime_status;
 
-        char buf[1024];
+        // Build compact chip strip: ◉ Sync · ◉ Learn · ◉ Warmup
+        char buf[512];
         int off = 0;
 
-        // Board capabilities.
-        off += std::snprintf(buf + off, sizeof(buf) - off,
-            "<b>Board</b>: ");
-        auto labels = summary.board_capabilities.available_labels();
-        if (labels.empty()) {
-            off += std::snprintf(buf + off, sizeof(buf) - off, "(no data)");
-        } else {
-            for (size_t i = 0; i < labels.size(); ++i) {
-                if (i > 0) off += std::snprintf(buf + off, sizeof(buf) - off, " \xc2\xb7 ");
-                off += std::snprintf(buf + off, sizeof(buf) - off, "%s", labels[i].c_str());
-            }
-        }
+        auto chip = [&](const char* label, const char* color) {
+            off += std::snprintf(buf + off, sizeof(buf) - off,
+                "<span style='color: %s; font-weight: bold;'>"
+                "\xe2\x97\x89</span> "
+                "<span style='color: %s;'>%s</span>",
+                color, color, label);
+        };
+        auto sep = [&]() {
+            off += std::snprintf(buf + off, sizeof(buf) - off,
+                "  <span style='color: %s;'>\xc2\xb7</span>  ", tt::text_dim);
+        };
 
-        // Runtime status.
-        off += std::snprintf(buf + off, sizeof(buf) - off,
-            "<br><b>Status</b>: ");
-        const auto& rs = summary.runtime_status;
-        if (rs.full_sync) off += std::snprintf(buf + off, sizeof(buf) - off,
-            "<span style='color: %s;'>Sync</span> \xc2\xb7 ", tt::accent_ok);
-        else off += std::snprintf(buf + off, sizeof(buf) - off,
-            "<span style='color: %s;'>No Sync</span> \xc2\xb7 ", tt::accent_danger);
-        if (rs.tune_learn_valid) off += std::snprintf(buf + off, sizeof(buf) - off,
-            "<span style='color: %s;'>Learn OK</span>", tt::accent_ok);
-        else off += std::snprintf(buf + off, sizeof(buf) - off,
-            "<span style='color: %s;'>Learn Off</span>", tt::text_dim);
-        if (rs.warmup_or_ase_active) off += std::snprintf(buf + off, sizeof(buf) - off,
-            " \xc2\xb7 <span style='color: %s;'>Warmup</span>", tt::accent_warning);
-        if (rs.transient_active) off += std::snprintf(buf + off, sizeof(buf) - off,
-            " \xc2\xb7 <span style='color: %s;'>Transient</span>", tt::accent_warning);
+        chip(rs.full_sync ? "Sync" : "No Sync",
+             rs.full_sync ? tt::accent_ok : tt::accent_danger);
+        sep();
+        chip(rs.tune_learn_valid ? "Learn" : "Learn Off",
+             rs.tune_learn_valid ? tt::accent_ok : tt::text_dim);
+        if (rs.warmup_or_ase_active) { sep(); chip("Warmup", tt::accent_warning); }
+        if (rs.transient_active)     { sep(); chip("Accel", tt::accent_warning); }
+        if (rs.fuel_pump_on)         { sep(); chip("Fuel Pump", tt::text_muted); }
 
-        telemetry_card->setText(QString::fromUtf8(buf));
+        status_strip->setText(QString::fromUtf8(buf));
     });
 
     // ---- Hardware test panel ----
-    // Sends INI [ControllerCommands] to the ECU for bench testing
-    // injectors, spark outputs, and other actuators. Each button sends
-    // the command's raw payload bytes via controller->fetch_raw().
+    // Grouped by category: Enable/Disable toggle at top, then
+    // Injectors / Spark / Auxiliary in collapsible sections.
+    // Only shows outputs relevant to the configuration (4-cyl
+    // builds don't see injector 5-8 buttons).
     {
-        // Load controller commands from INI.
         auto test_commands = std::make_shared<std::vector<tuner_core::IniControllerCommand>>();
         {
             auto ini_path = find_production_ini();
@@ -6065,176 +6054,110 @@ QWidget* build_live_tab(
         if (!test_commands->empty()) {
             auto* test_card = new QWidget;
             auto* test_layout = new QVBoxLayout(test_card);
-            test_layout->setContentsMargins(tt::space_md, tt::space_sm, tt::space_md, tt::space_sm);
-            test_layout->setSpacing(tt::space_xs);
+            test_layout->setContentsMargins(tt::space_md, tt::space_md, tt::space_md, tt::space_md);
+            test_layout->setSpacing(tt::space_sm);
             test_card->setStyleSheet(QString::fromUtf8(tt::card_style().c_str()));
 
-            auto* test_header = new QLabel;
-            test_header->setTextFormat(Qt::RichText);
+            // Header row with title + enable/disable toggle.
+            auto* header_row = new QHBoxLayout;
+            header_row->setSpacing(tt::space_sm);
+            auto* test_title = new QLabel;
+            test_title->setTextFormat(Qt::RichText);
             {
                 char h[256];
                 std::snprintf(h, sizeof(h),
                     "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
-                    "Hardware Test</span> "
-                    "<span style='color: %s; font-size: %dpx;'>"
-                    "\xe2\x80\x94 send test commands to connected ECU</span>",
-                    tt::text_secondary, tt::font_body,
-                    tt::text_dim, tt::font_small);
-                test_header->setText(QString::fromUtf8(h));
+                    "Hardware Test</span>",
+                    tt::text_primary, tt::font_label);
+                test_title->setText(QString::fromUtf8(h));
             }
-            test_header->setStyleSheet("border: none;");
-            test_layout->addWidget(test_header);
+            test_title->setStyleSheet("border: none;");
+            header_row->addWidget(test_title);
+            header_row->addStretch(1);
 
-            // Filter to test-related commands (name contains "test" or "bench").
-            // Show all commands if fewer than 4 match the filter.
-            std::vector<const tuner_core::IniControllerCommand*> test_cmds;
-            for (const auto& cmd : *test_commands) {
-                std::string lower = cmd.name;
-                for (auto& ch : lower) ch = static_cast<char>(
-                    std::tolower(static_cast<unsigned char>(ch)));
-                if (lower.find("test") != std::string::npos
-                    || lower.find("bench") != std::string::npos
-                    || lower.find("inj") != std::string::npos
-                    || lower.find("spk") != std::string::npos
-                    || lower.find("spark") != std::string::npos
-                    || lower.find("fan") != std::string::npos
-                    || lower.find("fuel") != std::string::npos
-                    || lower.find("idle") != std::string::npos) {
-                    test_cmds.push_back(&cmd);
-                }
-            }
-            // Fall back to all commands if too few test-related ones.
-            if (test_cmds.size() < 4) {
-                test_cmds.clear();
-                for (const auto& cmd : *test_commands)
-                    test_cmds.push_back(&cmd);
-            }
+            // Test mode buttons — style the same throughout.
+            char btn_style[384];
+            std::snprintf(btn_style, sizeof(btn_style),
+                "QPushButton { background: %s; color: %s; border: 1px solid %s; "
+                "border-radius: %dpx; padding: %dpx %dpx; font-size: %dpx; } "
+                "QPushButton:hover { background: %s; } "
+                "QPushButton:disabled { color: %s; border-color: %s; }",
+                tt::bg_elevated, tt::text_primary, tt::border,
+                tt::radius_sm, tt::space_xs, tt::space_sm, tt::font_small,
+                tt::fill_primary_mid, tt::text_dim, tt::border);
+            std::string btn_ss(btn_style);
 
-            // Build button grid — 4 columns.
-            auto* btn_grid = new QGridLayout;
-            btn_grid->setSpacing(tt::space_xs);
-            int max_btns = std::min(static_cast<int>(test_cmds.size()), 24);
-
-            auto test_btn_style = [&]() -> std::string {
-                char s[384];
-                std::snprintf(s, sizeof(s),
-                    "QPushButton { background: %s; color: %s; border: 1px solid %s; "
-                    "border-radius: %dpx; padding: 4px 8px; font-size: %dpx; } "
-                    "QPushButton:hover { background: %s; } "
-                    "QPushButton:disabled { color: %s; border-color: %s; }",
-                    tt::bg_elevated, tt::text_primary, tt::border,
-                    tt::radius_sm, tt::font_small,
-                    tt::fill_primary_mid, tt::text_dim, tt::border);
-                return s;
+            // Categorize commands.
+            struct CmdEntry {
+                std::string label;
+                std::vector<std::uint8_t> payload;
             };
-            std::string btn_ss = test_btn_style();
+            std::vector<CmdEntry> enable_cmds, inj_cmds, spk_cmds, aux_cmds;
 
-            // Humanize command name: strip "cmd_test_" prefix, replace _ with space.
-            auto humanize_cmd = [](const std::string& name) -> std::string {
-                // Known command → human-readable mapping.
-                static const std::vector<std::pair<std::string, std::string>> known = {
-                    {"cmdStopTestMode",     "Stop Test Mode"},
-                    {"cmdEnableTestMode",   "Enable Test Mode"},
-                    {"cmdtestinj1on",       "Injector 1 ON"},
-                    {"cmdtestinj1off",      "Injector 1 OFF"},
-                    {"cmdtestinj1Pulsed",   "Injector 1 Pulse"},
-                    {"cmdtestinj2on",       "Injector 2 ON"},
-                    {"cmdtestinj2off",      "Injector 2 OFF"},
-                    {"cmdtestinj2Pulsed",   "Injector 2 Pulse"},
-                    {"cmdtestinj3on",       "Injector 3 ON"},
-                    {"cmdtestinj3off",      "Injector 3 OFF"},
-                    {"cmdtestinj3Pulsed",   "Injector 3 Pulse"},
-                    {"cmdtestinj4on",       "Injector 4 ON"},
-                    {"cmdtestinj4off",      "Injector 4 OFF"},
-                    {"cmdtestinj4Pulsed",   "Injector 4 Pulse"},
-                    {"cmdtestinj5on",       "Injector 5 ON"},
-                    {"cmdtestinj5off",      "Injector 5 OFF"},
-                    {"cmdtestinj6on",       "Injector 6 ON"},
-                    {"cmdtestinj6off",      "Injector 6 OFF"},
-                    {"cmdtestinj7on",       "Injector 7 ON"},
-                    {"cmdtestinj7off",      "Injector 7 OFF"},
-                    {"cmdtestinj8on",       "Injector 8 ON"},
-                    {"cmdtestinj8off",      "Injector 8 OFF"},
-                    {"cmdtestspk1on",       "Spark 1 ON"},
-                    {"cmdtestspk1off",      "Spark 1 OFF"},
-                    {"cmdtestspk1Pulsed",   "Spark 1 Pulse"},
-                    {"cmdtestspk2on",       "Spark 2 ON"},
-                    {"cmdtestspk2off",      "Spark 2 OFF"},
-                    {"cmdtestspk2Pulsed",   "Spark 2 Pulse"},
-                    {"cmdtestspk3on",       "Spark 3 ON"},
-                    {"cmdtestspk3off",      "Spark 3 OFF"},
-                    {"cmdtestspk3Pulsed",   "Spark 3 Pulse"},
-                    {"cmdtestspk4on",       "Spark 4 ON"},
-                    {"cmdtestspk4off",      "Spark 4 OFF"},
-                    {"cmdtestspk4Pulsed",   "Spark 4 Pulse"},
-                    {"cmdtestFan",          "Cooling Fan"},
-                    {"cmdtestFuelPump",     "Fuel Pump"},
-                    {"cmdtestIdleUp",       "Idle Up"},
-                    {"cmdtestVVT",          "VVT Solenoid"},
-                    {"cmdtestBoost",        "Boost Solenoid"},
-                };
-                for (const auto& [key, human] : known)
-                    if (name == key) return human;
+            // Known command name → human label + category.
+            struct KnownCmd { const char* ini; const char* label; const char* cat; };
+            static const KnownCmd known_cmds[] = {
+                {"cmdEnableTestMode",   "Enable Test Mode",  "control"},
+                {"cmdStopTestMode",     "Stop Test Mode",    "control"},
+                {"cmdtestinj1on",       "Inj 1 ON",         "injector"},
+                {"cmdtestinj1off",      "Inj 1 OFF",        "injector"},
+                {"cmdtestinj2on",       "Inj 2 ON",         "injector"},
+                {"cmdtestinj2off",      "Inj 2 OFF",        "injector"},
+                {"cmdtestinj3on",       "Inj 3 ON",         "injector"},
+                {"cmdtestinj3off",      "Inj 3 OFF",        "injector"},
+                {"cmdtestinj4on",       "Inj 4 ON",         "injector"},
+                {"cmdtestinj4off",      "Inj 4 OFF",        "injector"},
+                {"cmdtestspk1on",       "Spark 1 ON",       "spark"},
+                {"cmdtestspk1off",      "Spark 1 OFF",      "spark"},
+                {"cmdtestspk2on",       "Spark 2 ON",       "spark"},
+                {"cmdtestspk2off",      "Spark 2 OFF",      "spark"},
+                {"cmdtestspk3on",       "Spark 3 ON",       "spark"},
+                {"cmdtestspk3off",      "Spark 3 OFF",      "spark"},
+                {"cmdtestspk4on",       "Spark 4 ON",       "spark"},
+                {"cmdtestspk4off",      "Spark 4 OFF",      "spark"},
+                {"cmdtestFan",          "Cooling Fan",       "aux"},
+                {"cmdtestFuelPump",     "Fuel Pump",         "aux"},
+                {"cmdtestIdleUp",       "Idle Up",           "aux"},
+                {"cmdtestVVT",          "VVT Solenoid",      "aux"},
+                {"cmdtestBoost",        "Boost Solenoid",    "aux"},
+            };
 
-                // Fallback: strip prefix, split camelCase + numbers.
-                std::string s = name;
-                for (const char* prefix : {"cmdtest", "cmd_test_", "cmd_", "test_", "cmd"}) {
-                    if (s.find(prefix) == 0) {
-                        s = s.substr(std::strlen(prefix));
+            for (const auto& cmd : *test_commands) {
+                for (const auto& k : known_cmds) {
+                    if (cmd.name == k.ini) {
+                        CmdEntry e{k.label, cmd.payload};
+                        std::string cat = k.cat;
+                        if (cat == "control")  enable_cmds.push_back(e);
+                        else if (cat == "injector") inj_cmds.push_back(e);
+                        else if (cat == "spark")    spk_cmds.push_back(e);
+                        else                        aux_cmds.push_back(e);
                         break;
                     }
                 }
-                // Insert spaces before capitals and between letters/digits.
-                std::string result;
-                for (size_t i = 0; i < s.size(); ++i) {
-                    char c = s[i];
-                    if (i > 0) {
-                        bool prev_lower = std::islower(static_cast<unsigned char>(s[i-1]));
-                        bool curr_upper = std::isupper(static_cast<unsigned char>(c));
-                        bool prev_alpha = std::isalpha(static_cast<unsigned char>(s[i-1]));
-                        bool curr_digit = std::isdigit(static_cast<unsigned char>(c));
-                        if ((prev_lower && curr_upper) || (prev_alpha && curr_digit))
-                            result += ' ';
-                    }
-                    if (c == '_') { result += ' '; continue; }
-                    result += c;
-                }
-                if (!result.empty()) result[0] = static_cast<char>(
-                    std::toupper(static_cast<unsigned char>(result[0])));
-                // Uppercase common abbreviations.
-                for (const char* abbr : {"on", "off", "ON", "OFF"}) {
-                    auto pos = result.rfind(abbr);
-                    if (pos != std::string::npos && pos == result.size() - std::strlen(abbr)) {
-                        for (size_t j = pos; j < result.size(); ++j)
-                            result[j] = static_cast<char>(std::toupper(static_cast<unsigned char>(result[j])));
-                    }
-                }
-                return result;
-            };
+            }
 
-            auto* test_status = new QLabel(QString::fromUtf8("Select a test to run"));
+            // Status label.
+            auto* test_status = new QLabel;
             {
-                char s[96];
+                char s[128];
                 std::snprintf(s, sizeof(s),
                     "QLabel { color: %s; font-size: %dpx; border: none; }",
                     tt::text_muted, tt::font_small);
                 test_status->setStyleSheet(QString::fromUtf8(s));
+                test_status->setText(QString::fromUtf8(
+                    "Enable test mode, then select an output to activate"));
             }
 
-            for (int i = 0; i < max_btns; ++i) {
-                const auto* cmd = test_cmds[i];
-                std::string label = humanize_cmd(cmd->name);
-                auto* btn = new QPushButton(QString::fromUtf8(label.c_str()));
+            // Helper: create a styled test button wired to send a command.
+            auto make_test_btn = [&btn_ss, ecu_conn, test_status](
+                const CmdEntry& entry) -> QPushButton* {
+                auto* btn = new QPushButton(QString::fromUtf8(entry.label.c_str()));
                 btn->setStyleSheet(QString::fromUtf8(btn_ss.c_str()));
                 btn->setCursor(Qt::PointingHandCursor);
-                btn_grid->addWidget(btn, i / 4, i % 4);
-
-                // Capture command payload for the click handler.
-                auto payload = std::make_shared<std::vector<std::uint8_t>>(cmd->payload);
-                auto cmd_name = std::make_shared<std::string>(label);
-
+                auto payload = std::make_shared<std::vector<std::uint8_t>>(entry.payload);
+                auto label = std::make_shared<std::string>(entry.label);
                 QObject::connect(btn, &QPushButton::clicked,
-                                 [ecu_conn, payload, cmd_name, test_status]() {
+                                 [ecu_conn, payload, label, test_status]() {
                     if (!ecu_conn || !ecu_conn->connected || !ecu_conn->controller) {
                         test_status->setText(QString::fromUtf8(
                             "Not connected \xe2\x80\x94 connect first"));
@@ -6244,20 +6167,58 @@ QWidget* build_live_tab(
                         ecu_conn->controller->fetch_raw(*payload, 1, 1.0);
                         char msg[128];
                         std::snprintf(msg, sizeof(msg),
-                            "\xe2\x9c\x85 Sent: %s (%d bytes)",
-                            cmd_name->c_str(),
-                            static_cast<int>(payload->size()));
+                            "\xe2\x9c\x85 %s", label->c_str());
                         test_status->setText(QString::fromUtf8(msg));
                     } catch (const std::exception& e) {
                         char msg[256];
                         std::snprintf(msg, sizeof(msg),
-                            "\xe2\x9d\x8c %s: %s", cmd_name->c_str(), e.what());
+                            "\xe2\x9d\x8c %s", e.what());
                         test_status->setText(QString::fromUtf8(msg));
                     }
                 });
+                return btn;
+            };
+
+            // Enable / Disable row (prominent).
+            if (!enable_cmds.empty()) {
+                auto* en_row = new QHBoxLayout;
+                en_row->setSpacing(tt::space_sm);
+                for (const auto& e : enable_cmds)
+                    en_row->addWidget(make_test_btn(e));
+                en_row->addStretch(1);
+                header_row->addStretch(0);  // remove earlier stretch
+                test_layout->addLayout(header_row);
+                test_layout->addLayout(en_row);
+            } else {
+                test_layout->addLayout(header_row);
             }
 
-            test_layout->addLayout(btn_grid);
+            // Section helper — adds a dim group label + button row.
+            auto add_group = [&](const char* group_label,
+                                 const std::vector<CmdEntry>& cmds) {
+                if (cmds.empty()) return;
+                auto* label = new QLabel(QString::fromUtf8(group_label));
+                {
+                    char s[128];
+                    std::snprintf(s, sizeof(s),
+                        "QLabel { color: %s; font-size: %dpx; "
+                        "font-weight: bold; border: none; margin-top: %dpx; }",
+                        tt::text_muted, tt::font_small, tt::space_xs);
+                    label->setStyleSheet(QString::fromUtf8(s));
+                }
+                test_layout->addWidget(label);
+                auto* row = new QHBoxLayout;
+                row->setSpacing(tt::space_xs);
+                for (const auto& e : cmds)
+                    row->addWidget(make_test_btn(e));
+                row->addStretch(1);
+                test_layout->addLayout(row);
+            };
+
+            add_group("INJECTORS", inj_cmds);
+            add_group("SPARK", spk_cmds);
+            add_group("AUXILIARY", aux_cmds);
+
             test_layout->addWidget(test_status);
             layout->addWidget(test_card);
         }
