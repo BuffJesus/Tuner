@@ -157,6 +157,8 @@ namespace tt = tuner_theme;
 #include <QSettings>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QDrag>
+#include <QMimeData>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QFileDialog>
@@ -4509,20 +4511,25 @@ public:
     using ClickCallback = std::function<void(const std::string& title)>;
     using ConfigCallback = std::function<void(const std::string& widget_id)>;
 
+    using SwapCallback = std::function<void(const std::string& from, const std::string& to)>;
+
     explicit DialGaugeWidget(const Config& cfg, QWidget* parent = nullptr)
         : QWidget(parent), cfg_(cfg) {
         setMinimumSize(120, 120);
         setCursor(Qt::PointingHandCursor);
+        setAcceptDrops(true);
     }
 
     void set_value(double v) { value_ = v; has_value_ = true; update(); }
     void clear_value() { has_value_ = false; update(); }
     void set_click_callback(ClickCallback cb) { click_cb_ = std::move(cb); }
     void set_config_callback(ConfigCallback cb) { config_cb_ = std::move(cb); }
+    void set_swap_callback(SwapCallback cb) { swap_cb_ = std::move(cb); }
     void set_widget_id(const std::string& id) { widget_id_ = id; }
 
 protected:
-    void mousePressEvent(QMouseEvent*) override {
+    void mousePressEvent(QMouseEvent* ev) override {
+        drag_start_ = ev->pos();
         if (click_cb_) click_cb_(cfg_.title);
     }
 
@@ -4533,6 +4540,33 @@ protected:
         QObject::connect(action, &QAction::triggered,
                          [this]() { if (config_cb_) config_cb_(widget_id_); });
         menu->popup(ev->globalPos());
+    }
+
+    void mouseMoveEvent(QMouseEvent* ev) override {
+        if (!(ev->buttons() & Qt::LeftButton)) return;
+        if (widget_id_.empty()) return;
+        if ((ev->pos() - drag_start_).manhattanLength() < 12) return;
+        auto* drag = new QDrag(this);
+        auto* mime = new QMimeData;
+        mime->setData("application/x-gauge-widget-id",
+            QByteArray::fromStdString(widget_id_));
+        drag->setMimeData(mime);
+        drag->exec(Qt::MoveAction);
+    }
+
+    void dragEnterEvent(QDragEnterEvent* ev) override {
+        if (ev->mimeData()->hasFormat("application/x-gauge-widget-id")) {
+            auto from_id = ev->mimeData()->data("application/x-gauge-widget-id").toStdString();
+            if (from_id != widget_id_)
+                ev->acceptProposedAction();
+        }
+    }
+
+    void dropEvent(QDropEvent* ev) override {
+        auto from_id = ev->mimeData()->data("application/x-gauge-widget-id").toStdString();
+        if (swap_cb_ && from_id != widget_id_)
+            swap_cb_(from_id, widget_id_);
+        ev->acceptProposedAction();
     }
 
     void paintEvent(QPaintEvent*) override {
@@ -4724,7 +4758,9 @@ private:
     bool has_value_ = false;
     ClickCallback click_cb_;
     ConfigCallback config_cb_;
+    SwapCallback swap_cb_;
     std::string widget_id_;
+    QPoint drag_start_;
 };
 
 // ---------------------------------------------------------------------------
@@ -4888,6 +4924,188 @@ QWidget* make_info_card(const char* heading, const char* body,
 using NavigateCallback = std::function<void(int page_index, const std::string& hint)>;
 
 // Dashboard JSON serialization — hand-rolled for the known flat schema.
+// Gauge configuration dialog — edit source channel, kind, range, and zones.
+// Returns true if the user accepted changes, false on cancel.
+bool open_gauge_config_dialog(
+    QWidget* parent,
+    tuner_core::dashboard_layout::Widget& widget,
+    const std::vector<tuner_core::IniGaugeConfiguration>& gauge_catalog) {
+    namespace dln = tuner_core::dashboard_layout;
+    namespace gcz = tuner_core::gauge_color_zones;
+
+    auto* dlg = new QDialog(parent);
+    dlg->setWindowTitle("Configure Gauge");
+    dlg->setMinimumWidth(380);
+    {
+        char s[64];
+        std::snprintf(s, sizeof(s), "QDialog { background: %s; }", tt::bg_base);
+        dlg->setStyleSheet(QString::fromUtf8(s));
+    }
+
+    auto* form = new QVBoxLayout(dlg);
+    form->setContentsMargins(tt::space_lg, tt::space_lg, tt::space_lg, tt::space_lg);
+    form->setSpacing(tt::space_sm);
+
+    auto make_form_row = [form](const char* label_text) -> QComboBox* {
+        auto* row = new QHBoxLayout;
+        auto* label = new QLabel(QString::fromUtf8(label_text));
+        label->setFixedWidth(120);
+        {
+            char s[64];
+            std::snprintf(s, sizeof(s), "QLabel { color: %s; }", tt::text_secondary);
+            label->setStyleSheet(QString::fromUtf8(s));
+        }
+        row->addWidget(label);
+        auto* combo = new QComboBox;
+        {
+            char s[192];
+            std::snprintf(s, sizeof(s),
+                "QComboBox { background: %s; color: %s; border: 1px solid %s; "
+                "border-radius: %dpx; padding: 4px 8px; }",
+                tt::bg_elevated, tt::text_primary, tt::border, tt::radius_sm);
+            combo->setStyleSheet(QString::fromUtf8(s));
+        }
+        row->addWidget(combo, 1);
+        form->addLayout(row);
+        return combo;
+    };
+
+    auto make_spin_row = [form](const char* label_text, double val,
+                                double min_v, double max_v) -> QSpinBox* {
+        auto* row = new QHBoxLayout;
+        auto* label = new QLabel(QString::fromUtf8(label_text));
+        label->setFixedWidth(120);
+        {
+            char s[64];
+            std::snprintf(s, sizeof(s), "QLabel { color: %s; }", tt::text_secondary);
+            label->setStyleSheet(QString::fromUtf8(s));
+        }
+        row->addWidget(label);
+        auto* spin = new QSpinBox;
+        spin->setRange(static_cast<int>(min_v), static_cast<int>(max_v));
+        spin->setValue(static_cast<int>(val));
+        {
+            char s[192];
+            std::snprintf(s, sizeof(s),
+                "QSpinBox { background: %s; color: %s; border: 1px solid %s; "
+                "border-radius: %dpx; padding: 4px; }",
+                tt::bg_elevated, tt::text_primary, tt::border, tt::radius_sm);
+            spin->setStyleSheet(QString::fromUtf8(s));
+        }
+        row->addWidget(spin, 1);
+        form->addLayout(row);
+        return spin;
+    };
+
+    // Source channel combo — populated from INI gauge catalog.
+    auto* source_combo = make_form_row("Source Channel:");
+    int current_source_idx = 0;
+    for (int i = 0; i < static_cast<int>(gauge_catalog.size()); ++i) {
+        const auto& g = gauge_catalog[i];
+        char entry[128];
+        std::snprintf(entry, sizeof(entry), "%s (%s)", g.title.c_str(), g.channel.c_str());
+        source_combo->addItem(QString::fromUtf8(entry));
+        if (g.channel == widget.source || g.name == widget.widget_id)
+            current_source_idx = i;
+    }
+    // Add "Custom" at end for manual entry.
+    source_combo->addItem(QString::fromUtf8("Custom (keep current)"));
+    source_combo->setCurrentIndex(current_source_idx);
+
+    // Kind selector.
+    auto* kind_combo = make_form_row("Gauge Kind:");
+    kind_combo->addItem("Analog Dial");
+    kind_combo->addItem("Number Card");
+    kind_combo->addItem("Bar");
+    int kind_idx = (widget.kind == "dial") ? 0 : (widget.kind == "bar") ? 2 : 1;
+    kind_combo->setCurrentIndex(kind_idx);
+
+    // Min / Max.
+    auto* min_spin = make_spin_row("Minimum:", widget.min_value, -1000, 50000);
+    auto* max_spin = make_spin_row("Maximum:", widget.max_value, -1000, 50000);
+
+    // Zone presets.
+    auto* zone_combo = make_form_row("Color Zones:");
+    zone_combo->addItem("Keep Current");
+    zone_combo->addItem("Temperature (CLT/IAT)");
+    zone_combo->addItem("AFR (10-20)");
+    zone_combo->addItem("RPM (0-8000)");
+    zone_combo->addItem("Voltage (8-16V)");
+    zone_combo->addItem("None (no zones)");
+
+    // Auto-fill from catalog on source change.
+    QObject::connect(source_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                     [source_combo, min_spin, max_spin, &gauge_catalog](int idx) {
+        if (idx < 0 || idx >= static_cast<int>(gauge_catalog.size())) return;
+        const auto& g = gauge_catalog[idx];
+        if (g.lo.has_value()) min_spin->setValue(static_cast<int>(*g.lo));
+        if (g.hi.has_value()) max_spin->setValue(static_cast<int>(*g.hi));
+    });
+
+    // OK / Cancel.
+    auto* btn_row = new QHBoxLayout;
+    btn_row->addStretch(1);
+    auto* ok_btn = new QPushButton("OK");
+    auto* cancel_btn = new QPushButton("Cancel");
+    btn_row->addWidget(ok_btn);
+    btn_row->addWidget(cancel_btn);
+    form->addLayout(btn_row);
+
+    bool accepted = false;
+
+    QObject::connect(cancel_btn, &QPushButton::clicked, dlg, &QDialog::reject);
+    QObject::connect(ok_btn, &QPushButton::clicked, [&]() {
+        // Apply changes to widget.
+        int src_idx = source_combo->currentIndex();
+        if (src_idx >= 0 && src_idx < static_cast<int>(gauge_catalog.size())) {
+            const auto& g = gauge_catalog[src_idx];
+            widget.widget_id = g.name;
+            widget.source = g.channel;
+            widget.title = g.title;
+            widget.units = g.units;
+        }
+        const char* kinds[] = {"dial", "number", "bar"};
+        widget.kind = kinds[std::clamp(kind_combo->currentIndex(), 0, 2)];
+        widget.min_value = min_spin->value();
+        widget.max_value = max_spin->value();
+
+        // Zone presets.
+        int zone_idx = zone_combo->currentIndex();
+        if (zone_idx > 0) {
+            widget.color_zones.clear();
+            gcz::Thresholds th;
+            switch (zone_idx) {
+                case 1: // Temperature
+                    th.hi_warn = 95; th.hi_danger = 105; break;
+                case 2: // AFR
+                    th.lo_danger = 10; th.lo_warn = 11.5;
+                    th.hi_warn = 16; th.hi_danger = 18; break;
+                case 3: // RPM
+                    th.hi_warn = 6500; th.hi_danger = 7500; break;
+                case 4: // Voltage
+                    th.lo_danger = 11; th.lo_warn = 12;
+                    th.hi_warn = 14.5; th.hi_danger = 15.5; break;
+                case 5: // None
+                    break;
+            }
+            if (zone_idx < 5) {
+                auto zones = gcz::derive_zones(widget.min_value, widget.max_value, th);
+                for (const auto& z : zones) {
+                    dln::ColorZone cz;
+                    cz.lo = z.lo; cz.hi = z.hi; cz.color = z.color;
+                    widget.color_zones.push_back(cz);
+                }
+            }
+        }
+        accepted = true;
+        dlg->accept();
+    });
+
+    dlg->exec();
+    dlg->deleteLater();
+    return accepted;
+}
+
 std::string dashboard_layout_to_json(const tuner_core::dashboard_layout::Layout& layout) {
     namespace dln = tuner_core::dashboard_layout;
     std::string json = "{\"name\":\"";
@@ -5288,8 +5506,21 @@ QWidget* build_live_tab(
 
     // Rebuild dashboard gauges from shared_dash layout. Called on
     // initial build and after config/save-load/drag-drop changes.
+    // Load INI gauge catalog for the config dialog source picker.
+    auto gauge_catalog = std::make_shared<std::vector<tuner_core::IniGaugeConfiguration>>();
+    {
+        auto ini_path = find_production_ini();
+        if (!ini_path.empty()) {
+            try {
+                auto def = tuner_core::compile_ecu_definition_file(ini_path);
+                *gauge_catalog = def.gauge_configurations.gauges;
+            } catch (...) {}
+        }
+    }
+
     auto rebuild_dashboard = std::make_shared<std::function<void()>>();
-    *rebuild_dashboard = [dash_grid, bindings, shared_dash, on_navigate]() {
+    *rebuild_dashboard = [dash_grid, bindings, shared_dash, on_navigate,
+                          gauge_catalog, rebuild_dashboard]() {
         // Clear existing gauges.
         bindings->clear();
         while (auto* item = dash_grid->takeAt(0)) {
@@ -5319,11 +5550,43 @@ QWidget* build_live_tab(
                 for (const auto& z : w.color_zones)
                     cfg.zones.push_back({z.lo, z.hi, z.color});
                 auto* gauge = new DialGaugeWidget(cfg);
+                gauge->set_widget_id(w.widget_id);
                 if (on_navigate) {
                     gauge->set_click_callback([on_navigate](const std::string& title) {
                         on_navigate(0, title);
                     });
                 }
+                // Drag-and-drop → swap gauge positions.
+                gauge->set_swap_callback(
+                    [shared_dash, rebuild_dashboard](
+                        const std::string& from_id, const std::string& to_id) {
+                    // Find both widgets and swap their grid positions.
+                    dln::Widget* wa = nullptr;
+                    dln::Widget* wb = nullptr;
+                    for (auto& w : shared_dash->widgets) {
+                        if (w.widget_id == from_id) wa = &w;
+                        if (w.widget_id == to_id) wb = &w;
+                    }
+                    if (wa && wb) {
+                        std::swap(wa->x, wb->x);
+                        std::swap(wa->y, wb->y);
+                        std::swap(wa->width, wb->width);
+                        std::swap(wa->height, wb->height);
+                        (*rebuild_dashboard)();
+                    }
+                });
+                // Right-click → configure gauge dialog.
+                gauge->set_config_callback(
+                    [shared_dash, gauge_catalog, rebuild_dashboard](
+                        const std::string& wid) {
+                    for (auto& w : shared_dash->widgets) {
+                        if (w.widget_id == wid) {
+                            if (open_gauge_config_dialog(nullptr, w, *gauge_catalog))
+                                (*rebuild_dashboard)();
+                            break;
+                        }
+                    }
+                });
                 dash_grid->addWidget(gauge, gy, gx, gh, gw);
                 binding.dial = gauge;
             } else {
