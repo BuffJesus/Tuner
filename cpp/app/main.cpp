@@ -5317,6 +5317,11 @@ QWidget* build_live_tab(
     auto indicator_bindings = std::make_shared<std::vector<IndicatorBinding>>();
 
     // Map INI color names → theme hex values.
+    // Map INI color names to dark-theme-appropriate values.
+    // The INI uses TunerStudio's light-theme palette (white bg + black text
+    // for off-state, colored bg for on-state). We remap "white" bg to the
+    // dark theme's inset panel color so off-state chips blend into the
+    // chrome instead of glowing like headlights.
     auto color_hex = [](const std::string& name, bool is_bg) -> const char* {
         std::string lower = name;
         for (auto& ch : lower) ch = static_cast<char>(
@@ -5324,8 +5329,8 @@ QWidget* build_live_tab(
         if (lower == "red")    return tt::accent_danger;
         if (lower == "green")  return tt::accent_ok;
         if (lower == "yellow") return tt::accent_warning;
-        if (lower == "white")  return is_bg ? tt::text_primary : tt::text_primary;
-        if (lower == "black")  return is_bg ? tt::bg_base : tt::bg_base;
+        if (lower == "white")  return is_bg ? tt::bg_inset : tt::text_primary;
+        if (lower == "black")  return is_bg ? tt::bg_base : tt::text_muted;
         if (lower == "blue")   return tt::accent_primary;
         return is_bg ? tt::bg_elevated : tt::text_dim;
     };
@@ -5827,7 +5832,7 @@ QWidget* build_live_tab(
                 "map %.1f PSI</span>"
                 "<span style='color: %s; font-size: %dpx;'>  \xc2\xb7  </span>"
                 "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
-                "revT %.1f ms</span>",
+                "rev %.1f ms</span>",
                 tt::text_dim, tt::font_micro,
                 tt::accent_special, tt::font_medium, snap.get("lambda"),
                 tt::text_dim, tt::font_small,
