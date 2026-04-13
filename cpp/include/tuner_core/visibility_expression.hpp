@@ -2,7 +2,7 @@
 //
 // tuner_core::visibility_expression — port of the Python
 // `VisibilityExpressionService`. Pure-logic evaluator for the small
-// boolean expression language used by TunerStudio/Speeduino INI
+// boolean expression language used by legacy/Speeduino INI
 // `field = ..., { expr }` visibility clauses. First sub-slice of the
 // Phase 14 workspace-services port (Slice 4).
 //

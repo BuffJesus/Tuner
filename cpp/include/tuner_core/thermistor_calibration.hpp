@@ -5,7 +5,7 @@
 //
 // Generates Speeduino-format 32-point ADC → temperature lookup tables for
 // CLT/IAT sensors using the Steinhart-Hart equation. Includes the full
-// built-in preset catalog (15 presets from the Speeduino/TunerStudio INI).
+// built-in preset catalog (15 presets from the Speeduino/legacy INI).
 //
 // Pure math — no Qt, no IO, no transport.
 

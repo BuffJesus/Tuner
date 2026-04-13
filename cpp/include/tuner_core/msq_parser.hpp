@@ -62,7 +62,7 @@ MsqDocument parse_msq_text(std::string_view xml);
 // present in the source XML are silently dropped.
 //
 // `updates` maps constant name → new inner-text. The text is written
-// verbatim; the caller is responsible for matching TunerStudio's
+// verbatim; the caller is responsible for matching legacy's
 // formatting (multi-line table layout, etc.).
 //
 // Returns the number of constants whose text was actually updated.
@@ -89,7 +89,7 @@ std::string write_msq_text(
 // yet materialised in the source MSQ (e.g. loading a tune whose veTable
 // entry was absent from the base file).
 //
-// The caller is responsible for formatting `text` to match TunerStudio's
+// The caller is responsible for formatting `text` to match legacy's
 // conventions (multi-line table layout, scalar representation, etc.).
 // The helpers below mirror the Python `_format_value` / `_fmt_scalar`
 // output byte-for-byte so callers can produce compatible text without
@@ -103,7 +103,7 @@ struct MsqInsertion {
     int digits = -1;            // -1 = omit attribute
 };
 
-// Format a scalar the same way TunerStudio/Python MsqWriteService does:
+// Format a scalar the same way legacy/Python MsqWriteService does:
 // integers (including floats like 6.0) render without a decimal point,
 // non-integer floats use std::to_string default.
 std::string format_msq_scalar(double value);

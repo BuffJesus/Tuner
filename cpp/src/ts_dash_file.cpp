@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// Hand-rolled XML scanner for TSDash .dash files — same approach as
+// Hand-rolled XML scanner for legacy dashboard .dash files — same approach as
 // the MSQ parser (no third-party XML library).  The .dash format is
 // simple enough that a line scanner handles it well.
 
@@ -52,7 +52,7 @@ std::string attr_value(const std::string& tag_text, const std::string& attr_name
     return (end != std::string::npos) ? tag_text.substr(pos, end - pos) : "";
 }
 
-// Map TSDash FQN class names to our widget kinds.
+// Map legacy dashboard FQN class names to our widget kinds.
 std::string kind_from_type(const std::string& type_fqn) {
     if (type_fqn.find("Gauge") != std::string::npos) return "dial";
     if (type_fqn.find("Indicator") != std::string::npos) return "indicator";

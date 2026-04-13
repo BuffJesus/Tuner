@@ -9,7 +9,7 @@
 // `[Menu]` is a stateful grammar like the previous parser slices:
 // `menu = "Title"` opens a new menu, then a sequence of `subMenu =`
 // or `groupChildMenu =` lines populate items into the active menu.
-// Items targeting `std_separator` are dropped (TunerStudio uses
+// Items targeting `std_separator` are dropped (legacy uses
 // these as visual dividers, not selectable nodes).
 //
 // Item lines carry up to four fields after the target:
@@ -21,7 +21,7 @@
 // Why this slice matters: the menu catalog is the bridge between
 // the section parsers (which produce table/curve/dialog metadata)
 // and the workspace navigator UI. Every page the operator can
-// navigate to in TunerStudio is reachable from a `[Menu]` entry,
+// navigate to in legacy is reachable from a `[Menu]` entry,
 // and the visibility expressions on menu items are how features
 // like "show LAMBDA-only pages only when LAMBDA is set" work.
 

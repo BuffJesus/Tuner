@@ -4,7 +4,7 @@
 // Sub-slice 75 of Phase 14 Slice 4.
 //
 // Formats tune values (scalar, string, table) for MSQ XML output,
-// matching TunerStudio's formatting conventions.
+// matching legacy's formatting conventions.
 
 #pragma once
 
@@ -16,7 +16,7 @@ namespace tuner_core::msq_value_formatter {
 
 using Value = std::variant<double, std::string, std::vector<double>>;
 
-/// Format a scalar number the way TunerStudio does: integers without decimals.
+/// Format a scalar number the way legacy does: integers without decimals.
 std::string format_scalar(double value);
 
 /// Format a tune value for MSQ XML text content.

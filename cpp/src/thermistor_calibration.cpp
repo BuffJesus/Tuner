@@ -17,7 +17,7 @@ static std::vector<Preset> build_presets() {
     auto add = [&](const char* name, double pullup,
                    Point p1, Point p2, Point p3,
                    bool clt = true, bool iat = true,
-                   const char* note = "Generic thermistor preset mirrored from the Speeduino / TunerStudio preset catalog.",
+                   const char* note = "Generic thermistor preset mirrored from the Speeduino / legacy preset catalog.",
                    const char* url = "") {
         Preset p;
         p.name = name;

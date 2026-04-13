@@ -199,7 +199,7 @@ std::string format_msq_scalar(double value) {
     //     6.5  → "6.5"
     // Non-integers use std::to_string's default formatting, which
     // matches Python's `str(float)` for the values MsqWriteService
-    // cares about (TunerStudio scalars are simple decimals, never
+    // cares about (legacy scalars are simple decimals, never
     // scientific notation in the fixture set).
     if (std::isfinite(value) && value == std::floor(value)) {
         long long as_int = static_cast<long long>(value);

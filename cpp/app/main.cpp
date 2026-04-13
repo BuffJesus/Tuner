@@ -10457,7 +10457,7 @@ QWidget* build_history_tab() {
         "67. datalog_replay - row selection with channel preview",
         "68. ignition_trigger_cross_validation - 6 cross-page ign/trig checks + topology",
         "69. mock_ecu_runtime - simulated driving cycle for live gauge animation",
-        "70. ts_dash_file - TSDash .dash XML import/export",
+        "70. ts_dash_file - legacy dashboard .dash XML import/export",
         "71. wue_analyze_accumulator - WUE stateful accumulator with CLT axis detection",
         "72. ve_analyze_accumulator - VE stateful accumulator with RPM/MAP cell mapping",
         "73. tuning_page_builder - compiles definition into grouped page model",

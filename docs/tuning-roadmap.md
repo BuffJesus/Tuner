@@ -1156,7 +1156,7 @@ This section is intentionally beyond the active Python delivery roadmap. It exis
 ### Program goals
 
 - keep the Python app as the reference implementation until workflow and compatibility semantics stop moving
-- move from "TunerStudio-compatible where needed" toward "owned ecosystem" where firmware, tune contract, definition contract, and desktop behavior are controlled together
+- move from "legacy-compatible where needed" toward "owned ecosystem" where firmware, tune contract, definition contract, and desktop behavior are controlled together
 - prepare for a possible native future without forcing a rewrite before the model is understood
 
 ### Firmware Roadmap Cross-Reference
@@ -3109,7 +3109,7 @@ C++ doctest suite: **1068 tests, 9660 assertions, 0 failures.**
 - 72: VeAnalyzeAccumulator — VE stateful accumulator + cell mapping
 - 73: TuningPageBuilder — compiles definition into grouped pages
 - 74: DatalogImport — CSV import with time detection
-- 75: MsqValueFormatter — TunerStudio-compatible value formatting
+- 75: MsqValueFormatter — legacy-compatible value formatting
 - 76: WorkspaceState — page state machine (clean/staged/written/burned)
 - 77: NativeTuneWriter — .tuner JSON export/import (native format step 1)
 - 78: ProjectFile — .tunerproj JSON project metadata (native format step 2)

@@ -3,7 +3,7 @@
 // tuner_core::ts_dash_file — port of TsDashFileService parse/export.
 // Sub-slice 70 of Phase 14 Slice 4.
 //
-// Parses TSDash .dash XML format into DashboardLayout widgets and
+// Parses legacy dashboard .dash XML format into DashboardLayout widgets and
 // exports back to XML.  Pure logic, no file I/O.
 
 #pragma once

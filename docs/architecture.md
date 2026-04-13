@@ -331,7 +331,7 @@ Supporting services:
 
 Current priorities remain:
 
-1. preserve TunerStudio operating model for Speeduino-first workflows
+1. preserve legacy tuning software operating model for Speeduino-first workflows
 2. keep offline editing equal to live editing
 3. make sync/write/burn/revert states explicit
 4. keep hardware/setup guidance reviewable and staged

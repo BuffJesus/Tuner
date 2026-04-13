@@ -75,7 +75,7 @@ These must not be conflated. Autotune filter expressions, gauge properties, and 
 
 ## Legacy Format Findings
 
-The current Speeduino/TunerStudio-compatible contract is a reconstruction target, not a good long-term native design target.
+The current Speeduino/legacy-compatible contract is a reconstruction target, not a good long-term native design target.
 
 Findings from the validated release artifacts, firmware notes, and decompiled TunerStudio sources:
 
@@ -261,7 +261,7 @@ The compatibility-first rule is:
 ### Improve-later native logging plan
 
 Once the project owns the firmware and file contracts, logging should improve beyond the
-TunerStudio-compatible baseline.
+legacy-compatible baseline.
 
 Preferred native direction:
 
@@ -638,7 +638,7 @@ Transport Layer (serial, TCP, mock, XCP)
 - LocalTuneEditService: per-parameter staged values, undo/redo history
 - Table editor context: help text, axis range tooltips, page diff, power-cycle warnings, and dynamic sizing
 - Table editor shell modernization: compact workspace shell, staged/sync review tabs, multi-cell range editing, better selection responsiveness, and a three-panel table editor layout with dedicated header/grid/footer regions
-- Table interaction parity still needs final polish: closer TunerStudio-style row/region selection edge cases, viewport-fit behavior, and a few spreadsheet-style edit/apply refinements remain pending
+- Table interaction parity still needs final polish: closer legacy-style row/region selection edge cases, viewport-fit behavior, and a few spreadsheet-style edit/apply refinements remain pending
 - Logging/replay parity remains incomplete, but Phase 5 is now materially underway: freshness-aware evidence summaries, operation-evidence grouping, replayable evidence bundle snapshots, evidence history review, pinned-vs-latest comparison, trigger-log analysis, CSV datalog import/replay, lightweight chart review, and active tuning-page/table evidence hooks now exist; formal sample gating, richer timeline navigation, and VE Analyze-ready evidence evaluation are still pending
 - Sync mismatch detection: signature mismatch, page-size mismatch, ECU-vs-tune mismatch, stale staged changes
 - Hardware setup validation scaffolding: injector / ignition / trigger / sensor checks surfaced as warnings and errors, plus first summary cards for hardware pages

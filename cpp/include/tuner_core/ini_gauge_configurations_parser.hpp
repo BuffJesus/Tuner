@@ -13,7 +13,7 @@
 //
 // Categories are introduced by `gaugeCategory = "Name"` lines and
 // apply to every subsequent gauge entry until the next category line.
-// Threshold values that contain inline TunerStudio expressions
+// Threshold values that contain inline legacy expressions
 // (e.g. `{rpmhigh}`) cannot be evaluated at parse time and are
 // stored as nullopt — they're frozen and never auto-resolved.
 //

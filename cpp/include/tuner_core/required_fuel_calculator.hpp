@@ -2,7 +2,7 @@
 //
 // tuner_core::required_fuel_calculator — port of the Python
 // `RequiredFuelCalculatorService`. Implements the exact formula used
-// in the TunerStudio Required Fuel Calculator dialog (an.java) so the
+// in the legacy Required Fuel Calculator dialog (an.java) so the
 // C++ Hardware Setup Wizard can compute the staged `reqFuel` value
 // without round-tripping through Python. Second sub-slice of the
 // Phase 14 workspace-services port (Slice 4).

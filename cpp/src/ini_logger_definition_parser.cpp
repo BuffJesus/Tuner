@@ -68,7 +68,7 @@ std::string strip_outer_quotes(std::string_view value) {
     return std::string(std::string_view(stripped).substr(b, e - b));
 }
 
-// Decode a TunerStudio command string to raw bytes. Handles `\xNN` hex
+// Decode a legacy command string to raw bytes. Handles `\xNN` hex
 // escapes and rewrites `$tsCanId` (with or without leading `\`) to
 // `\x00\x00`. Direct port of the Python helper.
 std::vector<std::uint8_t> decode_command(std::string_view raw) {
