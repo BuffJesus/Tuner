@@ -4148,6 +4148,12 @@ These are the lower-priority items from the gap analysis above. None of them blo
 - **G6: Standalone log viewer parity (MegaLogViewer)** — `LogAnalyzerPanel` as a new top-level tab with timeline scrubbing, multi-cursor measurement, side-by-side dual-log comparison.
 - **G7: Ignition timing scope** — high-speed trigger logger visualization. We already have CSV-based trigger log capture; the missing piece is the real-time oscilloscope view.
 - **G8–G12:** lower priority — see the gap analysis table above for individual rationale.
+- **G13: Embedded flash for Mega2560 + STM32 (no external exe).** Teensy already flashes with zero external dependency via the embedded Win32 HID path (`cpp/src/teensy_hid_flasher.cpp`, Windows-only, mirrors the legacy Python `_flash_internal_teensy`). The other two board families still shell out:
+  - **Mega2560 (AVRDUDE)** — port the STK500v2 bootloader protocol over `QSerialPort`. Pure stdlib, no vendored deps. ~400 LOC. Removes the `avrdude.exe` + `avrdude.conf` bundling requirement.
+  - **STM32F407 (dfu-util)** — vendor `libusb-1.0` + port the DFU 1.1 protocol (`DETACH`, `DNLOAD`, `GETSTATUS`, `CLRSTATUS`, `ABORT`). ~500 LOC + a DLL per platform. Removes the `dfu-util-static.exe` bundling requirement.
+  - Teensy on Linux/macOS is a related gap — the current embedded path is Windows-only (`setupapi`/`hid.dll`). Porting to hidapi would close it but adds a vendored dep.
+
+  Neither is required for our target workflow (Teensy DropBear is the primary board), so these stay as subprocess fallbacks. The subprocess paths already exist and work; this backlog item is pure polish for operators on other boards who'd rather not have a `tools/` directory next to the exe.
 
 #### Phase 14 / Firmware Phase 12 joint commitment: U16 maps where precision matters (DropBear)
 

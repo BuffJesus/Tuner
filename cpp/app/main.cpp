@@ -84,6 +84,8 @@
 #include "tuner_core/ecu_definition_compiler.hpp"
 #include "tuner_core/firmware_catalog.hpp"
 #include "tuner_core/firmware_flash_builder.hpp"
+#include "tuner_core/teensy_hex_image.hpp"
+#include "tuner_core/teensy_hid_flasher.hpp"
 #include "tuner_core/live_analyze_session.hpp"
 #include "tuner_core/live_capture_session.hpp"
 #include "tuner_core/live_trigger_logger.hpp"
@@ -167,8 +169,10 @@ namespace tt = tuner_theme;
 #include <QMessageBox>
 #include <QProcess>
 #include <QProgressBar>
+#include <QStandardPaths>
 #include <QString>
 #include <QStyleFactory>
+#include <QSysInfo>
 #include <QTabWidget>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
@@ -238,6 +242,147 @@ std::vector<std::string> list_serial_ports() {
     std::sort(ports.begin(), ports.end());
 #endif
     return ports;
+}
+
+std::string current_system_name() {
+#ifdef _WIN32
+    return "windows";
+#elif defined(__APPLE__)
+    return "darwin";
+#else
+    return "linux";
+#endif
+}
+
+std::string current_machine_name() {
+    std::string arch = QSysInfo::currentCpuArchitecture().toStdString();
+    std::transform(arch.begin(), arch.end(), arch.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    if (arch == "x86_64" || arch == "x86-64") return "x86_64";
+    if (arch == "amd64") return "amd64";
+    if (arch == "i386" || arch == "i686" || arch == "x86") return arch;
+    if (arch == "arm64") return "arm64";
+    if (arch == "aarch64") return "aarch64";
+    if (arch == "arm" || arch == "armv7l") return arch;
+    return arch.empty() ? "x86_64" : arch;
+}
+
+std::vector<std::filesystem::path> flash_search_roots() {
+    std::vector<std::filesystem::path> roots;
+    const auto app_dir = std::filesystem::path(
+        QCoreApplication::applicationDirPath().toStdString());
+    const auto cwd = std::filesystem::current_path();
+    const auto home_dir = std::filesystem::path(QDir::homePath().toStdString());
+    roots.push_back(app_dir);
+    roots.push_back(app_dir / "tools");
+    if (app_dir.has_parent_path()) {
+        roots.push_back(app_dir.parent_path());
+        roots.push_back(app_dir.parent_path() / "tools");
+    }
+    roots.push_back(cwd);
+    roots.push_back(cwd / "tools");
+#ifdef _WIN32
+    roots.push_back(home_dir / ".platformio" / "packages" / "tool-teensy");
+    const auto desktop_dir = home_dir / "Desktop";
+    std::error_code ec;
+    if (std::filesystem::exists(desktop_dir, ec) && !ec) {
+        for (const auto& entry : std::filesystem::directory_iterator(desktop_dir, ec)) {
+            if (ec || !entry.is_directory()) continue;
+            const auto name = entry.path().filename().string();
+            if (name.rfind("SpeedyLoader-", 0) == 0) {
+                roots.push_back(entry.path());
+                roots.push_back(entry.path() / "bin");
+            }
+        }
+    }
+#endif
+    return roots;
+}
+
+std::string find_flash_program_path(tuner_core::firmware_flash_builder::FlashTool tool,
+                                    const std::string& filename) {
+    namespace ffb = tuner_core::firmware_flash_builder;
+
+    const auto system_name = current_system_name();
+    std::string platform_name;
+    try {
+        platform_name = ffb::platform_dir(tool, system_name, current_machine_name());
+    } catch (const std::exception&) {
+        platform_name.clear();
+    }
+
+    for (const auto& root : flash_search_roots()) {
+        std::vector<std::filesystem::path> candidates;
+        candidates.push_back(root / filename);
+        if (!platform_name.empty()) {
+            candidates.push_back(root / platform_name / filename);
+            candidates.push_back(root / "bin" / platform_name / filename);
+            candidates.push_back(root / "tools" / "bin" / platform_name / filename);
+        }
+        candidates.push_back(root / "bin" / filename);
+        for (const auto& candidate : candidates) {
+            std::error_code ec;
+            if (std::filesystem::exists(candidate, ec) && !ec) {
+                return candidate.string();
+            }
+        }
+    }
+
+    const auto resolved = QStandardPaths::findExecutable(QString::fromUtf8(filename.c_str()));
+    return resolved.isEmpty() ? std::string() : resolved.toStdString();
+}
+
+std::string find_flash_support_file(tuner_core::firmware_flash_builder::FlashTool tool,
+                                    const std::string& filename,
+                                    const std::string& program_path = std::string()) {
+    namespace ffb = tuner_core::firmware_flash_builder;
+
+    const auto system_name = current_system_name();
+    std::string platform_name;
+    try {
+        platform_name = ffb::platform_dir(tool, system_name, current_machine_name());
+    } catch (const std::exception&) {
+        platform_name.clear();
+    }
+
+    std::vector<std::filesystem::path> roots;
+    if (!program_path.empty()) {
+        auto program_parent = std::filesystem::path(program_path).parent_path();
+        roots.push_back(program_parent);
+        if (program_parent.has_parent_path()) {
+            roots.push_back(program_parent.parent_path());
+        }
+    }
+    for (const auto& root : flash_search_roots()) {
+        roots.push_back(root);
+    }
+
+    for (const auto& root : roots) {
+        std::vector<std::filesystem::path> candidates;
+        candidates.push_back(root / filename);
+        if (!platform_name.empty()) {
+            candidates.push_back(root / platform_name / filename);
+            candidates.push_back(root / "bin" / platform_name / filename);
+            candidates.push_back(root / "tools" / "bin" / platform_name / filename);
+        }
+        candidates.push_back(root / "bin" / filename);
+        for (const auto& candidate : candidates) {
+            std::error_code ec;
+            if (std::filesystem::exists(candidate, ec) && !ec) {
+                return candidate.string();
+            }
+        }
+    }
+    return std::string();
+}
+
+void set_info_card_accent(QWidget* card, const char* accent_color) {
+    char style[256];
+    std::snprintf(style, sizeof(style),
+        "background-color: %s; border: 1px solid %s; "
+        "border-left: 3px solid %s; border-radius: %dpx;",
+        tt::bg_elevated, tt::border, accent_color, tt::radius_md);
+    card->setStyleSheet(QString::fromUtf8(style));
 }
 
 // ---------------------------------------------------------------------------
@@ -6468,74 +6613,38 @@ QWidget* build_flash_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
         "Flash Firmware",
         "Preflight \xe2\x86\x92 Select \xe2\x86\x92 Flash \xe2\x86\x92 Verify"));
 
-    // Build preflight from real project state.
-    std::string def_sig, tune_sig;
-    {
-        QSettings settings;
-        def_sig = settings.value(kCurrentProjectSigKey, "").toString().toStdString();
-        tune_sig = def_sig;
-    }
-
     auto ports = list_serial_ports();
+    auto current_definition_signature = std::make_shared<std::string>();
+    auto current_tune_signature = std::make_shared<std::string>();
+    auto current_detected_board = std::make_shared<std::optional<bd::BoardFamily>>();
 
-    // Preflight checklist — reads real state.
+    auto* preflight_card = new QWidget;
+    auto* preflight_layout = new QVBoxLayout(preflight_card);
+    preflight_layout->setContentsMargins(tt::space_md + 2, tt::space_md, tt::space_md + 2, tt::space_md);
+    preflight_layout->setSpacing(tt::space_xs + 2);
+    auto* preflight_title_label = new QLabel;
     {
-        char checklist[2048]; int coff = 0;
-        if (ecu_conn && ecu_conn->connected) {
-            coff += std::snprintf(checklist + coff, sizeof(checklist) - coff,
-                "\xe2\x9c\x85 Connection: %s\n", ecu_conn->info.signature.c_str());
-        } else {
-            coff += std::snprintf(checklist + coff, sizeof(checklist) - coff,
-                "\xe2\x9d\x8c Connection: Offline \xe2\x80\x94 connect via File \xe2\x86\x92 Connect\n");
-        }
-        if (!def_sig.empty()) {
-            coff += std::snprintf(checklist + coff, sizeof(checklist) - coff,
-                "\xe2\x9c\x85 Definition: %s\n", def_sig.c_str());
-        } else {
-            coff += std::snprintf(checklist + coff, sizeof(checklist) - coff,
-                "\xe2\x9a\xa0\xef\xb8\x8f Definition: not loaded\n");
-        }
-        if (!tune_sig.empty()) {
-            coff += std::snprintf(checklist + coff, sizeof(checklist) - coff,
-                "\xe2\x9c\x85 Tune: %s\n", tune_sig.c_str());
-        } else {
-            coff += std::snprintf(checklist + coff, sizeof(checklist) - coff,
-                "\xe2\x9a\xa0\xef\xb8\x8f Tune: no MSQ loaded\n");
-        }
-        if (!def_sig.empty() && !tune_sig.empty()) {
-            if (def_sig == tune_sig) {
-                coff += std::snprintf(checklist + coff, sizeof(checklist) - coff,
-                    "\xe2\x9c\x85 Signatures match\n");
-            } else {
-                coff += std::snprintf(checklist + coff, sizeof(checklist) - coff,
-                    "\xe2\x9a\xa0\xef\xb8\x8f Signature mismatch: definition=%s  tune=%s\n",
-                    def_sig.c_str(), tune_sig.c_str());
-            }
-        }
-        if (ports.empty()) {
-            coff += std::snprintf(checklist + coff, sizeof(checklist) - coff,
-                "\xe2\x9a\xa0\xef\xb8\x8f No serial ports detected");
-        } else {
-            coff += std::snprintf(checklist + coff, sizeof(checklist) - coff,
-                "\xe2\x9c\x85 Ports: ");
-            for (size_t i = 0; i < ports.size(); ++i) {
-                if (i > 0) coff += std::snprintf(checklist + coff, sizeof(checklist) - coff, ", ");
-                coff += std::snprintf(checklist + coff, sizeof(checklist) - coff, "%s", ports[i].c_str());
-            }
-        }
-        bool has_warnings = def_sig.empty() || tune_sig.empty()
-            || (!def_sig.empty() && !tune_sig.empty() && def_sig != tune_sig)
-            || ports.empty() || !(ecu_conn && ecu_conn->connected);
-        const char* checklist_color = has_warnings ? tt::accent_warning : tt::accent_ok;
-        const char* checklist_title = has_warnings
-            ? "Preflight: Review Required" : "Preflight: Ready to Flash";
-        layout->addWidget(make_info_card(checklist_title, checklist, checklist_color));
+        QFont hf = preflight_title_label->font();
+        hf.setBold(true);
+        hf.setPixelSize(tt::font_label);
+        preflight_title_label->setFont(hf);
+        char style[96];
+        std::snprintf(style, sizeof(style),
+            "color: %s; border: none;", tt::text_primary);
+        preflight_title_label->setStyleSheet(QString::fromUtf8(style));
     }
-
-    // Board family from signature.
-    auto sig_family = fp::signature_family(def_sig);
-    std::string family_str = sig_family.value_or("unknown");
-    auto detected_board = bd::detect_from_text(def_sig);
+    auto* preflight_body_label = new QLabel;
+    preflight_body_label->setWordWrap(true);
+    {
+        char style[96];
+        std::snprintf(style, sizeof(style),
+            "color: %s; border: none; font-size: %dpx;",
+            tt::text_secondary, tt::font_body);
+        preflight_body_label->setStyleSheet(QString::fromUtf8(style));
+    }
+    preflight_layout->addWidget(preflight_title_label);
+    preflight_layout->addWidget(preflight_body_label);
+    layout->addWidget(preflight_card);
 
     // ---------------------------------------------------------------
     // Firmware selection + port selection + flash action
@@ -6617,7 +6726,7 @@ QWidget* build_flash_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
     }
 
     // Helper to update flash button enabled state.
-    auto update_flash_enabled = [flash_btn, firmware_path, port_combo, &ports]() {
+    auto update_flash_enabled = [flash_btn, firmware_path, port_combo]() {
         bool can_flash = !firmware_path->empty()
             && port_combo->isEnabled()
             && port_combo->count() > 0;
@@ -6649,24 +6758,33 @@ QWidget* build_flash_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
     port_row->addWidget(flash_btn);
     layout->addLayout(port_row);
 
-    // Board family info card.
+    auto* firmware_card = new QWidget;
+    auto* firmware_layout = new QVBoxLayout(firmware_card);
+    firmware_layout->setContentsMargins(tt::space_md + 2, tt::space_md, tt::space_md + 2, tt::space_md);
+    firmware_layout->setSpacing(tt::space_xs + 2);
+    auto* firmware_title_label = new QLabel(QString::fromUtf8("Firmware"));
     {
-        char fw_desc[512];
-        if (!def_sig.empty()) {
-            std::snprintf(fw_desc, sizeof(fw_desc),
-                "Definition: %s\n"
-                "Board family: %s",
-                def_sig.c_str(), family_str.c_str());
-        } else {
-            std::snprintf(fw_desc, sizeof(fw_desc),
-                "Load a project first to get firmware recommendations.\n"
-                "Use File \xe2\x86\x92 Open Tune to load an INI + MSQ pair.");
-        }
-        layout->addWidget(make_info_card(
-            "Firmware",
-            fw_desc,
-            def_sig.empty() ? tt::accent_primary : tt::accent_ok));
+        QFont hf = firmware_title_label->font();
+        hf.setBold(true);
+        hf.setPixelSize(tt::font_label);
+        firmware_title_label->setFont(hf);
+        char style[96];
+        std::snprintf(style, sizeof(style),
+            "color: %s; border: none;", tt::text_primary);
+        firmware_title_label->setStyleSheet(QString::fromUtf8(style));
     }
+    auto* firmware_body_label = new QLabel;
+    firmware_body_label->setWordWrap(true);
+    {
+        char style[96];
+        std::snprintf(style, sizeof(style),
+            "color: %s; border: none; font-size: %dpx;",
+            tt::text_secondary, tt::font_body);
+        firmware_body_label->setStyleSheet(QString::fromUtf8(style));
+    }
+    firmware_layout->addWidget(firmware_title_label);
+    firmware_layout->addWidget(firmware_body_label);
+    layout->addWidget(firmware_card);
 
     // Flash output log — shows subprocess stdout/stderr.
     auto* log_label = new QLabel(QString::fromUtf8("Flash Log"));
@@ -6713,6 +6831,96 @@ QWidget* build_flash_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
     // Signal wiring
     // ---------------------------------------------------------------
 
+    auto refresh_flash_state =
+        [ecu_conn, current_definition_signature, current_tune_signature,
+         current_detected_board, preflight_card, preflight_title_label,
+         preflight_body_label, firmware_card, firmware_body_label]() {
+        QSettings settings;
+        *current_definition_signature =
+            settings.value(kCurrentProjectSigKey, "").toString().toStdString();
+        *current_tune_signature = *current_definition_signature;
+        *current_detected_board = bd::detect_from_text(*current_definition_signature);
+        auto fresh_ports = list_serial_ports();
+
+        char checklist[2048];
+        int coff = 0;
+        if (ecu_conn && ecu_conn->connected) {
+            coff += std::snprintf(checklist + coff, sizeof(checklist) - coff,
+                "\xe2\x9c\x85 Connection: %s\n", ecu_conn->info.signature.c_str());
+        } else {
+            coff += std::snprintf(checklist + coff, sizeof(checklist) - coff,
+                "\xe2\x9d\x8c Connection: Offline \xe2\x80\x94 connect via File \xe2\x86\x92 Connect\n");
+        }
+        if (!current_definition_signature->empty()) {
+            coff += std::snprintf(checklist + coff, sizeof(checklist) - coff,
+                "\xe2\x9c\x85 Definition: %s\n", current_definition_signature->c_str());
+        } else {
+            coff += std::snprintf(checklist + coff, sizeof(checklist) - coff,
+                "\xe2\x9a\xa0\xef\xb8\x8f Definition: not loaded\n");
+        }
+        if (!current_tune_signature->empty()) {
+            coff += std::snprintf(checklist + coff, sizeof(checklist) - coff,
+                "\xe2\x9c\x85 Tune: %s\n", current_tune_signature->c_str());
+        } else {
+            coff += std::snprintf(checklist + coff, sizeof(checklist) - coff,
+                "\xe2\x9a\xa0\xef\xb8\x8f Tune: no MSQ loaded\n");
+        }
+        if (!current_definition_signature->empty() && !current_tune_signature->empty()) {
+            if (*current_definition_signature == *current_tune_signature) {
+                coff += std::snprintf(checklist + coff, sizeof(checklist) - coff,
+                    "\xe2\x9c\x85 Signatures match\n");
+            } else {
+                coff += std::snprintf(checklist + coff, sizeof(checklist) - coff,
+                    "\xe2\x9a\xa0\xef\xb8\x8f Signature mismatch: definition=%s  tune=%s\n",
+                    current_definition_signature->c_str(), current_tune_signature->c_str());
+            }
+        }
+        if (fresh_ports.empty()) {
+            coff += std::snprintf(checklist + coff, sizeof(checklist) - coff,
+                "\xe2\x9a\xa0\xef\xb8\x8f No serial ports detected");
+        } else {
+            coff += std::snprintf(checklist + coff, sizeof(checklist) - coff,
+                "\xe2\x9c\x85 Ports: ");
+            for (size_t i = 0; i < fresh_ports.size(); ++i) {
+                if (i > 0) coff += std::snprintf(checklist + coff, sizeof(checklist) - coff, ", ");
+                coff += std::snprintf(checklist + coff, sizeof(checklist) - coff, "%s", fresh_ports[i].c_str());
+            }
+        }
+
+        const bool has_warnings = current_definition_signature->empty()
+            || current_tune_signature->empty()
+            || (*current_definition_signature != *current_tune_signature)
+            || fresh_ports.empty()
+            || !(ecu_conn && ecu_conn->connected);
+        preflight_title_label->setText(QString::fromUtf8(
+            has_warnings ? "Preflight: Review Required" : "Preflight: Ready to Flash"));
+        preflight_body_label->setText(QString::fromUtf8(checklist));
+        set_info_card_accent(preflight_card, has_warnings ? tt::accent_warning : tt::accent_ok);
+
+        char fw_desc[512];
+        if (!current_definition_signature->empty()) {
+            auto sig_family = fp::signature_family(*current_definition_signature);
+            const std::string family_str = sig_family.value_or("unknown");
+            std::snprintf(fw_desc, sizeof(fw_desc),
+                "Definition: %s\n"
+                "Board family: %s",
+                current_definition_signature->c_str(), family_str.c_str());
+            set_info_card_accent(firmware_card, tt::accent_ok);
+        } else {
+            std::snprintf(fw_desc, sizeof(fw_desc),
+                "Load a project first to get firmware recommendations.\n"
+                "Use File \xe2\x86\x92 Open Tune to load an INI + MSQ pair.");
+            set_info_card_accent(firmware_card, tt::accent_primary);
+        }
+        firmware_body_label->setText(QString::fromUtf8(fw_desc));
+    };
+
+    refresh_flash_state();
+    auto* flash_state_timer = new QTimer(container);
+    flash_state_timer->setInterval(1000);
+    QObject::connect(flash_state_timer, &QTimer::timeout, refresh_flash_state);
+    flash_state_timer->start();
+
     // Select firmware file.
     QObject::connect(select_fw_btn, &QPushButton::clicked,
                      [container, fw_path_label, firmware_path,
@@ -6749,17 +6957,20 @@ QWidget* build_flash_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
     // Flash firmware — detect tool, build args, run subprocess.
     QObject::connect(flash_btn, &QPushButton::clicked,
                      [container, firmware_path, port_combo, flash_btn,
-                      select_fw_btn, log_output, progress_bar, detected_board,
-                      ecu_conn, def_sig]() {
+                      select_fw_btn, log_output, progress_bar,
+                      current_detected_board, ecu_conn,
+                      refresh_flash_state]() {
         std::string port = port_combo->currentText().toStdString();
         if (firmware_path->empty() || port.empty() || port == "(no ports)") return;
 
         // Determine flash tool and build arguments.
         std::string program;
         std::vector<std::string> args;
+        namespace ffb = tuner_core::firmware_flash_builder;
+        const auto system_name = current_system_name();
 
         // Detect board family from definition signature.
-        bd::BoardFamily board = detected_board.value_or(bd::BoardFamily::ATMEGA2560);
+        bd::BoardFamily board = current_detected_board->value_or(bd::BoardFamily::ATMEGA2560);
 
         log_output->clear();
         char header[256];
@@ -6770,29 +6981,138 @@ QWidget* build_flash_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
             std::string(bd::to_string(board)).c_str());
         log_output->append(QString::fromUtf8(header));
 
+        // Embedded HID flasher path — no external exe needed.
+        // Mirrors the old Python app's `_flash_internal_teensy` path.
+        const bool is_teensy =
+            board == bd::BoardFamily::TEENSY35 ||
+            board == bd::BoardFamily::TEENSY36 ||
+            board == bd::BoardFamily::TEENSY41;
+        if (is_teensy && tuner_core::teensy_hid_flasher::supported()) {
+            namespace thi = tuner_core::teensy_hex_image;
+            namespace thf = tuner_core::teensy_hid_flasher;
+            auto spec_src = ffb::teensy_mcu_spec(board);
+            thi::McuSpec spec{spec_src.name, spec_src.code_size, spec_src.block_size};
+
+            std::string hex_text;
+            try {
+                std::ifstream in(*firmware_path, std::ios::binary);
+                if (!in) throw std::runtime_error("could not open firmware file");
+                std::stringstream ss;
+                ss << in.rdbuf();
+                hex_text = ss.str();
+            } catch (const std::exception& e) {
+                char err[512];
+                std::snprintf(err, sizeof(err), "Error reading firmware: %s\n", e.what());
+                log_output->append(QString::fromUtf8(err));
+                return;
+            }
+
+            log_output->append(QString::fromUtf8("Using embedded HID flasher (no external exe).\n"));
+            flash_btn->setEnabled(false);
+            select_fw_btn->setEnabled(false);
+            progress_bar->show();
+            progress_bar->setRange(0, 100);
+            progress_bar->setValue(0);
+
+            if (ecu_conn && ecu_conn->connected) {
+                log_output->append(QString::fromUtf8(
+                    "Disconnecting ECU to free serial port...\n"));
+                ecu_conn->close();
+                refresh_flash_state();
+            }
+
+            std::string port_copy = port;
+            QPointer<QTextEdit> log_p(log_output);
+            QPointer<QProgressBar> prog_p(progress_bar);
+            QPointer<QPushButton> flash_p(flash_btn);
+            QPointer<QPushButton> select_p(select_fw_btn);
+            auto refresh = refresh_flash_state;
+
+            std::thread worker([hex_text, spec, port_copy,
+                                log_p, prog_p, flash_p, select_p, refresh]() {
+                auto on_progress = [log_p, prog_p](const thf::FlashProgress& p) {
+                    QString msg = QString::fromUtf8(p.message.c_str());
+                    int pct = p.percent;
+                    QMetaObject::invokeMethod(qApp, [log_p, prog_p, msg, pct]() {
+                        if (log_p) log_p->append(msg);
+                        if (prog_p && pct >= 0) prog_p->setValue(pct);
+                    }, Qt::QueuedConnection);
+                };
+                auto result = thf::flash(hex_text, spec, port_copy, on_progress);
+                QMetaObject::invokeMethod(qApp,
+                    [log_p, prog_p, flash_p, select_p, refresh, result]() {
+                        if (prog_p) prog_p->hide();
+                        if (log_p) {
+                            if (result.ok) {
+                                log_p->append(QString::fromUtf8(
+                                    "\n\xe2\x9c\x85 Flash completed successfully.\n"));
+                            } else {
+                                log_p->append(QString::fromUtf8(
+                                    (std::string("\n\xe2\x9d\x8c Flash failed: ") +
+                                     result.detail + "\n").c_str()));
+                            }
+                        }
+                        if (flash_p) flash_p->setEnabled(true);
+                        if (select_p) select_p->setEnabled(true);
+                        refresh();
+                    }, Qt::QueuedConnection);
+            });
+            worker.detach();
+            return;
+        }
+
         try {
             switch (board) {
             case bd::BoardFamily::ATMEGA2560: {
-                // AVRDUDE — look for bundled or system avrdude.
-                program = "avrdude";
-                args = ffb::build_avrdude_arguments(port, "", *firmware_path);
+                program = find_flash_program_path(
+                    ffb::FlashTool::AVRDUDE,
+                    ffb::tool_filename(ffb::FlashTool::AVRDUDE, system_name));
+                if (program.empty()) {
+                    throw std::runtime_error("avrdude executable not found (bundled tools or PATH).");
+                }
+                const auto config_path = find_flash_support_file(
+                    ffb::FlashTool::AVRDUDE, "avrdude.conf", program);
+                if (config_path.empty()) {
+                    throw std::runtime_error("avrdude.conf not found next to bundled tools.");
+                }
+                args = ffb::build_avrdude_arguments(port, config_path, *firmware_path);
                 break;
             }
             case bd::BoardFamily::TEENSY35:
             case bd::BoardFamily::TEENSY36:
             case bd::BoardFamily::TEENSY41: {
                 auto spec = ffb::teensy_mcu_spec(board);
-                if (ffb::supports_internal_teensy("windows")) {
-                    program = "teensy_loader_cli.exe";
+                program = find_flash_program_path(
+                    ffb::FlashTool::TEENSY,
+                    ffb::teensy_cli_filename(system_name));
+                if (!program.empty()) {
                     args = ffb::build_teensy_cli_arguments(spec.name, *firmware_path);
-                } else {
-                    program = "teensy_loader_cli";
-                    args = ffb::build_teensy_cli_arguments(spec.name, *firmware_path);
+                    break;
+                }
+                program = find_flash_program_path(
+                    ffb::FlashTool::TEENSY,
+                    ffb::tool_filename(ffb::FlashTool::TEENSY, system_name));
+                if (program.empty()) {
+                    throw std::runtime_error(
+                        "No Teensy flash tool found (teensy_loader_cli or teensy_post_compile).");
+                }
+                {
+                    const auto firmware_fs_path = std::filesystem::path(*firmware_path);
+                    args = ffb::build_teensy_legacy_arguments(
+                        spec.name,
+                        firmware_fs_path.stem().string(),
+                        firmware_fs_path.parent_path().string(),
+                        std::filesystem::path(program).parent_path().string());
                 }
                 break;
             }
             case bd::BoardFamily::STM32F407_DFU: {
-                program = "dfu-util";
+                program = find_flash_program_path(
+                    ffb::FlashTool::DFU_UTIL,
+                    ffb::tool_filename(ffb::FlashTool::DFU_UTIL, system_name));
+                if (program.empty()) {
+                    throw std::runtime_error("dfu-util executable not found (bundled tools or PATH).");
+                }
                 args = ffb::build_dfu_arguments("0483", "df11", *firmware_path);
                 break;
             }
@@ -6827,6 +7147,7 @@ QWidget* build_flash_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
             log_output->append(QString::fromUtf8(
                 "Disconnecting ECU to free serial port...\n"));
             ecu_conn->close();
+            refresh_flash_state();
         }
 
         // Run via QProcess.
@@ -6844,7 +7165,8 @@ QWidget* build_flash_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
         QObject::connect(process,
             static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(
                 &QProcess::finished),
-            [process, log_output, flash_btn, select_fw_btn, progress_bar](
+            [process, log_output, flash_btn, select_fw_btn, progress_bar,
+             refresh_flash_state](
                 int exitCode, QProcess::ExitStatus status) {
             progress_bar->hide();
             if (status == QProcess::NormalExit && exitCode == 0) {
@@ -6860,14 +7182,16 @@ QWidget* build_flash_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
             }
             flash_btn->setEnabled(true);
             select_fw_btn->setEnabled(true);
+            refresh_flash_state();
             process->deleteLater();
         });
         QObject::connect(process, &QProcess::errorOccurred,
-                         [process, log_output, flash_btn, select_fw_btn, progress_bar](
+                         [process, log_output, flash_btn, select_fw_btn, progress_bar,
+                          refresh_flash_state](
                              QProcess::ProcessError error) {
             const char* msg = "Unknown error";
             switch (error) {
-                case QProcess::FailedToStart: msg = "Failed to start — tool not found in PATH"; break;
+                case QProcess::FailedToStart: msg = "Failed to start — flash tool could not be launched"; break;
                 case QProcess::Crashed: msg = "Process crashed"; break;
                 case QProcess::Timedout: msg = "Process timed out"; break;
                 case QProcess::WriteError: msg = "Write error"; break;
@@ -6881,6 +7205,7 @@ QWidget* build_flash_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
             log_output->append(QString::fromUtf8(err));
             flash_btn->setEnabled(true);
             select_fw_btn->setEnabled(true);
+            refresh_flash_state();
             process->deleteLater();
         });
 

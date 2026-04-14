@@ -47,6 +47,16 @@ option(TUNER_CORE_BUILD_TESTS "Build the doctest unit suite" ON)
 option(TUNER_CORE_BUILD_BINDINGS "Build the nanobind Python extension (kept while Python is the oracle)" OFF)
 option(TUNER_BUILD_APP "Build the native Qt 6 desktop application" OFF)
 
+function(tuner_find_first_existing out_var)
+    foreach(candidate IN LISTS ARGN)
+        if(EXISTS "${candidate}")
+            set(${out_var} "${candidate}" PARENT_SCOPE)
+            return()
+        endif()
+    endforeach()
+    set(${out_var} "" PARENT_SCOPE)
+endfunction()
+
 # ---------------------------------------------------------------------------
 # Core library
 # ---------------------------------------------------------------------------
@@ -172,6 +182,8 @@ add_library(tuner_core STATIC
     src/transport_serial.cpp
     src/transport_tcp.cpp
     src/speeduino_controller.cpp
+    src/teensy_hex_image.cpp
+    src/teensy_hid_flasher.cpp
 )
 target_include_directories(tuner_core
     PUBLIC
@@ -182,7 +194,7 @@ target_include_directories(tuner_core
 target_compile_features(tuner_core PUBLIC cxx_std_20)
 # Link ws2_32 for winsock2 (TCP transport).
 if(WIN32)
-    target_link_libraries(tuner_core PRIVATE ws2_32)
+    target_link_libraries(tuner_core PRIVATE ws2_32 setupapi hid)
 endif()
 
 # Vendor check for nlohmann/json single header — used by native_format.cpp.
@@ -328,6 +340,7 @@ if(TUNER_CORE_BUILD_TESTS)
         tests/test_ini_reference_tables_parser.cpp
         tests/test_ini_pc_variables_parser.cpp
         tests/test_ini_autotune_sections_parser.cpp
+        tests/test_teensy_hex_image.cpp
     )
     target_include_directories(tuner_core_tests
         PRIVATE
@@ -385,6 +398,51 @@ if(TUNER_BUILD_APP)
             Qt6::Gui
             Qt6::Widgets
     )
+
+    if(WIN32)
+        set(_user_home "$ENV{USERPROFILE}")
+        tuner_find_first_existing(TUNER_TEENSY_TOOLS_SRC
+            "${_user_home}/.platformio/packages/tool-teensy"
+            "${_user_home}/Desktop/SpeedyLoader-1.7.0/bin/teensy_loader_cli-windows")
+        tuner_find_first_existing(TUNER_AVRDUDE_TOOLS_SRC
+            "${_user_home}/Desktop/SpeedyLoader-1.7.0/bin/avrdude-windows")
+        tuner_find_first_existing(TUNER_DFUUTIL_TOOLS_SRC
+            "${_user_home}/Desktop/SpeedyLoader-1.7.0/bin/dfuutil-windows")
+
+        if(TUNER_TEENSY_TOOLS_SRC)
+            add_custom_command(TARGET tuner_app POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "$<TARGET_FILE_DIR:tuner_app>/bin/teensy_loader_cli-windows"
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "${TUNER_TEENSY_TOOLS_SRC}"
+                    "$<TARGET_FILE_DIR:tuner_app>/bin/teensy_loader_cli-windows"
+                COMMENT "Bundling Teensy flash tools with tuner_app")
+        else()
+            message(WARNING
+                "No local Teensy tools bundle found. tuner_app flashing for Teensy targets "
+                "will rely on runtime discovery only.")
+        endif()
+
+        if(TUNER_AVRDUDE_TOOLS_SRC)
+            add_custom_command(TARGET tuner_app POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "$<TARGET_FILE_DIR:tuner_app>/bin/avrdude-windows"
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "${TUNER_AVRDUDE_TOOLS_SRC}"
+                    "$<TARGET_FILE_DIR:tuner_app>/bin/avrdude-windows"
+                COMMENT "Bundling AVRDUDE tools with tuner_app")
+        endif()
+
+        if(TUNER_DFUUTIL_TOOLS_SRC)
+            add_custom_command(TARGET tuner_app POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "$<TARGET_FILE_DIR:tuner_app>/bin/dfuutil-windows"
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "${TUNER_DFUUTIL_TOOLS_SRC}"
+                    "$<TARGET_FILE_DIR:tuner_app>/bin/dfuutil-windows"
+                COMMENT "Bundling DFU-UTIL tools with tuner_app")
+        endif()
+    endif()
     # Strip the auto-propagated Qt6::EntryPoint dependency that
     # Qt6::Core normally pulls in via its interface link list.
     set_property(TARGET tuner_app PROPERTY qt_no_entrypoint ON)
