@@ -101,6 +101,19 @@ struct NativeTune {
     // reader that sees them on a v1.1+ tune surfaces them in the UI.
     std::optional<int> slot_index;
     std::optional<std::string> slot_name;
+
+    // Phase 16 item 1 — firmware definition hash baked into this tune
+    // at save time. Captured from the ECU's capability header
+    // (`EcuConnection::capabilities.definition_hash`). On subsequent
+    // burns, the desktop compares this against the connected firmware's
+    // live hash and refuses to write if they disagree — catches the
+    // "burn a tune built against a different firmware build" failure
+    // mode that signature-string matching misses.
+    //
+    // Optional on disk. Pre-hash-aware firmware leaves this empty; a
+    // tune saved while connected to firmware-14B-aware hardware carries
+    // the hash forward so it can be checked at the next burn.
+    std::optional<std::string> definition_hash;
 };
 
 // Thrown when a native file's schema_version is missing, malformed,

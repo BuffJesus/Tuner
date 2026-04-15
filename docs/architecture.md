@@ -31,51 +31,54 @@ Long-term architectural direction:
 
 ## Current Application Shape
 
-The app shell in `MainWindow` currently exposes eight first-class surfaces:
+The app shell in `TunerMainWindow` (cpp/app/main.cpp) currently exposes eight first-class sidebar surfaces (Alt+1..8 shortcuts, keyword-matched):
 
-- `Overview`
-- `Tuning`
-- `Engine Setup`
-- `Runtime`
-- `Logging`
-- `Dashboard`
-- `Trigger Logs`
-- `Flash`
+- `TUNE` — page tree + scalar/table/curve editors + review dialog
+- `LIVE` — animated dashboard gauges + status strip + formula-channel readout + hardware test panel
+- `FLASH` — preflight checklist + firmware picker + flash execution with progress bar
+- `SETUP` — 6-step Engine Setup Wizard + table generators + compressor map modeling
+- `ASSIST` — VE Analyze (accumulator + smoothing + diagnostics), WUE Analyze, Virtual Dyno with before/after overlay
+- `TRIGGERS` — log capture, CSV import, oscilloscope waveform view, analysis findings
+- `LOGGING` — profile editor, capture to CSV, import + scrubbable timeline + Airbear SD log browser
+- `HISTORY` — 81-service manifest for the ported C++ core
 
-The tuning experience is centered on a presenter-driven workspace, not on ad hoc widget logic in `MainWindow`.
+Each surface is assembled by a `build_<name>_tab` free function that wires `tuner_core` services into Qt widgets. There is no presenter class in the C++ app — the presenter-driven architecture that existed in the Python reference lives as a shared-state closure in main.cpp (Workspace + EditService + EcuConnection shared_ptrs passed through the build functions).
 
 ## Tuning Workspace Architecture
 
-Current stack:
+Current stack (Python→C++ port complete):
 
 ```text
-INI / MSQ / project parsing
+INI / MSQ / native file parsing  (tuner_core)
     ->
-DefinitionLayoutService
+definition_layout  +  visibility_expression  +  setting_context_help
     ->
-TuningPageService  (tables/scalars) + CurvePageService (1D curves)
+tuning_page_grouping  (tables/scalars/curves folded into keyword groups)
     ->
-TuningWorkspacePresenter
+workspace_state  +  local_tune_edit
     ->
-TuningWorkspacePanel
+build_tune_tab()  (cpp/app/main.cpp)
 ```
 
-### Key responsibilities
+### Key services (C++)
 
-- `DefinitionLayoutService`
-  Compiles Speeduino INI dialogs, menus, help, visibility expressions, and metadata into editor-facing layout structures.
+- `tuner_core::definition_layout`
+  Compiles INI dialogs, menus, help, visibility expressions, and metadata into editor-facing layout structures.
 
-- `TuningPageService`
-  Builds grouped scalar/table pages and related-page families from compiled layouts.
+- `tuner_core::tuning_page_grouping`
+  Builds grouped scalar/table/curve pages folded by keyword family (Fuel / Ignition / Idle / Boost / Sensors / Enrich / Protection / Comms / General).
 
-- `CurvePageService`
-  Builds 1D curve editor pages from `[CurveEditor]` definitions (34 curves in the production INI).
+- `tuner_core::curve_editor` parser
+  Parses `[CurveEditor]` definitions (34 curves in the production INI); the TUNE tab's curve page builds a bar chart + editable Y table from each.
 
-- `TuningWorkspacePresenter`
-  Owns active-page selection, staged edit routing, page state, sync state, RAM/burn actions, workspace review, and operation log snapshots.
+- `tuner_core::workspace_state`
+  Tracks per-page state (clean / staged / written) and aggregate state transitions for the review dialog.
 
-- `TuningWorkspacePanel`
-  Renders navigator, parameter pages, table pages, curve pages, sync/review panels, and parameter catalog.
+- `tuner_core::local_tune_edit::EditService`
+  Holds staged scalar and list edits; the review dialog reads `staged_names()` and writes through `replace_list` / `stage_scalar_value`.
+
+- `tuner_core::visibility_expression`
+  Evaluates INI visibility expressions against the live tune state + output-channel arrays; pages whose expressions resolve false are hidden from the tree.
 
 ### Editing model
 
@@ -112,24 +115,28 @@ Important current rule:
 
 ## Engine Setup / Hardware Setup
 
-Two setup-oriented surfaces currently coexist:
+The SETUP tab hosts the single Engine Setup Wizard — a 6-step QDialog covering:
 
-- `EngineSetupPanel`
-  Always-visible top-level setup surface for operator context, reqFuel, presets, and generator entry points.
+1. Board / MCU — 5 board options (DropBear default)
+2. Engine / Induction — displacement, cylinders, compression ratio, turbo envelope
+3. Injectors / Fueling — 18 injector presets, pressure compensation, AE mode
+4. Trigger / Ignition — trigger pattern, coil preset, dwell
+5. Sensors / Baro — MAP/baro/TPS/CLT/IAT presets + wideband calibration
+6. Review — summary card with all staged values before Finish
 
-- `HardwareSetupWizard`
-  Guided setup flow for board, engine, induction, injectors, trigger, and sensors.
+The wizard stages values via `EditService::stage_scalar_value`; on Finish the workspace is dirty and the standard review → write → burn flow takes over. The SETUP tab also surfaces the six table generators (VE / AFR / Spark / WUE / Cranking / Idle) + thermistor calibration + reqFuel calculator + compressor map modeling card.
 
-These share one operator-context model and presenter-backed staged-edit path.
+Supporting C++ service cluster (all under `tuner_core::`):
 
-Supporting service cluster:
-
-- `HardwareSetupValidationService`
-- `HardwareSetupSummaryService`
-- `HardwareSetupGeneratorContextService`
-- `HardwarePresetService`
-- `RequiredFuelCalculatorService`
-- `OperatorEngineContextService`
+- `hardware_setup_validation`
+- `hardware_setup_generator_context`
+- `hardware_presets`
+- `required_fuel_calculator`
+- `operator_engine_context`
+- `ve_table_generator`, `spark_table_generator`, `boost_table_generator`, `idle_rpm_generator`, `startup_enrichment_generator`
+- `compressor_map_modeling`
+- `thermistor_calibration`
+- `wideband_calibration`
 
 ## Runtime Evidence / Replay Architecture
 
@@ -145,22 +152,19 @@ history, comparison, export, active-page evidence
 Runtime / Flash / Tuning workspace surfaces
 ```
 
-Implemented service seams:
+Implemented service seams (all under `tuner_core::`):
 
-- `SurfaceEvidenceService`
-- `OperationEvidenceService`
-- `EvidenceReplayService`
-- `EvidenceReplayComparisonService`
-- `EvidenceReplayFormatterService`
-- `DatalogImportService`
-- `DatalogProfileService`
-- `LiveCaptureSessionService`
-- `DatalogReplayService`
-- `DatalogReviewService`
-- `TableReplayContextService`
-- `TableReplayHitService`
-- `TriggerLogAnalysisService`
-- `TriggerLogVisualizationService`
+- `datalog_import`, `datalog_profile`, `datalog_replay`
+- `live_capture_session`, `live_trigger_logger`
+- `table_replay_context`
+- `trigger_log_analysis`, `trigger_log_visualization`
+
+UI integration:
+
+- LIVE tab: `EcuConnection::poll_runtime()` at 200 ms tick populates the snapshot; gauge bindings read by widget_id/source.
+- LOGGING tab: `live_capture_session::append_record` on each tick; `format_csv` writes real-time to the capture file. The imported-log replay uses `LogTimelineWidget` for scrubbable timeline with play/pause + channel picker + shift-drag zoom + export.
+- TRIGGERS tab: `TriggerScopeWidget` renders decoded traces as stacked oscilloscope tracks.
+- ASSIST tab: `ve_cell_hit_accumulator` + `ve_proposal_smoothing` + `ve_root_cause_diagnostics` feed the VE Analyze results panel; coverage and CF grids carry per-cell hover tooltips.
 
 Current product behavior:
 

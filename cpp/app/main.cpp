@@ -61,6 +61,7 @@
 //     to avoid triggering repeated label updates that crash.
 
 #include "tuner_core/afr_target_generator.hpp"
+#include "tuner_core/speeduino_connect_strategy.hpp"
 #include "tuner_core/speeduino_controller.hpp"
 #include "tuner_core/speeduino_param_codec.hpp"
 #include "tuner_core/wideband_calibration.hpp"
@@ -93,6 +94,7 @@
 #include "tuner_core/live_analyze_session.hpp"
 #include "tuner_core/live_capture_session.hpp"
 #include "tuner_core/live_trigger_logger.hpp"
+#include "tuner_core/chart_axes.hpp"
 #include "tuner_core/virtual_dyno.hpp"
 #include "tuner_core/compressor_map_modeling.hpp"
 #include "tuner_core/boost_table_generator.hpp"
@@ -174,6 +176,7 @@ namespace tt = tuner_theme;
 #include <QMimeData>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QStandardItemModel>
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QProcess>
@@ -423,6 +426,11 @@ struct EcuConnection {
     // Pages that have been written to RAM but not yet burned to flash.
     // Iterated in sorted order during burn.
     std::set<int> dirty_pages;
+
+    // Last parsed capability header from the `'f'` query. Zero-init on
+    // a failed probe (parsed=false). Slot fingerprints populate once
+    // firmware 14B ships the trailing bytes.
+    tuner_core::speeduino_connect_strategy::CapabilityHeader capabilities;
 
     // Poll the ECU for runtime data and update `runtime` map.
     // Returns true on success, false on error (disconnects on failure).
@@ -849,9 +857,9 @@ std::filesystem::path find_native_definition() {
     // the semantic-only v1 Ford300 fixture. The v2 file is produced
     // by `gen_v2_tunerdef` from the production INI; regenerate after
     // any INI change via:
-    //   ./build/cpp/gen_v2_tunerdef.exe \
-    //     tests/fixtures/speeduino-dropbear-v2.0.1.ini \
-    //     tests/fixtures/native/speeduino-dropbear-v2.0.1.tunerdef
+    //   ./build/cpp/gen_v2_tunerdef.exe
+    //       tests/fixtures/speeduino-dropbear-v2.0.1.ini
+    //       tests/fixtures/native/speeduino-dropbear-v2.0.1.tunerdef
     const char* candidates[] = {
         // Primary: full-layout v2 definition.
         "tests/fixtures/native/speeduino-dropbear-v2.0.1.tunerdef",
@@ -2148,6 +2156,36 @@ bool open_connect_dialog(QWidget* parent,
             ecu_conn->info = info;
             ecu_conn->connected = true;
 
+            // Capability query — issue `'f'` and parse the 6-byte
+            // header + optional 32-byte slot-fingerprint tail
+            // (firmware 14B). Errors are non-fatal; the dialog
+            // continues with an unparsed capability header.
+            try {
+                // Firmware `'f'` command today emits exactly 6 payload
+                // bytes: { RC_OK, protocol_version, blocking_factor_BE,
+                // table_blocking_factor_BE } — verified against
+                // `speeduino-202501.6/speeduino/comms.cpp` case 'f'
+                // (lines 668–677). Asking for more bytes forces every
+                // raw-serial connect to wait the full 1.5s timeout
+                // for bytes the firmware never sends.
+                //
+                // The parser (`parse_capability_header`) can already
+                // read 62 bytes if firmware ever starts emitting them
+                // (Slice 14B slot fingerprints, definition hash, and
+                // page-format bitmap). When firmware 14B ships, bump
+                // the fetch length here alongside the firmware change
+                // — not before.
+                auto cap_bytes = ecu_conn->controller->fetch_raw(
+                    {static_cast<std::uint8_t>('f')}, 6, 1.5);
+                std::span<const std::uint8_t> span(
+                    cap_bytes.data(), cap_bytes.size());
+                ecu_conn->capabilities =
+                    tuner_core::speeduino_connect_strategy::parse_capability_header(
+                        std::optional<std::span<const std::uint8_t>>(span));
+            } catch (...) {
+                // Leave capabilities at defaults (parsed=false).
+            }
+
             // Airbear fw_variant cross-check. When connected via TCP
             // (framed), fetch /api/realtime from the bridge's HTTP port
             // and compare its fw_variant field to the ECU signature we
@@ -2354,6 +2392,18 @@ QWidget* build_tune_tab(
     // next to the signature in the project bar and stays hidden when
     // there's nothing to say.
     auto slot_badge_text = std::make_shared<std::string>();
+    // Current burn-target slot (P15-9 step 4). Default 0. Live-burn
+    // handler refuses >0 until firmware 14G ships the slot-select
+    // command; the UI still lets the operator set intent so Copy Tune
+    // to Slot and Save-as-native-with-slot stay consistent with what
+    // the operator sees on the project bar.
+    auto target_slot_index = std::make_shared<int>(0);
+    // Firmware definition hash captured from the loaded .tuner file
+    // (P16-1). When both this and the connected ECU's capabilities
+    // report a non-empty hash AND they disagree, the burn handler
+    // refuses with a plain-language dialog — catches the "burn a tune
+    // built against a different firmware build" failure mode.
+    auto loaded_tune_hash = std::make_shared<std::string>();
     auto refresh_project_label = [project_label, current_project, slot_badge_text]() {
         const std::string project_name =
             current_project->name.empty() ? "Speeduino Project" : current_project->name;
@@ -2396,6 +2446,47 @@ QWidget* build_tune_tab(
     project_label->setStyleSheet("background: transparent; border: none;");
     project_bar_layout->addWidget(project_label);
     project_bar_layout->addStretch(1);
+
+    // Burn-target slot picker (P15-9 step 4). Small combo + leading
+    // label; feeds `target_slot_index` which the burn handler reads.
+    // A label keeps the intent clear — "where does the next Burn land".
+    auto* slot_target_label = new QLabel(QString::fromUtf8("Burn to:"));
+    {
+        char s[96];
+        std::snprintf(s, sizeof(s),
+            "color: %s; font-size: %dpx; border: none; background: transparent;",
+            tt::text_muted, tt::font_small);
+        slot_target_label->setStyleSheet(QString::fromUtf8(s));
+    }
+    project_bar_layout->addWidget(slot_target_label);
+
+    auto* slot_target_combo = new QComboBox;
+    for (int i = 0; i < 4; ++i) {
+        char item[32];
+        std::snprintf(item, sizeof(item), "Slot %d", i);
+        slot_target_combo->addItem(QString::fromUtf8(item), i);
+    }
+    slot_target_combo->setCurrentIndex(0);
+    {
+        char ss[256];
+        std::snprintf(ss, sizeof(ss),
+            "QComboBox { background: %s; color: %s; border: 1px solid %s; "
+            "border-radius: %dpx; padding: 2px 8px; font-size: %dpx; }",
+            tt::bg_elevated, tt::text_primary, tt::border,
+            tt::radius_sm, tt::font_small);
+        slot_target_combo->setStyleSheet(QString::fromUtf8(ss));
+    }
+    slot_target_combo->setToolTip(QString::fromUtf8(
+        "Target slot for the next Burn.\n"
+        "Slots 1-3 require firmware 14G (boot-time multi-tune "
+        "slot selection on Teensy 4.1)."));
+    project_bar_layout->addWidget(slot_target_combo);
+    QObject::connect(slot_target_combo,
+        static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+        [target_slot_index, slot_target_combo](int) {
+            *target_slot_index =
+                slot_target_combo->currentData().toInt();
+        });
 
     // Review chip — clickable button styled as a small inline chip.
     // Hidden when nothing is staged; shown with live count otherwise.
@@ -2788,6 +2879,18 @@ QWidget* build_tune_tab(
                 }
                 if (out_slot_index) *out_slot_index = native_tune.slot_index;
                 if (out_slot_name)  *out_slot_name  = native_tune.slot_name;
+                // Default the burn-target combo to the loaded tune's
+                // slot so Save/Burn round-trip stays self-consistent.
+                if (native_tune.slot_index.has_value()) {
+                    int s = std::clamp(*native_tune.slot_index, 0, 3);
+                    slot_target_combo->setCurrentIndex(s);
+                    *target_slot_index = s;
+                }
+                // Capture the loaded tune's firmware definition hash
+                // for the burn-time guard (P16-1). Empty string =
+                // tune was saved against pre-14B firmware and no
+                // check can be performed.
+                *loaded_tune_hash = native_tune.definition_hash.value_or("");
                 for (const auto& [name, val] : native_tune.values) {
                     lte::TuneValue tv;
                     tv.name = name;
@@ -5190,7 +5293,8 @@ QWidget* build_tune_tab(
                                refresh_tree_state_indicators,
                                resync_workspace, on_staged_changed,
                                selected_label, page_staged_chip,
-                               visible_editors, ecu_conn, ecu_def]() {
+                               visible_editors, ecu_conn, ecu_def,
+                               target_slot_index, loaded_tune_hash]() {
         auto names = edit_svc->staged_names();
         if (names.empty()) return;  // Nothing to review.
 
@@ -5576,8 +5680,61 @@ QWidget* build_tune_tab(
                          [dialog, workspace, edit_svc, visible_editors,
                           refresh_page_chip, refresh_review_button,
                           refresh_tree_state_indicators, on_staged_changed,
-                          page_staged_chip, ecu_conn]() {
+                          page_staged_chip, ecu_conn, target_slot_index,
+                          loaded_tune_hash]() {
             namespace wsns = tuner_core::workspace_state;
+
+            // Definition-hash guard (P16-1 / firmware 14B). When both
+            // the loaded tune and the connected ECU report a hash AND
+            // they disagree, refuse to burn. Prevents the "tune built
+            // against a different firmware schema" brick that plain
+            // signature-string matching misses. Either side empty =
+            // not enough info to check, let the burn through.
+            bool live_connected = ecu_conn && ecu_conn->connected
+                && ecu_conn->controller;
+            if (live_connected
+                && !loaded_tune_hash->empty()
+                && !ecu_conn->capabilities.definition_hash.empty()
+                && *loaded_tune_hash
+                    != ecu_conn->capabilities.definition_hash) {
+                char msg[512];
+                std::snprintf(msg, sizeof(msg),
+                    "This tune was built against firmware schema "
+                    "%.16s\xe2\x80\xa6\n"
+                    "The connected ECU is running firmware schema "
+                    "%.16s\xe2\x80\xa6\n\n"
+                    "Burning would write this tune into a firmware "
+                    "build it wasn't designed for. Reconnect to "
+                    "matching firmware, or regenerate the tune "
+                    "against the current firmware, before burning.",
+                    loaded_tune_hash->c_str(),
+                    ecu_conn->capabilities.definition_hash.c_str());
+                QMessageBox::critical(dialog,
+                    QString::fromUtf8("Schema mismatch"),
+                    QString::fromUtf8(msg));
+                return;
+            }
+
+            // Slot routing guard (P15-9 step 4). Slots 1-3 need the
+            // firmware-side slot-select command which ships with
+            // Firmware Slice 14G. Refuse here rather than silently
+            // burning to slot 0, which would be worse than a block.
+            int target_slot = *target_slot_index;
+            if (live_connected && target_slot != 0) {
+                char msg[256];
+                std::snprintf(msg, sizeof(msg),
+                    "Burn target is Slot %d, but the ECU does not yet "
+                    "support multi-tune slot selection (Firmware Slice "
+                    "14G pending).\n\n"
+                    "Set Burn target back to Slot 0 to burn, or use "
+                    "Tune \xe2\x86\x92 Copy Current Tune to Slot\xe2\x80\xa6 "
+                    "to save a slot-tagged .tuner file for later.",
+                    target_slot);
+                QMessageBox::information(dialog,
+                    QString::fromUtf8("Slot %d not yet supported"),
+                    QString::fromUtf8(msg));
+                return;
+            }
 
             // Confirmation — burn is irreversible.
             auto answer = QMessageBox::warning(dialog,
@@ -6560,6 +6717,696 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// DynoChartWidget — torque + HP curves over RPM.
+// Dual-axis: left axis is torque (Nm) in accent_primary, right axis is
+// horsepower in accent_warning. Peak markers annotate both curves with
+// bold labels. Same QPainter + token grammar as HistogramWidget.
+// ---------------------------------------------------------------------------
+class DynoChartWidget : public QWidget {
+public:
+    explicit DynoChartWidget(QWidget* parent = nullptr) : QWidget(parent) {
+        setMinimumSize(420, 240);
+    }
+
+    void set_result(const tuner_core::virtual_dyno::DynoResult& r) {
+        result_ = r;
+        update();
+    }
+
+    void clear_result() {
+        result_ = {};
+        update();
+    }
+
+    // Overlay / "before" comparison track (G8). Rendered as dashed
+    // torque + HP lines underneath the primary curves so the operator
+    // can eyeball the delta between two WOT pulls without exporting to
+    // a spreadsheet. The overlay shares the same axis ranges as the
+    // primary so the comparison is visually honest.
+    void set_overlay(const tuner_core::virtual_dyno::DynoResult& r) {
+        overlay_ = r;
+        has_overlay_ = true;
+        update();
+    }
+
+    void clear_overlay() {
+        overlay_ = {};
+        has_overlay_ = false;
+        update();
+    }
+
+    bool has_overlay() const { return has_overlay_; }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        const double w = width(), h = height();
+
+        p.fillRect(rect(), QColor(tt::bg_deep));
+        p.setPen(QPen(QColor(tt::border), 1));
+        p.drawRect(0, 0, static_cast<int>(w) - 1, static_cast<int>(h) - 1);
+
+        const int ml = 52, mr = 52, mt = 32, mb = 26;
+        const double pw = w - ml - mr;
+        const double ph = h - mt - mb;
+
+        if (result_.points.size() < 2 || pw <= 0 || ph <= 0) {
+            p.setPen(QColor(tt::text_muted));
+            QFont f; f.setPixelSize(tt::font_small); p.setFont(f);
+            p.drawText(rect(), Qt::AlignCenter,
+                QString::fromUtf8("Import a WOT pull CSV to see the dyno curve"));
+            return;
+        }
+
+        double rpm_min = result_.points.front().rpm;
+        double rpm_max = result_.points.back().rpm;
+        double tq_max = 0, hp_max = 0;
+        for (const auto& pt : result_.points) {
+            tq_max = std::max(tq_max, pt.torque_nm);
+            hp_max = std::max(hp_max, pt.horsepower);
+        }
+        // Fold the overlay into the range calculation so both curves
+        // stay on the same axis scale — otherwise two pulls with
+        // different peaks would render against different Y grids and
+        // the visual comparison would be a lie.
+        if (has_overlay_ && !overlay_.points.empty()) {
+            rpm_min = std::min(rpm_min, overlay_.points.front().rpm);
+            rpm_max = std::max(rpm_max, overlay_.points.back().rpm);
+            for (const auto& pt : overlay_.points) {
+                tq_max = std::max(tq_max, pt.torque_nm);
+                hp_max = std::max(hp_max, pt.horsepower);
+            }
+        }
+        tq_max = tuner_core::chart_axes::nice_ceiling(tq_max * 1.1);
+        hp_max = tuner_core::chart_axes::nice_ceiling(hp_max * 1.1);
+        double rpm_span = std::max(1.0, rpm_max - rpm_min);
+
+        auto x_at = [&](double rpm) {
+            return ml + ((rpm - rpm_min) / rpm_span) * pw;
+        };
+        auto y_tq = [&](double v) { return mt + ph - (v / tq_max) * ph; };
+        auto y_hp = [&](double v) { return mt + ph - (v / hp_max) * ph; };
+
+        p.setPen(QPen(QColor(tt::fill_primary_soft), 1, Qt::DotLine));
+        for (int i = 1; i < 4; ++i) {
+            double y = mt + ph * i / 4.0;
+            p.drawLine(QPointF(ml, y), QPointF(ml + pw, y));
+        }
+        double step = tuner_core::chart_axes::rpm_tick_step(rpm_span);
+        for (double rpm = std::ceil(rpm_min / step) * step;
+             rpm <= rpm_max; rpm += step) {
+            double x = x_at(rpm);
+            p.drawLine(QPointF(x, mt), QPointF(x, mt + ph));
+        }
+
+        // Overlay curves (dashed, muted) under the primary curves so
+        // the comparison reads as "this was the baseline, here's the
+        // current pull on top". Only drawn when has_overlay_.
+        if (has_overlay_ && overlay_.points.size() >= 2) {
+            QColor tq_overlay(tt::accent_primary);
+            tq_overlay.setAlpha(140);
+            p.setPen(QPen(tq_overlay, 1.5, Qt::DashLine));
+            for (size_t i = 1; i < overlay_.points.size(); ++i) {
+                p.drawLine(QPointF(x_at(overlay_.points[i - 1].rpm),
+                                   y_tq(overlay_.points[i - 1].torque_nm)),
+                           QPointF(x_at(overlay_.points[i].rpm),
+                                   y_tq(overlay_.points[i].torque_nm)));
+            }
+            QColor hp_overlay(tt::accent_warning);
+            hp_overlay.setAlpha(140);
+            p.setPen(QPen(hp_overlay, 1.5, Qt::DashLine));
+            for (size_t i = 1; i < overlay_.points.size(); ++i) {
+                p.drawLine(QPointF(x_at(overlay_.points[i - 1].rpm),
+                                   y_hp(overlay_.points[i - 1].horsepower)),
+                           QPointF(x_at(overlay_.points[i].rpm),
+                                   y_hp(overlay_.points[i].horsepower)));
+            }
+        }
+
+        p.setPen(QPen(QColor(tt::accent_primary), 2));
+        for (size_t i = 1; i < result_.points.size(); ++i) {
+            p.drawLine(QPointF(x_at(result_.points[i - 1].rpm),
+                               y_tq(result_.points[i - 1].torque_nm)),
+                       QPointF(x_at(result_.points[i].rpm),
+                               y_tq(result_.points[i].torque_nm)));
+        }
+
+        p.setPen(QPen(QColor(tt::accent_warning), 2));
+        for (size_t i = 1; i < result_.points.size(); ++i) {
+            p.drawLine(QPointF(x_at(result_.points[i - 1].rpm),
+                               y_hp(result_.points[i - 1].horsepower)),
+                       QPointF(x_at(result_.points[i].rpm),
+                               y_hp(result_.points[i].horsepower)));
+        }
+
+        auto draw_peak = [&](double x, double y, const char* label,
+                             const QColor& color) {
+            p.setPen(QPen(color, 2));
+            p.setBrush(color);
+            p.drawEllipse(QPointF(x, y), 4, 4);
+            p.setBrush(Qt::NoBrush);
+            p.setPen(QColor(tt::text_primary));
+            QFont f; f.setPixelSize(tt::font_small); f.setBold(true); p.setFont(f);
+            p.drawText(QPointF(x + 7, y - 6), QString::fromUtf8(label));
+        };
+        char tq_lbl[48], hp_lbl[48];
+        std::snprintf(tq_lbl, sizeof(tq_lbl), "%.0f Nm @ %.0f",
+            result_.peak_torque_nm, result_.peak_torque_rpm);
+        std::snprintf(hp_lbl, sizeof(hp_lbl), "%.0f hp @ %.0f",
+            result_.peak_hp, result_.peak_hp_rpm);
+        draw_peak(x_at(result_.peak_torque_rpm),
+                  y_tq(result_.peak_torque_nm),
+                  tq_lbl, QColor(tt::accent_primary));
+        draw_peak(x_at(result_.peak_hp_rpm),
+                  y_hp(result_.peak_hp),
+                  hp_lbl, QColor(tt::accent_warning));
+
+        QFont af; af.setPixelSize(tt::font_small); p.setFont(af);
+
+        p.setPen(QColor(tt::accent_primary));
+        for (int i = 0; i <= 4; ++i) {
+            double v = tq_max * i / 4.0;
+            double y = mt + ph - (v / tq_max) * ph;
+            char buf[16]; std::snprintf(buf, sizeof(buf), "%.0f", v);
+            p.drawText(QRectF(0, y - 8, ml - 4, 16),
+                       Qt::AlignRight | Qt::AlignVCenter,
+                       QString::fromUtf8(buf));
+        }
+
+        p.setPen(QColor(tt::accent_warning));
+        for (int i = 0; i <= 4; ++i) {
+            double v = hp_max * i / 4.0;
+            double y = mt + ph - (v / hp_max) * ph;
+            char buf[16]; std::snprintf(buf, sizeof(buf), "%.0f", v);
+            p.drawText(QRectF(ml + pw + 4, y - 8, mr - 8, 16),
+                       Qt::AlignLeft | Qt::AlignVCenter,
+                       QString::fromUtf8(buf));
+        }
+
+        p.setPen(QColor(tt::text_muted));
+        for (double rpm = std::ceil(rpm_min / step) * step;
+             rpm <= rpm_max; rpm += step) {
+            double x = x_at(rpm);
+            char buf[16]; std::snprintf(buf, sizeof(buf), "%.0f", rpm);
+            p.drawText(QRectF(x - 28, mt + ph + 4, 56, 16),
+                       Qt::AlignCenter, QString::fromUtf8(buf));
+        }
+
+        p.setPen(QColor(tt::text_primary));
+        QFont hf; hf.setPixelSize(tt::font_label); hf.setBold(true); p.setFont(hf);
+        p.drawText(QPointF(ml, mt - 12), QString::fromUtf8("Dyno Curve"));
+
+        QFont lf; lf.setPixelSize(tt::font_small); p.setFont(lf);
+        double lx = ml + pw - 150;
+        p.setPen(QPen(QColor(tt::accent_primary), 2));
+        p.drawLine(QPointF(lx, mt - 14), QPointF(lx + 14, mt - 14));
+        p.setPen(QColor(tt::text_secondary));
+        p.drawText(QPointF(lx + 18, mt - 10), QString::fromUtf8("Torque (Nm)"));
+
+        p.setPen(QPen(QColor(tt::accent_warning), 2));
+        p.drawLine(QPointF(lx + 90, mt - 14), QPointF(lx + 104, mt - 14));
+        p.setPen(QColor(tt::text_secondary));
+        p.drawText(QPointF(lx + 108, mt - 10), QString::fromUtf8("HP"));
+    }
+
+private:
+    tuner_core::virtual_dyno::DynoResult result_;
+    tuner_core::virtual_dyno::DynoResult overlay_;
+    bool has_overlay_ = false;
+};
+
+// ---------------------------------------------------------------------------
+// LogTimelineWidget — scrubbable timeline for standalone datalog viewing
+// (Phase 16 item 5). Stacks up to ~6 channel tracks on a shared time
+// axis; left click + drag moves the red cursor and fires a callback so
+// the existing row-spinner + values-card update in lockstep.
+// ---------------------------------------------------------------------------
+class LogTimelineWidget : public QWidget {
+public:
+    struct Config {
+        std::vector<double> times;  // seconds from start
+        std::vector<std::string> channel_names;
+        std::vector<std::vector<double>> channel_values;  // parallel to times
+    };
+
+    explicit LogTimelineWidget(QWidget* parent = nullptr) : QWidget(parent) {
+        setMinimumSize(420, 200);
+        setMouseTracking(false);
+        setCursor(Qt::CrossCursor);
+    }
+
+    void set_config(const Config& cfg) {
+        cfg_ = cfg;
+        channel_ranges_.clear();
+        for (const auto& vals : cfg_.channel_values) {
+            double mn =  std::numeric_limits<double>::infinity();
+            double mx = -std::numeric_limits<double>::infinity();
+            for (double v : vals) {
+                if (std::isfinite(v)) {
+                    if (v < mn) mn = v;
+                    if (v > mx) mx = v;
+                }
+            }
+            if (!std::isfinite(mn)) { mn = 0; mx = 1; }
+            if (mn == mx) mx = mn + 1;
+            channel_ranges_.emplace_back(mn, mx);
+        }
+        cursor_idx_ = 0;
+        if (cfg_.times.size() >= 2) {
+            view_start_ = cfg_.times.front();
+            view_end_   = cfg_.times.back();
+        } else {
+            view_start_ = 0;
+            view_end_   = 1;
+        }
+        zoom_drag_active_ = false;
+        update();
+    }
+
+    void clear_config() {
+        cfg_ = {};
+        channel_ranges_.clear();
+        cursor_idx_ = 0;
+        view_start_ = 0;
+        view_end_   = 1;
+        zoom_drag_active_ = false;
+        update();
+    }
+
+    void reset_zoom() {
+        if (cfg_.times.size() < 2) return;
+        view_start_ = cfg_.times.front();
+        view_end_   = cfg_.times.back();
+        zoom_drag_active_ = false;
+        update();
+    }
+
+    double view_start() const { return view_start_; }
+    double view_end()   const { return view_end_;   }
+
+    void set_cursor_index(int idx) {
+        if (cfg_.times.empty()) return;
+        int clamped = std::clamp(idx, 0,
+            static_cast<int>(cfg_.times.size()) - 1);
+        if (clamped == cursor_idx_) return;
+        cursor_idx_ = clamped;
+        update();
+    }
+
+    std::function<void(int)> on_cursor_changed;
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        const double w = width(), h = height();
+
+        p.fillRect(rect(), QColor(tt::bg_deep));
+        p.setPen(QPen(QColor(tt::border), 1));
+        p.drawRect(0, 0, static_cast<int>(w) - 1, static_cast<int>(h) - 1);
+
+        if (cfg_.times.size() < 2 || cfg_.channel_values.empty()) {
+            p.setPen(QColor(tt::text_muted));
+            QFont f; f.setPixelSize(tt::font_small); p.setFont(f);
+            p.drawText(rect(), Qt::AlignCenter, QString::fromUtf8(
+                "Import a CSV datalog to see the timeline"));
+            return;
+        }
+
+        const int ml = 72, mr = 44, mt = 22, mb = 24;
+        const double pw = w - ml - mr;
+        const double ph = h - mt - mb;
+        if (pw <= 0 || ph <= 0) return;
+
+        double t_start = view_start_;
+        double t_end   = view_end_;
+        double t_span  = std::max(1e-9, t_end - t_start);
+
+        const int n_ch = static_cast<int>(cfg_.channel_values.size());
+        const double track_h = ph / n_ch;
+
+        const char* colors[] = {
+            tt::accent_primary, tt::accent_warning, tt::accent_ok,
+            tt::accent_special, tt::accent_danger, tt::text_secondary
+        };
+
+        for (int ch = 0; ch < n_ch; ++ch) {
+            double ty0 = mt + ch * track_h;
+            double ty1 = ty0 + track_h;
+            const char* color = colors[ch % 6];
+
+            p.setPen(QColor(color));
+            QFont lf; lf.setPixelSize(tt::font_small); lf.setBold(true); p.setFont(lf);
+            p.drawText(QRectF(0, ty0, ml - 6, track_h),
+                Qt::AlignRight | Qt::AlignVCenter,
+                QString::fromUtf8(cfg_.channel_names[ch].c_str()));
+
+            auto [mn, mx] = channel_ranges_[ch];
+            QFont rf; rf.setPixelSize(tt::font_micro); p.setFont(rf);
+            p.setPen(QColor(tt::text_dim));
+            char mxb[16], mnb[16];
+            std::snprintf(mxb, sizeof(mxb), "%.0f", mx);
+            std::snprintf(mnb, sizeof(mnb), "%.0f", mn);
+            p.drawText(QRectF(ml + pw + 2, ty0, mr - 4, 12),
+                Qt::AlignLeft | Qt::AlignTop, QString::fromUtf8(mxb));
+            p.drawText(QRectF(ml + pw + 2, ty1 - 12, mr - 4, 12),
+                Qt::AlignLeft | Qt::AlignBottom, QString::fromUtf8(mnb));
+
+            if (ch > 0) {
+                p.setPen(QPen(QColor(tt::border_soft), 1));
+                p.drawLine(QPointF(ml, ty0), QPointF(ml + pw, ty0));
+            }
+
+            const auto& vals = cfg_.channel_values[ch];
+            auto lo_it = std::lower_bound(cfg_.times.begin(),
+                cfg_.times.end(), t_start);
+            auto hi_it = std::upper_bound(cfg_.times.begin(),
+                cfg_.times.end(), t_end);
+            int lo = static_cast<int>(std::distance(cfg_.times.begin(), lo_it));
+            int hi = static_cast<int>(std::distance(cfg_.times.begin(), hi_it));
+            if (lo > 0) --lo;
+            if (hi < static_cast<int>(cfg_.times.size())) ++hi;
+            int visible = std::max(1, hi - lo);
+            int stride = std::max(1, visible / static_cast<int>(std::max(1.0, pw)));
+            QPainterPath path;
+            bool started = false;
+            double range = mx - mn;
+            p.save();
+            p.setClipRect(QRectF(ml, mt, pw, ph));
+            for (int i = lo; i < hi; i += stride) {
+                double v = vals[i];
+                if (!std::isfinite(v)) continue;
+                double x = ml + ((cfg_.times[i] - t_start) / t_span) * pw;
+                double y = ty1 - ((v - mn) / range) * (track_h - 4) - 2;
+                if (!started) { path.moveTo(x, y); started = true; }
+                else { path.lineTo(x, y); }
+            }
+            p.setPen(QPen(QColor(color), 1.3));
+            p.drawPath(path);
+            p.restore();
+        }
+
+        QFont af; af.setPixelSize(tt::font_micro); p.setFont(af);
+        p.setPen(QColor(tt::text_muted));
+        for (int i = 0; i <= 4; ++i) {
+            double t = t_start + t_span * i / 4.0;
+            double x = ml + pw * i / 4.0;
+            char buf[16]; std::snprintf(buf, sizeof(buf), "%.1fs", t);
+            p.drawText(QRectF(x - 28, mt + ph + 2, 56, 16),
+                Qt::AlignCenter, QString::fromUtf8(buf));
+        }
+
+        if (cursor_idx_ >= 0 && cursor_idx_ < static_cast<int>(cfg_.times.size())) {
+            double t = cfg_.times[cursor_idx_];
+            if (t >= t_start && t <= t_end) {
+                double x = ml + ((t - t_start) / t_span) * pw;
+                p.setPen(QPen(QColor(tt::accent_danger), 1.5));
+                p.drawLine(QPointF(x, mt), QPointF(x, mt + ph));
+                QFont tf; tf.setPixelSize(tt::font_small); tf.setBold(true); p.setFont(tf);
+                p.setPen(QColor(tt::accent_danger));
+                char tb[24]; std::snprintf(tb, sizeof(tb), "%.2fs", t);
+                p.drawText(QPointF(x + 4, mt - 4), QString::fromUtf8(tb));
+            }
+        }
+
+        // Zoom-drag overlay — translucent selection rect while the
+        // operator holds Shift and drags. On release the view snaps to
+        // the selected range (see mouseReleaseEvent).
+        if (zoom_drag_active_) {
+            double x0 = std::clamp(zoom_drag_start_x_, (double)ml, ml + pw);
+            double x1 = std::clamp(zoom_drag_current_x_, (double)ml, ml + pw);
+            if (x1 < x0) std::swap(x0, x1);
+            QColor fill(tt::accent_primary);
+            fill.setAlpha(60);
+            p.fillRect(QRectF(x0, mt, x1 - x0, ph), fill);
+            p.setPen(QPen(QColor(tt::accent_primary), 1, Qt::DashLine));
+            p.drawRect(QRectF(x0, mt, x1 - x0, ph));
+        }
+
+        // Zoom hint — shows the active zoom fraction + "Shift-drag"
+        // prompt on the top right when we're not at full span.
+        double full_span = std::max(1e-9,
+            cfg_.times.back() - cfg_.times.front());
+        double visible_span = t_end - t_start;
+        if (visible_span < full_span * 0.999) {
+            QFont hf; hf.setPixelSize(tt::font_micro); hf.setBold(true); p.setFont(hf);
+            p.setPen(QColor(tt::accent_primary));
+            char hb[64];
+            std::snprintf(hb, sizeof(hb),
+                "zoom %.0f%% \xc2\xb7 shift-drag to zoom",
+                (visible_span / full_span) * 100.0);
+            p.drawText(QRectF(ml, 4, pw, 14),
+                Qt::AlignRight | Qt::AlignVCenter, QString::fromUtf8(hb));
+        } else {
+            QFont hf; hf.setPixelSize(tt::font_micro); p.setFont(hf);
+            p.setPen(QColor(tt::text_dim));
+            p.drawText(QRectF(ml, 4, pw, 14),
+                Qt::AlignRight | Qt::AlignVCenter,
+                QString::fromUtf8("shift-drag to zoom"));
+        }
+    }
+
+    void mousePressEvent(QMouseEvent* e) override {
+        const int ml = 72, mr = 44;
+        double pw = width() - ml - mr;
+        if (pw <= 0) return;
+        if (e->button() == Qt::LeftButton
+            && (e->modifiers() & Qt::ShiftModifier)) {
+            zoom_drag_active_ = true;
+            zoom_drag_start_x_ = e->position().x();
+            zoom_drag_current_x_ = zoom_drag_start_x_;
+            update();
+            return;
+        }
+        handle_seek(e);
+    }
+    void mouseMoveEvent(QMouseEvent* e) override {
+        if (zoom_drag_active_) {
+            zoom_drag_current_x_ = e->position().x();
+            update();
+            return;
+        }
+        if (e->buttons() & Qt::LeftButton) handle_seek(e);
+    }
+    void mouseReleaseEvent(QMouseEvent* e) override {
+        if (!zoom_drag_active_) return;
+        zoom_drag_active_ = false;
+        const int ml = 72, mr = 44;
+        double pw = width() - ml - mr;
+        if (pw <= 0) { update(); return; }
+        double x0 = std::clamp(zoom_drag_start_x_, (double)ml, ml + pw);
+        double x1 = std::clamp(e->position().x(), (double)ml, ml + pw);
+        if (x1 < x0) std::swap(x0, x1);
+        // Require at least a few pixels so a tiny accidental drag
+        // doesn't collapse the view to a single sample.
+        if (x1 - x0 < 6.0) { update(); return; }
+        double span = std::max(1e-9, view_end_ - view_start_);
+        double new_start = view_start_ + ((x0 - ml) / pw) * span;
+        double new_end   = view_start_ + ((x1 - ml) / pw) * span;
+        // Prevent zooming below a 3-sample span (ill-defined plot).
+        if (new_end - new_start <= 1e-6) { update(); return; }
+        view_start_ = new_start;
+        view_end_   = new_end;
+        update();
+    }
+
+private:
+    void handle_seek(QMouseEvent* e) {
+        if (cfg_.times.size() < 2) return;
+        const int ml = 72, mr = 44;
+        double pw = width() - ml - mr;
+        if (pw <= 0) return;
+        double frac = std::clamp(
+            (e->position().x() - ml) / pw, 0.0, 1.0);
+        double t_target = view_start_
+            + frac * (view_end_ - view_start_);
+        auto it = std::lower_bound(
+            cfg_.times.begin(), cfg_.times.end(), t_target);
+        int idx;
+        if (it == cfg_.times.begin()) idx = 0;
+        else if (it == cfg_.times.end())
+            idx = static_cast<int>(cfg_.times.size()) - 1;
+        else {
+            int i1 = static_cast<int>(std::distance(cfg_.times.begin(), it));
+            int i0 = i1 - 1;
+            idx = (std::abs(cfg_.times[i0] - t_target)
+                 < std::abs(cfg_.times[i1] - t_target)) ? i0 : i1;
+        }
+        if (idx != cursor_idx_) {
+            cursor_idx_ = idx;
+            update();
+            if (on_cursor_changed) on_cursor_changed(idx);
+        }
+    }
+
+    Config cfg_;
+    std::vector<std::pair<double, double>> channel_ranges_;
+    int cursor_idx_ = 0;
+    double view_start_ = 0;
+    double view_end_   = 1;
+    bool zoom_drag_active_ = false;
+    double zoom_drag_start_x_ = 0;
+    double zoom_drag_current_x_ = 0;
+};
+
+// ---------------------------------------------------------------------------
+// TriggerScopeWidget — oscilloscope-style render of decoded trigger log
+// traces (G7 from the TunerStudio gap backlog). Stacks one track per
+// trace with time on X; digital traces get square-wave strokes, analog
+// traces get smooth lines. Annotations land as vertical marks in
+// accent_warning when severity != "edge" and text_dim otherwise.
+// ---------------------------------------------------------------------------
+class TriggerScopeWidget : public QWidget {
+public:
+    explicit TriggerScopeWidget(QWidget* parent = nullptr) : QWidget(parent) {
+        setMinimumSize(560, 240);
+    }
+
+    void set_snapshot(const tuner_core::trigger_log_visualization::Snapshot& s) {
+        snap_ = s;
+        update();
+    }
+
+    void clear_snapshot() {
+        snap_ = {};
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        const double w = width(), h = height();
+
+        p.fillRect(rect(), QColor(tt::bg_deep));
+        p.setPen(QPen(QColor(tt::border), 1));
+        p.drawRect(0, 0, static_cast<int>(w) - 1, static_cast<int>(h) - 1);
+
+        if (snap_.traces.empty()) {
+            p.setPen(QColor(tt::text_muted));
+            QFont f; f.setPixelSize(tt::font_small); p.setFont(f);
+            p.drawText(rect(), Qt::AlignCenter, QString::fromUtf8(
+                "Capture a trigger log to see the oscilloscope view"));
+            return;
+        }
+
+        const int ml = 76, mr = 16, mt = 20, mb = 22;
+        const double pw = w - ml - mr;
+        const double ph = h - mt - mb;
+        if (pw <= 0 || ph <= 0) return;
+
+        double t_min = std::numeric_limits<double>::infinity();
+        double t_max = -std::numeric_limits<double>::infinity();
+        for (const auto& tr : snap_.traces) {
+            for (double x : tr.x_values) {
+                if (x < t_min) t_min = x;
+                if (x > t_max) t_max = x;
+            }
+        }
+        if (!std::isfinite(t_min)) { t_min = 0; t_max = 1; }
+        if (t_max <= t_min) t_max = t_min + 1;
+        double t_span = t_max - t_min;
+
+        int n_tr = static_cast<int>(snap_.traces.size());
+        double track_h = ph / n_tr;
+
+        const char* colors[] = {
+            tt::accent_primary, tt::accent_warning, tt::accent_ok,
+            tt::accent_special, tt::accent_danger, tt::text_secondary
+        };
+
+        for (int ti = 0; ti < n_tr; ++ti) {
+            const auto& tr = snap_.traces[ti];
+            double ty0 = mt + ti * track_h;
+            double ty1 = ty0 + track_h;
+            const char* color = colors[ti % 6];
+
+            p.setPen(QColor(color));
+            QFont lf; lf.setPixelSize(tt::font_small); lf.setBold(true); p.setFont(lf);
+            p.drawText(QRectF(0, ty0, ml - 6, track_h),
+                Qt::AlignRight | Qt::AlignVCenter,
+                QString::fromUtf8(tr.name.c_str()));
+
+            if (ti > 0) {
+                p.setPen(QPen(QColor(tt::border_soft), 1));
+                p.drawLine(QPointF(ml, ty0), QPointF(ml + pw, ty0));
+            }
+
+            double y_min = tr.y_values.empty() ? 0
+                : *std::min_element(tr.y_values.begin(), tr.y_values.end());
+            double y_max = tr.y_values.empty() ? 1
+                : *std::max_element(tr.y_values.begin(), tr.y_values.end());
+            if (y_max <= y_min) y_max = y_min + 1;
+            double y_span = y_max - y_min;
+
+            p.save();
+            p.setClipRect(QRectF(ml, ty0 + 2, pw, track_h - 4));
+            p.setPen(QPen(QColor(color), 1.4));
+            int N = static_cast<int>(std::min(tr.x_values.size(),
+                                              tr.y_values.size()));
+            if (N >= 2) {
+                QPainterPath path;
+                bool started = false;
+                double prev_y = 0;
+                for (int i = 0; i < N; ++i) {
+                    double x = ml + ((tr.x_values[i] - t_min) / t_span) * pw;
+                    double v = tr.y_values[i];
+                    double y = ty1 - 2
+                        - ((v - y_min) / y_span) * (track_h - 4);
+                    if (!started) {
+                        path.moveTo(x, y);
+                        started = true;
+                    } else if (tr.is_digital) {
+                        // Square-wave: horizontal segment at prev_y,
+                        // then vertical to new y.
+                        path.lineTo(x, prev_y);
+                        path.lineTo(x, y);
+                    } else {
+                        path.lineTo(x, y);
+                    }
+                    prev_y = y;
+                }
+                p.drawPath(path);
+            }
+            p.restore();
+        }
+
+        // Annotations — vertical marks across all tracks.
+        for (const auto& ann : snap_.annotations) {
+            if (ann.time_ms < t_min || ann.time_ms > t_max) continue;
+            double x = ml + ((ann.time_ms - t_min) / t_span) * pw;
+            bool warn = (ann.severity == "warning");
+            QColor col(warn ? tt::accent_warning : tt::text_dim);
+            col.setAlpha(warn ? 180 : 90);
+            p.setPen(QPen(col, warn ? 1.5 : 1.0, Qt::DashLine));
+            p.drawLine(QPointF(x, mt), QPointF(x, mt + ph));
+        }
+
+        // Time axis.
+        QFont af; af.setPixelSize(tt::font_micro); p.setFont(af);
+        p.setPen(QColor(tt::text_muted));
+        for (int i = 0; i <= 4; ++i) {
+            double t = t_min + t_span * i / 4.0;
+            double x = ml + pw * i / 4.0;
+            char buf[24];
+            std::snprintf(buf, sizeof(buf), "%.1f ms", t);
+            p.drawText(QRectF(x - 36, mt + ph + 2, 72, 16),
+                Qt::AlignCenter, QString::fromUtf8(buf));
+        }
+
+        // Header.
+        QFont hf; hf.setPixelSize(tt::font_label); hf.setBold(true); p.setFont(hf);
+        p.setPen(QColor(tt::text_primary));
+        p.drawText(QPointF(ml, mt - 6),
+            QString::fromUtf8("Trigger Scope"));
+    }
+
+private:
+    tuner_core::trigger_log_visualization::Snapshot snap_;
+};
+
+// ---------------------------------------------------------------------------
 // Shared card builder used across tabs
 // ---------------------------------------------------------------------------
 
@@ -6630,7 +7477,8 @@ using NavigateCallback = std::function<void(int page_index, const std::string& h
 bool open_gauge_config_dialog(
     QWidget* parent,
     tuner_core::dashboard_layout::Widget& widget,
-    const std::vector<tuner_core::IniGaugeConfiguration>& gauge_catalog) {
+    const std::vector<tuner_core::IniGaugeConfiguration>& gauge_catalog,
+    const std::vector<std::string>& formula_channel_names = {}) {
     namespace dln = tuner_core::dashboard_layout;
     namespace gcz = tuner_core::gauge_color_zones;
 
@@ -6698,7 +7546,11 @@ bool open_gauge_config_dialog(
         return spin;
     };
 
-    // Source channel combo — populated from INI gauge catalog.
+    // Source channel combo — populated from INI gauge catalog, then
+    // formula channels (G4 polish: bind a gauge to any computed
+    // channel without needing a catalog entry). Formula entries get
+    // an `\xc6\x92 ` prefix so they read distinctly from hardware
+    // channels in the dropdown.
     auto* source_combo = make_form_row("Source Channel:");
     int current_source_idx = 0;
     for (int i = 0; i < static_cast<int>(gauge_catalog.size()); ++i) {
@@ -6708,6 +7560,28 @@ bool open_gauge_config_dialog(
         source_combo->addItem(QString::fromUtf8(entry));
         if (g.channel == widget.source || g.name == widget.widget_id)
             current_source_idx = i;
+    }
+    int formula_base = static_cast<int>(gauge_catalog.size());
+    if (!formula_channel_names.empty()) {
+        source_combo->addItem(QString::fromUtf8(
+            "\xe2\x80\x94 Formula channels \xe2\x80\x94"));
+        // Disable the separator row so it can't be selected. The +1
+        // accounts for the separator itself between catalog and
+        // formula entries.
+        auto* model = qobject_cast<QStandardItemModel*>(source_combo->model());
+        if (model) {
+            auto* sep_item = model->item(source_combo->count() - 1);
+            if (sep_item) sep_item->setEnabled(false);
+        }
+        formula_base = source_combo->count();
+        for (int i = 0; i < static_cast<int>(formula_channel_names.size()); ++i) {
+            const auto& fname = formula_channel_names[i];
+            char entry[128];
+            std::snprintf(entry, sizeof(entry), "\xc6\x92 %s", fname.c_str());
+            source_combo->addItem(QString::fromUtf8(entry));
+            if (fname == widget.source)
+                current_source_idx = formula_base + i;
+        }
     }
     // Add "Custom" at end for manual entry.
     source_combo->addItem(QString::fromUtf8("Custom (keep current)"));
@@ -6738,7 +7612,9 @@ bool open_gauge_config_dialog(
     zone_combo->addItem("Voltage (8-16V)");
     zone_combo->addItem("None (no zones)");
 
-    // Auto-fill from catalog on source change.
+    // Auto-fill from catalog on source change. Formula channels have
+    // no declared range in the INI, so we leave min/max alone when the
+    // operator picks one — they'll spin it themselves.
     QObject::connect(source_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
                      [source_combo, min_spin, max_spin, &gauge_catalog](int idx) {
         if (idx < 0 || idx >= static_cast<int>(gauge_catalog.size())) return;
@@ -6768,7 +7644,17 @@ bool open_gauge_config_dialog(
             widget.source = g.channel;
             widget.title = g.title;
             widget.units = g.units;
+        } else if (!formula_channel_names.empty()
+                   && src_idx >= formula_base
+                   && src_idx < formula_base
+                        + static_cast<int>(formula_channel_names.size())) {
+            const auto& fname = formula_channel_names[src_idx - formula_base];
+            widget.widget_id = fname;
+            widget.source = fname;
+            widget.title = fname;
+            widget.units = "";
         }
+        // else: "Custom (keep current)" — leave widget fields alone.
         const char* kinds[] = {"dial", "number", "bar", "led"};
         widget.kind = kinds[std::clamp(kind_combo->currentIndex(), 0, 3)];
         widget.min_value = min_spin->value();
@@ -7294,17 +8180,23 @@ QWidget* build_live_tab(
 
     // Rebuild dashboard gauges from shared_dash layout. Called on
     // initial build and after config/save-load/drag-drop changes.
-    // Load INI gauge catalog for the config dialog source picker.
+    // Load INI gauge catalog + formula channel list for the config
+    // dialog source picker.
     auto gauge_catalog = std::make_shared<std::vector<tuner_core::IniGaugeConfiguration>>();
+    auto formula_channel_names = std::make_shared<std::vector<std::string>>();
     {
         auto def_opt_gc = load_active_definition();
-        if (def_opt_gc.has_value())
+        if (def_opt_gc.has_value()) {
             *gauge_catalog = def_opt_gc->gauge_configurations.gauges;
+            for (const auto& fc : def_opt_gc->output_channels.formula_channels)
+                formula_channel_names->push_back(fc.name);
+        }
     }
 
     auto rebuild_dashboard = std::make_shared<std::function<void()>>();
     *rebuild_dashboard = [dash_grid, bindings, shared_dash, on_navigate,
-                          gauge_catalog, rebuild_dashboard]() {
+                          gauge_catalog, formula_channel_names,
+                          rebuild_dashboard]() {
         // Clear existing gauges.
         bindings->clear();
         while (auto* item = dash_grid->takeAt(0)) {
@@ -7361,11 +8253,12 @@ QWidget* build_live_tab(
                 });
                 // Right-click → configure gauge dialog.
                 gauge->set_config_callback(
-                    [shared_dash, gauge_catalog, rebuild_dashboard](
-                        const std::string& wid) {
+                    [shared_dash, gauge_catalog, formula_channel_names,
+                     rebuild_dashboard](const std::string& wid) {
                     for (auto& w : shared_dash->widgets) {
                         if (w.widget_id == wid) {
-                            if (open_gauge_config_dialog(nullptr, w, *gauge_catalog))
+                            if (open_gauge_config_dialog(nullptr, w,
+                                    *gauge_catalog, *formula_channel_names))
                                 (*rebuild_dashboard)();
                             break;
                         }
@@ -7967,6 +8860,16 @@ QWidget* build_live_tab(
         if (rs.warmup_or_ase_active) { sep(); chip("Warmup", tt::accent_warning); }
         if (rs.transient_active)     { sep(); chip("Accel", tt::accent_warning); }
         if (rs.fuel_pump_on)         { sep(); chip("Fuel Pump", tt::text_muted); }
+        // Active slot chip — only shown when firmware 14G ships the
+        // activeTuneSlot byte (pre-14G firmware omits the channel and
+        // rs.active_tune_slot stays nullopt).
+        if (rs.active_tune_slot.has_value()) {
+            sep();
+            char slot_lbl[16];
+            std::snprintf(slot_lbl, sizeof(slot_lbl),
+                "Slot %d", *rs.active_tune_slot);
+            chip(slot_lbl, tt::accent_primary);
+        }
 
         status_strip->setText(QString::fromUtf8(buf));
     });
@@ -9068,33 +9971,67 @@ QWidget* build_assist_tab(
         }
         gl->addWidget(gh);
 
-        // Build grid lookup.
-        std::vector<std::vector<double>> cf_grid(disp_rows,
-            std::vector<double>(disp_cols, 1.0));
+        // Per-cell widgets in a QGridLayout — matches the coverage
+        // grid's tooltip treatment. Each cell shows the CF and a
+        // hover tooltip with VE delta, sample count, and a clamp
+        // note when the upstream smoothing layer capped the raw CF.
+        std::vector<std::vector<const tuner_core::ve_proposal_smoothing::Proposal*>>
+            prop_grid(disp_rows, std::vector<const tuner_core::ve_proposal_smoothing::Proposal*>(disp_cols, nullptr));
         for (const auto& p : snapshot.proposals) {
             if (p.row_index < disp_rows && p.col_index < disp_cols)
-                cf_grid[p.row_index][p.col_index] = p.correction_factor;
+                prop_grid[p.row_index][p.col_index] = &p;
         }
+        auto* cf_grid_widget = new QWidget;
+        auto* cf_grid_layout = new QGridLayout(cf_grid_widget);
+        cf_grid_layout->setContentsMargins(0, 0, 0, 0);
+        cf_grid_layout->setHorizontalSpacing(2);
+        cf_grid_layout->setVerticalSpacing(2);
         for (int r = 0; r < disp_rows; ++r) {
-            char row_buf[1024];
-            int off = 0;
             for (int c = 0; c < disp_cols; ++c) {
-                double cf = cf_grid[r][c];
+                const auto* prop = prop_grid[r][c];
+                double cf = prop ? prop->correction_factor : 1.0;
                 const char* color = (cf > 1.05) ? tt::accent_danger :
                                     (cf < 0.95) ? tt::accent_primary : tt::accent_ok;
-                off += std::snprintf(row_buf + off, sizeof(row_buf) - off,
-                    "<span style='background-color: %s; color: %s; "
-                    "padding: 2px 6px; margin-right: 2px; "
-                    "font-family: monospace; font-size: %dpx;'>%.2f</span>",
-                    color, tt::text_inverse, tt::font_small, cf);
-                if (off >= (int)sizeof(row_buf) - 1) break;
+                auto* cell = new QLabel;
+                char cell_text[16];
+                std::snprintf(cell_text, sizeof(cell_text), "%.2f", cf);
+                cell->setText(QString::fromUtf8(cell_text));
+                cell->setAlignment(Qt::AlignCenter);
+                {
+                    char s[160];
+                    std::snprintf(s, sizeof(s),
+                        "background-color: %s; color: %s; "
+                        "padding: 2px 6px; "
+                        "font-family: monospace; font-size: %dpx; "
+                        "border: none;",
+                        color, tt::text_inverse, tt::font_small);
+                    cell->setStyleSheet(QString::fromUtf8(s));
+                }
+                char tip[240];
+                if (prop) {
+                    double delta_pct = prop->current_ve > 0
+                        ? ((prop->proposed_ve - prop->current_ve)
+                           / prop->current_ve) * 100.0
+                        : 0.0;
+                    std::snprintf(tip, sizeof(tip),
+                        "Row %d \xc2\xb7 Col %d\n"
+                        "VE %.1f \xe2\x86\x92 %.1f (%+.1f%%)\n"
+                        "%d sample%s \xc2\xb7 raw CF %.2f%s",
+                        r, c,
+                        prop->current_ve, prop->proposed_ve, delta_pct,
+                        prop->sample_count, prop->sample_count == 1 ? "" : "s",
+                        prop->raw_correction_factor,
+                        prop->clamp_applied ? " \xc2\xb7 clamped" : "");
+                } else {
+                    std::snprintf(tip, sizeof(tip),
+                        "Row %d \xc2\xb7 Col %d \xc2\xb7 no proposal",
+                        r, c);
+                }
+                cell->setToolTip(QString::fromUtf8(tip));
+                cf_grid_layout->addWidget(cell, r, c);
             }
-            auto* row_lbl = new QLabel;
-            row_lbl->setTextFormat(Qt::RichText);
-            row_lbl->setText(QString::fromUtf8(row_buf));
-            row_lbl->setStyleSheet("border: none;");
-            gl->addWidget(row_lbl);
         }
+        gl->addWidget(cf_grid_widget);
         results_layout->addWidget(grid_card);
 
         // -----------------------------------------------------------------
@@ -9125,41 +10062,66 @@ QWidget* build_assist_tab(
             }
             cl->addWidget(header);
 
+            // Per-cell widgets in a QGridLayout (not one QLabel per row
+            // with inline-HTML spans) so each cell can carry its own
+            // tooltip: "Row r · Col c · N samples · confidence tier".
+            // The visual output stays byte-identical — same colors, same
+            // padding, same monospace — but the operator can hover a
+            // cell to confirm where corrections came from.
             int cov_rows = std::min<int>(snapshot.coverage.rows, 16);
             int cov_cols = std::min<int>(snapshot.coverage.columns, 16);
+            auto* cov_grid_widget = new QWidget;
+            auto* cov_grid = new QGridLayout(cov_grid_widget);
+            cov_grid->setContentsMargins(0, 0, 0, 0);
+            cov_grid->setHorizontalSpacing(2);
+            cov_grid->setVerticalSpacing(2);
             for (int r = 0; r < cov_rows; ++r) {
-                char row_buf[1536];
-                int off = 0;
                 for (int c = 0; c < cov_cols; ++c) {
                     int n = 0;
+                    double conf = 0.0;
                     if (r < static_cast<int>(snapshot.coverage.cells.size())
                         && c < static_cast<int>(snapshot.coverage.cells[r].size())) {
                         n = snapshot.coverage.cells[r][c].sample_count;
+                        conf = snapshot.coverage.cells[r][c].confidence_score;
                     }
                     const char* bg;
-                    if (n <= 0)       bg = tt::bg_inset;
-                    else if (n < 3)   bg = tt::accent_danger;
-                    else if (n < 10)  bg = tt::accent_warning;
-                    else if (n < 30)  bg = tt::accent_ok;
-                    else              bg = tt::accent_ok;  // saturate
-                    const char* fg = (n <= 0) ? tt::text_dim
-                                              : tt::text_inverse;
-                    off += std::snprintf(row_buf + off,
-                        sizeof(row_buf) - off,
-                        "<span style='background-color: %s; color: %s; "
-                        "padding: 2px 6px; margin-right: 2px; "
-                        "font-family: monospace; font-size: %dpx;'>"
-                        "%s</span>",
-                        bg, fg, tt::font_small,
-                        n > 0 ? (std::string{} + std::to_string(n)).c_str() : "\xc2\xb7");
-                    if (off >= (int)sizeof(row_buf) - 1) break;
+                    if (n <= 0)      bg = tt::bg_inset;
+                    else if (n < 3)  bg = tt::accent_danger;
+                    else if (n < 10) bg = tt::accent_warning;
+                    else             bg = tt::accent_ok;
+                    const char* fg = (n <= 0) ? tt::text_dim : tt::text_inverse;
+                    const char* tier =
+                        (n <= 0)   ? "unvisited" :
+                        (n < 3)    ? "insufficient" :
+                        (n < 10)   ? "low" :
+                        (n < 30)   ? "medium" : "high";
+
+                    auto* cell = new QLabel;
+                    cell->setText(n > 0
+                        ? QString::number(n)
+                        : QString::fromUtf8("\xc2\xb7"));
+                    cell->setAlignment(Qt::AlignCenter);
+                    {
+                        char s[160];
+                        std::snprintf(s, sizeof(s),
+                            "background-color: %s; color: %s; "
+                            "padding: 2px 6px; "
+                            "font-family: monospace; font-size: %dpx; "
+                            "border: none;",
+                            bg, fg, tt::font_small);
+                        cell->setStyleSheet(QString::fromUtf8(s));
+                    }
+                    char tip[160];
+                    std::snprintf(tip, sizeof(tip),
+                        "Row %d \xc2\xb7 Col %d \xc2\xb7 "
+                        "%d sample%s \xc2\xb7 %s"
+                        " (confidence %.2f)",
+                        r, c, n, n == 1 ? "" : "s", tier, conf);
+                    cell->setToolTip(QString::fromUtf8(tip));
+                    cov_grid->addWidget(cell, r, c);
                 }
-                auto* row_lbl = new QLabel;
-                row_lbl->setTextFormat(Qt::RichText);
-                row_lbl->setText(QString::fromUtf8(row_buf));
-                row_lbl->setStyleSheet("border: none;");
-                cl->addWidget(row_lbl);
             }
+            cl->addWidget(cov_grid_widget);
 
             // Legend under the grid so the tier colors are clear.
             char legend[512];
@@ -9776,17 +10738,8 @@ QWidget* build_assist_tab(
             dyno_result_label->setStyleSheet(QString::fromUtf8(s));
         }
 
-        // Dyno curve display — text-based table for now (no chart widget).
-        auto* dyno_curve_label = new QLabel;
-        dyno_curve_label->setTextFormat(Qt::RichText);
-        dyno_curve_label->setWordWrap(true);
-        {
-            char s[128];
-            std::snprintf(s, sizeof(s),
-                "QLabel { color: %s; font-size: %dpx; font-family: monospace; border: none; }",
-                tt::text_primary, tt::font_small);
-            dyno_curve_label->setStyleSheet(QString::fromUtf8(s));
-        }
+        // Dyno curve — QPainter chart (torque + HP over RPM, peak markers).
+        auto* dyno_chart = new DynoChartWidget;
 
         // Import WOT button.
         auto* dyno_import_btn = new QPushButton(QString::fromUtf8("Import WOT Pull CSV..."));
@@ -9803,24 +10756,21 @@ QWidget* build_assist_tab(
             dyno_import_btn->setStyleSheet(QString::fromUtf8(bs));
         }
 
-        QObject::connect(dyno_import_btn, &QPushButton::clicked,
-                         [container, dyno_result_label, dyno_curve_label,
-                          shared_edit_svc]() {
-            auto path = QFileDialog::getOpenFileName(container,
-                QString::fromUtf8("Import WOT Pull CSV"),
-                QDir::homePath(),
-                QString::fromUtf8("CSV Files (*.csv);;All Files (*)"));
-            if (path.isEmpty()) return;
-
-            // Read and parse CSV.
-            std::ifstream in(path.toStdString(), std::ios::in | std::ios::binary);
-            if (!in) return;
+        // Shared CSV → DynoResult pipeline. Used by both Import (sets
+        // the primary curve) and Compare to Another… (sets the overlay
+        // curve). Returns nullopt on any failure so the caller can
+        // show the right status string.
+        auto import_dyno_csv = std::make_shared<std::function<
+            std::optional<vd::DynoResult>(const std::string&)>>();
+        *import_dyno_csv = [shared_edit_svc](const std::string& path_str)
+            -> std::optional<vd::DynoResult> {
+            std::ifstream in(path_str, std::ios::in | std::ios::binary);
+            if (!in) return std::nullopt;
             std::string header_line;
-            if (!std::getline(in, header_line)) return;
+            if (!std::getline(in, header_line)) return std::nullopt;
             if (!header_line.empty() && header_line.back() == '\r')
                 header_line.pop_back();
 
-            // Find column indices.
             std::vector<std::string> cols;
             {
                 std::istringstream hs(header_line);
@@ -9842,13 +10792,8 @@ QWidget* build_assist_tab(
                 else if (cols[i] == "iat") iat_i = i;
                 else if (cols[i] == "afr" || cols[i] == "afr1") afr_i = i;
             }
-            if (rpm_i < 0 || map_i < 0 || afr_i < 0) {
-                dyno_result_label->setText(QString::fromUtf8(
-                    "CSV missing required columns (rpm, map, afr)"));
-                return;
-            }
+            if (rpm_i < 0 || map_i < 0 || afr_i < 0) return std::nullopt;
 
-            // Parse rows — filter to WOT (TPS > 90% or MAP > 90 kPa).
             std::vector<vd::DataPoint> data;
             std::string line;
             while (std::getline(in, line)) {
@@ -9874,7 +10819,6 @@ QWidget* build_assist_tab(
                 double afr = safe_d(afr_i);
                 double iat = (iat_i >= 0) ? safe_d(iat_i) : 25.0;
 
-                // WOT filter: MAP > 90 kPa or high RPM + high MAP.
                 if (map_v < 90 || rpm < 1500 || afr < 8 || afr > 25) continue;
 
                 vd::DataPoint dp;
@@ -9885,15 +10829,8 @@ QWidget* build_assist_tab(
                 data.push_back(dp);
             }
             in.close();
+            if (data.empty()) return std::nullopt;
 
-            if (data.empty()) {
-                dyno_result_label->setText(QString::fromUtf8(
-                    "No WOT data found (MAP > 90 kPa, RPM > 1500)"));
-                return;
-            }
-
-            // Run calculation. Read engine spec from the loaded tune
-            // when available, otherwise fall back to the demo defaults.
             vd::EngineSpec spec;
             spec.displacement_cc = 2000;
             spec.cylinders = 6;
@@ -9907,44 +10844,101 @@ QWidget* build_assist_tab(
                 spec.displacement_cc = read_num("displacement", 2000.0);
                 spec.cylinders = static_cast<int>(read_num("nCylinders", 6));
             }
-            auto result = vd::calculate(data, spec);
+            return vd::calculate(data, spec);
+        };
 
-            dyno_result_label->setText(QString::fromUtf8(
-                result.summary_text.c_str()));
+        QObject::connect(dyno_import_btn, &QPushButton::clicked,
+            [container, dyno_result_label, dyno_chart, import_dyno_csv]() {
+                auto path = QFileDialog::getOpenFileName(container,
+                    QString::fromUtf8("Import WOT Pull CSV"),
+                    QDir::homePath(),
+                    QString::fromUtf8("CSV Files (*.csv);;All Files (*)"));
+                if (path.isEmpty()) return;
+                auto result = (*import_dyno_csv)(path.toStdString());
+                if (!result) {
+                    dyno_result_label->setText(QString::fromUtf8(
+                        "Could not parse CSV (missing rpm/map/afr, or "
+                        "no WOT data above MAP 90 kPa / RPM 1500)."));
+                    return;
+                }
+                dyno_result_label->setText(QString::fromUtf8(
+                    result->summary_text.c_str()));
+                dyno_chart->set_result(*result);
+            });
 
-            // Build text-based curve display.
-            char curve_buf[2048];
-            int off = 0;
-            off += std::snprintf(curve_buf + off, sizeof(curve_buf) - off,
-                "<table style='border-collapse: collapse;'>"
-                "<tr><th style='padding: 2px 8px; color: %s;'>RPM</th>"
-                "<th style='padding: 2px 8px; color: %s;'>Torque (Nm)</th>"
-                "<th style='padding: 2px 8px; color: %s;'>HP</th></tr>",
-                tt::text_muted, tt::text_muted, tt::text_muted);
+        // Compare to Another… + Clear Overlay buttons (G8 before/after
+        // comparison). Dashed overlay lines share the same axis range
+        // as the primary curves so the delta reads honestly.
+        auto* dyno_compare_btn = new QPushButton(
+            QString::fromUtf8("Compare to Another CSV\xe2\x80\xa6"));
+        dyno_compare_btn->setCursor(Qt::PointingHandCursor);
+        {
+            char bs[256];
+            std::snprintf(bs, sizeof(bs),
+                "QPushButton { background: %s; color: %s; border: 1px solid %s; "
+                "border-radius: %dpx; padding: %dpx %dpx; font-size: %dpx; }"
+                "QPushButton:hover { background: %s; }",
+                tt::bg_elevated, tt::text_primary, tt::border,
+                tt::radius_sm, tt::space_xs, tt::space_md, tt::font_small,
+                tt::fill_primary_mid);
+            dyno_compare_btn->setStyleSheet(QString::fromUtf8(bs));
+        }
+        auto* dyno_clear_overlay_btn = new QPushButton(
+            QString::fromUtf8("Clear Overlay"));
+        dyno_clear_overlay_btn->setCursor(Qt::PointingHandCursor);
+        dyno_clear_overlay_btn->setEnabled(false);
+        {
+            char bs[256];
+            std::snprintf(bs, sizeof(bs),
+                "QPushButton { background: %s; color: %s; border: 1px solid %s; "
+                "border-radius: %dpx; padding: %dpx %dpx; font-size: %dpx; }"
+                "QPushButton:hover { background: %s; }"
+                "QPushButton:disabled { color: %s; }",
+                tt::bg_elevated, tt::text_primary, tt::border,
+                tt::radius_sm, tt::space_xs, tt::space_md, tt::font_small,
+                tt::fill_primary_mid, tt::text_dim);
+            dyno_clear_overlay_btn->setStyleSheet(QString::fromUtf8(bs));
+        }
 
-            for (const auto& p : result.points) {
-                bool is_peak_t = (std::abs(p.rpm - result.peak_torque_rpm) < 50);
-                bool is_peak_h = (std::abs(p.rpm - result.peak_hp_rpm) < 50);
-                const char* t_color = is_peak_t ? tt::accent_ok : tt::text_primary;
-                const char* h_color = is_peak_h ? tt::accent_ok : tt::text_primary;
-                off += std::snprintf(curve_buf + off, sizeof(curve_buf) - off,
-                    "<tr>"
-                    "<td style='padding: 2px 8px; color: %s;'>%.0f</td>"
-                    "<td style='padding: 2px 8px; color: %s;'>%.1f%s</td>"
-                    "<td style='padding: 2px 8px; color: %s;'>%.1f%s</td>"
-                    "</tr>",
-                    tt::text_secondary, p.rpm,
-                    t_color, p.torque_nm, is_peak_t ? " \xe2\x9c\xb6" : "",
-                    h_color, p.horsepower, is_peak_h ? " \xe2\x9c\xb6" : "");
-                if (off >= static_cast<int>(sizeof(curve_buf) - 200)) break;
-            }
-            off += std::snprintf(curve_buf + off, sizeof(curve_buf) - off, "</table>");
-            dyno_curve_label->setText(QString::fromUtf8(curve_buf));
-        });
+        QObject::connect(dyno_compare_btn, &QPushButton::clicked,
+            [container, dyno_result_label, dyno_chart, import_dyno_csv,
+             dyno_clear_overlay_btn]() {
+                auto path = QFileDialog::getOpenFileName(container,
+                    QString::fromUtf8("Compare to Another WOT Pull CSV"),
+                    QDir::homePath(),
+                    QString::fromUtf8("CSV Files (*.csv);;All Files (*)"));
+                if (path.isEmpty()) return;
+                auto result = (*import_dyno_csv)(path.toStdString());
+                if (!result) {
+                    dyno_result_label->setText(QString::fromUtf8(
+                        "Overlay CSV: could not parse."));
+                    return;
+                }
+                dyno_chart->set_overlay(*result);
+                dyno_clear_overlay_btn->setEnabled(true);
+                char msg[256];
+                std::snprintf(msg, sizeof(msg),
+                    "Overlay: peak %.0f Nm @ %.0f \xc2\xb7 %.0f hp @ %.0f",
+                    result->peak_torque_nm, result->peak_torque_rpm,
+                    result->peak_hp, result->peak_hp_rpm);
+                dyno_result_label->setText(QString::fromUtf8(msg));
+            });
 
-        dyno_layout->addWidget(dyno_import_btn);
+        QObject::connect(dyno_clear_overlay_btn, &QPushButton::clicked,
+            [dyno_chart, dyno_clear_overlay_btn]() {
+                dyno_chart->clear_overlay();
+                dyno_clear_overlay_btn->setEnabled(false);
+            });
+
+        auto* dyno_btn_row = new QHBoxLayout;
+        dyno_btn_row->setSpacing(tt::space_sm);
+        dyno_btn_row->addWidget(dyno_import_btn);
+        dyno_btn_row->addWidget(dyno_compare_btn);
+        dyno_btn_row->addWidget(dyno_clear_overlay_btn);
+        dyno_btn_row->addStretch(1);
+        dyno_layout->addLayout(dyno_btn_row);
         dyno_layout->addWidget(dyno_result_label);
-        dyno_layout->addWidget(dyno_curve_label);
+        dyno_layout->addWidget(dyno_chart);
         outer->addWidget(dyno_card);
     }
 
@@ -11529,7 +12523,7 @@ QWidget* build_setup_tab(
         // Pick accent color by worst risk so the card itself reads
         // "ok / warning / danger" at a glance — same grammar as the
         // number cards on the LIVE tab.
-        const char* accent;
+        const char* accent = tt::accent_danger;  // default to worst case
         switch (summary.worst_risk) {
             case cmm::RiskRegion::SAFE:        accent = tt::accent_ok;      break;
             case cmm::RiskRegion::NEAR_SURGE:
@@ -12200,6 +13194,15 @@ QWidget* build_triggers_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
 
         // Visualization.
         auto snap = tlv::build_from_rows(rows, columns);
+
+        // Oscilloscope-style scope widget (G7). Renders stacked traces
+        // with time on X, digital signals as square-waves, annotations
+        // as vertical dashes. Sits above the info-card summaries so
+        // the operator sees the waveform before the text breakdown.
+        auto* scope = new TriggerScopeWidget;
+        scope->set_snapshot(snap);
+        scope->setMinimumHeight(260);
+        results_layout->addWidget(scope);
 
         results_layout->addWidget(make_info_card("Visualization Summary",
             snap.summary_text.c_str(),
@@ -12995,6 +13998,90 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
         }
         rl->addWidget(row_spin);
 
+        // Play/pause + speed selector. The playback timer advances the
+        // row spinner at ~10 Hz scaled by the selected rate. Stops at
+        // end-of-data so the button re-becomes "Play" without the
+        // operator needing to touch it.
+        auto play_timer = std::make_shared<QTimer>();
+        play_timer->setInterval(100);
+        auto* play_btn = new QPushButton(QString::fromUtf8("\xe2\x96\xb6 Play"));
+        play_btn->setCursor(Qt::PointingHandCursor);
+        {
+            char bs[256];
+            std::snprintf(bs, sizeof(bs),
+                "QPushButton { background: %s; color: %s; border: 1px solid %s; "
+                "border-radius: %dpx; padding: %dpx %dpx; font-size: %dpx; }"
+                "QPushButton:hover { background: %s; }",
+                tt::bg_elevated, tt::text_primary, tt::border,
+                tt::radius_sm, tt::space_xs, tt::space_md, tt::font_small,
+                tt::fill_primary_mid);
+            play_btn->setStyleSheet(QString::fromUtf8(bs));
+        }
+        rl->addWidget(play_btn);
+
+        auto* speed_combo = new QComboBox;
+        speed_combo->addItem("1x", 1);
+        speed_combo->addItem("2x", 2);
+        speed_combo->addItem("4x", 4);
+        speed_combo->addItem("8x", 8);
+        {
+            char ss[256];
+            std::snprintf(ss, sizeof(ss),
+                "QComboBox { background: %s; color: %s; border: 1px solid %s; "
+                "border-radius: %dpx; padding: 4px 8px; font-size: %dpx; }",
+                tt::bg_elevated, tt::text_primary, tt::border,
+                tt::radius_sm, tt::font_small);
+            speed_combo->setStyleSheet(QString::fromUtf8(ss));
+        }
+        rl->addWidget(speed_combo);
+
+        auto* channels_btn = new QPushButton(QString::fromUtf8("Channels\xe2\x80\xa6"));
+        channels_btn->setCursor(Qt::PointingHandCursor);
+        {
+            char bs[256];
+            std::snprintf(bs, sizeof(bs),
+                "QPushButton { background: %s; color: %s; border: 1px solid %s; "
+                "border-radius: %dpx; padding: %dpx %dpx; font-size: %dpx; }"
+                "QPushButton:hover { background: %s; }",
+                tt::bg_elevated, tt::text_primary, tt::border,
+                tt::radius_sm, tt::space_xs, tt::space_md, tt::font_small,
+                tt::fill_primary_mid);
+            channels_btn->setStyleSheet(QString::fromUtf8(bs));
+        }
+        rl->addWidget(channels_btn);
+
+        auto* reset_zoom_btn = new QPushButton(QString::fromUtf8("Reset Zoom"));
+        reset_zoom_btn->setCursor(Qt::PointingHandCursor);
+        {
+            char bs[256];
+            std::snprintf(bs, sizeof(bs),
+                "QPushButton { background: %s; color: %s; border: 1px solid %s; "
+                "border-radius: %dpx; padding: %dpx %dpx; font-size: %dpx; }"
+                "QPushButton:hover { background: %s; }",
+                tt::bg_elevated, tt::text_primary, tt::border,
+                tt::radius_sm, tt::space_xs, tt::space_md, tt::font_small,
+                tt::fill_primary_mid);
+            reset_zoom_btn->setStyleSheet(QString::fromUtf8(bs));
+        }
+        rl->addWidget(reset_zoom_btn);
+        // reset_zoom_btn connection wired below — timeline is created
+        // further down in this block and not yet in scope here.
+
+        auto* export_btn = new QPushButton(QString::fromUtf8("Export\xe2\x80\xa6"));
+        export_btn->setCursor(Qt::PointingHandCursor);
+        {
+            char bs[256];
+            std::snprintf(bs, sizeof(bs),
+                "QPushButton { background: %s; color: %s; border: 1px solid %s; "
+                "border-radius: %dpx; padding: %dpx %dpx; font-size: %dpx; }"
+                "QPushButton:hover { background: %s; }",
+                tt::bg_elevated, tt::text_primary, tt::border,
+                tt::radius_sm, tt::space_xs, tt::space_md, tt::font_small,
+                tt::fill_primary_mid);
+            export_btn->setStyleSheet(QString::fromUtf8(bs));
+        }
+        rl->addWidget(export_btn);
+
         auto* replay_summary = new QLabel;
         replay_summary->setWordWrap(true);
         {
@@ -13023,42 +14110,314 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
         }
         layout->addWidget(values_card);
 
-        // Shared refresh lambda — updates summary + values on row change.
+        // Timeline viewer (P16-5). Scrubbable by click + drag; updates
+        // the row spinner + values card so the existing replay surface
+        // stays in sync.
+        auto* timeline = new LogTimelineWidget;
+        timeline->hide();
+        layout->addWidget(timeline);
+
+        QObject::connect(reset_zoom_btn, &QPushButton::clicked,
+            [timeline]() { timeline->reset_zoom(); });
+
+        // Captured import snapshot + selected channel names so the
+        // channel picker can rebuild the timeline config on the fly
+        // without re-reading the CSV.
+        auto shared_snap = std::make_shared<dli::ImportSnapshot>();
+        auto selected_channels = std::make_shared<std::vector<std::string>>();
+
+        // Export menu — "Visible Range as CSV..." writes the rows whose
+        // timestamps fall within the current zoom window (all channels
+        // preserved, not just the timeline selection, so the operator
+        // can hand off a slice for deeper analysis). "Timeline Snapshot
+        // as PNG..." grabs the widget itself at its current size.
+        QObject::connect(export_btn, &QPushButton::clicked,
+            [container, export_btn, timeline, shared_snap]() {
+                if (shared_snap->records.empty()) return;
+                QMenu menu(container);
+                auto* csv_action = menu.addAction(
+                    QString::fromUtf8("Visible Range as CSV\xe2\x80\xa6"));
+                auto* png_action = menu.addAction(
+                    QString::fromUtf8("Timeline Snapshot as PNG\xe2\x80\xa6"));
+
+                QObject::connect(csv_action, &QAction::triggered,
+                    [container, timeline, shared_snap]() {
+                        double t0 = timeline->view_start();
+                        double t1 = timeline->view_end();
+                        QString path = QFileDialog::getSaveFileName(
+                            container,
+                            QString::fromUtf8("Export Visible Range"),
+                            QString::fromUtf8("datalog-region.csv"),
+                            QString::fromUtf8(
+                                "CSV Files (*.csv);;All Files (*)"));
+                        if (path.isEmpty()) return;
+                        std::ofstream out(path.toStdString(),
+                            std::ios::binary);
+                        if (!out) {
+                            QMessageBox::warning(container,
+                                QString::fromUtf8("Export Failed"),
+                                QString::fromUtf8("Could not write: ") + path);
+                            return;
+                        }
+                        const auto& headers = shared_snap->channel_names;
+                        out << "time_s";
+                        for (const auto& h : headers) out << "," << h;
+                        out << "\r\n";
+                        int exported = 0;
+                        for (const auto& r : shared_snap->records) {
+                            if (r.timestamp_seconds < t0
+                             || r.timestamp_seconds > t1) continue;
+                            char ts[32];
+                            std::snprintf(ts, sizeof(ts), "%.3f",
+                                r.timestamp_seconds);
+                            out << ts;
+                            for (const auto& h : headers) {
+                                out << ",";
+                                auto it = r.values.find(h);
+                                if (it != r.values.end()) {
+                                    char vb[32];
+                                    std::snprintf(vb, sizeof(vb), "%.6g",
+                                        it->second);
+                                    out << vb;
+                                }
+                            }
+                            out << "\r\n";
+                            ++exported;
+                        }
+                        out.close();
+                        char msg[160];
+                        std::snprintf(msg, sizeof(msg),
+                            "Exported %d row%s (%.2fs \xe2\x80\x93 %.2fs) to:\n",
+                            exported, exported == 1 ? "" : "s", t0, t1);
+                        QMessageBox::information(container,
+                            QString::fromUtf8("Export Complete"),
+                            QString::fromUtf8(msg) + path);
+                    });
+
+                QObject::connect(png_action, &QAction::triggered,
+                    [container, timeline]() {
+                        QString path = QFileDialog::getSaveFileName(
+                            container,
+                            QString::fromUtf8("Save Timeline Snapshot"),
+                            QString::fromUtf8("timeline.png"),
+                            QString::fromUtf8(
+                                "PNG Images (*.png);;All Files (*)"));
+                        if (path.isEmpty()) return;
+                        QPixmap pix = timeline->grab();
+                        if (!pix.save(path, "PNG")) {
+                            QMessageBox::warning(container,
+                                QString::fromUtf8("Export Failed"),
+                                QString::fromUtf8("Could not write: ") + path);
+                            return;
+                        }
+                        QMessageBox::information(container,
+                            QString::fromUtf8("Export Complete"),
+                            QString::fromUtf8("Saved snapshot to:\n") + path);
+                    });
+
+                menu.exec(export_btn->mapToGlobal(
+                    QPoint(0, export_btn->height())));
+            });
+
+        auto rebuild_timeline = std::make_shared<std::function<void()>>();
+        *rebuild_timeline = [shared_snap, selected_channels, timeline]() {
+            const auto& snap = *shared_snap;
+            if (snap.records.empty() || selected_channels->empty()) {
+                timeline->clear_config();
+                return;
+            }
+            LogTimelineWidget::Config tcfg;
+            tcfg.times.reserve(snap.records.size());
+            for (const auto& r : snap.records)
+                tcfg.times.push_back(r.timestamp_seconds);
+            for (const auto& name : *selected_channels) {
+                std::vector<double> vals;
+                vals.reserve(snap.records.size());
+                for (const auto& r : snap.records) {
+                    auto it = r.values.find(name);
+                    vals.push_back(it != r.values.end()
+                        ? it->second
+                        : std::numeric_limits<double>::quiet_NaN());
+                }
+                tcfg.channel_names.push_back(name);
+                tcfg.channel_values.push_back(std::move(vals));
+            }
+            timeline->set_config(tcfg);
+        };
+
+        // Shared refresh lambda — updates summary + values + timeline
+        // cursor on row change.
         auto refresh_replay = std::make_shared<std::function<void(int)>>();
-        *refresh_replay = [replay_records, replay_summary, values_card](int row_1based) {
+        *refresh_replay = [replay_records, replay_summary, values_card,
+                           timeline](int row_1based) {
             if (replay_records->empty()) return;
             int idx = std::clamp(row_1based - 1, 0,
                 static_cast<int>(replay_records->size()) - 1);
             auto snap = dlr::select_row(*replay_records, idx);
             replay_summary->setText(QString::fromUtf8(snap.summary_text.c_str()));
             values_card->setText(QString::fromUtf8(snap.preview_text.c_str()));
+            timeline->set_cursor_index(idx);
         };
+
+        // Timeline cursor drag → row spinner. Assigned below after the
+        // playback timer is defined so the drag can also auto-pause.
 
         // Spinbox navigation.
         QObject::connect(row_spin,
             static_cast<void(QSpinBox::*)(int)>(&QSpinBox::valueChanged),
             [refresh_replay](int val) { (*refresh_replay)(val); });
 
-        // Import button handler — parse CSV, populate replay state.
-        QObject::connect(import_btn, &QPushButton::clicked,
-                         [container, replay_records, replay_card, values_card,
-                          row_spin, refresh_replay]() {
-            auto path = QFileDialog::getOpenFileName(container,
-                QString::fromUtf8("Import Datalog CSV"),
-                QDir::homePath(),
-                QString::fromUtf8("CSV Files (*.csv);;All Files (*)"));
-            if (path.isEmpty()) return;
+        // Play/pause wiring. On each timer tick, advance the row
+        // spinner by `speed_multiplier` rows; auto-stop at end.
+        QObject::connect(play_btn, &QPushButton::clicked,
+            [play_timer, play_btn]() {
+                if (play_timer->isActive()) {
+                    play_timer->stop();
+                    play_btn->setText(QString::fromUtf8("\xe2\x96\xb6 Play"));
+                } else {
+                    play_timer->start();
+                    play_btn->setText(QString::fromUtf8("\xe2\x96\xa0 Pause"));
+                }
+            });
+        QObject::connect(play_timer.get(), &QTimer::timeout,
+            [row_spin, speed_combo, play_timer, play_btn]() {
+                int step = speed_combo->currentData().toInt();
+                if (step < 1) step = 1;
+                int next = row_spin->value() + step;
+                if (next >= row_spin->maximum()) {
+                    row_spin->setValue(row_spin->maximum());
+                    play_timer->stop();
+                    play_btn->setText(QString::fromUtf8("\xe2\x96\xb6 Play"));
+                } else {
+                    row_spin->setValue(next);
+                }
+            });
+        // Pausing when the operator scrubs the timeline manually avoids
+        // a tug-of-war between the timer and the drag position.
+        timeline->on_cursor_changed = [row_spin, play_timer, play_btn](int idx) {
+            if (play_timer->isActive()) {
+                play_timer->stop();
+                play_btn->setText(QString::fromUtf8("\xe2\x96\xb6 Play"));
+            }
+            row_spin->setValue(idx + 1);
+        };
 
-            // Read file.
-            std::ifstream in(path.toStdString(), std::ios::in | std::ios::binary);
-            if (!in) return;
+        // Channels picker — modal dialog with a checkable list of every
+        // channel present in the imported log. Preferred defaults pre-
+        // check on first import; subsequent opens reflect the current
+        // selection so the operator can toggle without losing state.
+        QObject::connect(channels_btn, &QPushButton::clicked,
+            [container, shared_snap, selected_channels, rebuild_timeline]() {
+                if (shared_snap->channel_names.empty()) return;
 
-            // Parse header.
+                QDialog dlg(container);
+                dlg.setWindowTitle(QString::fromUtf8("Timeline Channels"));
+                dlg.setMinimumSize(320, 420);
+                {
+                    char s[96];
+                    std::snprintf(s, sizeof(s),
+                        "QDialog { background: %s; }", tt::bg_base);
+                    dlg.setStyleSheet(QString::fromUtf8(s));
+                }
+                auto* vl = new QVBoxLayout(&dlg);
+                vl->setContentsMargins(tt::space_lg, tt::space_lg,
+                                       tt::space_lg, tt::space_lg);
+                vl->setSpacing(tt::space_sm);
+
+                auto* hint = new QLabel(QString::fromUtf8(
+                    "Select up to 6 channels to stack on the timeline."));
+                {
+                    char hs[96];
+                    std::snprintf(hs, sizeof(hs),
+                        "QLabel { color: %s; font-size: %dpx; border: none; }",
+                        tt::text_muted, tt::font_small);
+                    hint->setStyleSheet(QString::fromUtf8(hs));
+                }
+                vl->addWidget(hint);
+
+                auto* list = new QListWidget;
+                {
+                    char ss[320];
+                    std::snprintf(ss, sizeof(ss),
+                        "QListWidget { background: %s; color: %s; "
+                        "border: 1px solid %s; border-radius: %dpx; "
+                        "font-size: %dpx; }"
+                        "QListWidget::item { padding: 4px 8px; }"
+                        "QListWidget::item:selected { background: %s; }",
+                        tt::bg_panel, tt::text_primary, tt::border,
+                        tt::radius_sm, tt::font_body,
+                        tt::fill_primary_mid);
+                    list->setStyleSheet(QString::fromUtf8(ss));
+                }
+                auto is_selected = [&](const std::string& name) {
+                    return std::find(selected_channels->begin(),
+                        selected_channels->end(), name)
+                        != selected_channels->end();
+                };
+                for (const auto& name : shared_snap->channel_names) {
+                    auto* item = new QListWidgetItem(
+                        QString::fromUtf8(name.c_str()));
+                    item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+                    item->setCheckState(
+                        is_selected(name) ? Qt::Checked : Qt::Unchecked);
+                    list->addItem(item);
+                }
+                vl->addWidget(list, 1);
+
+                auto* btn_row = new QHBoxLayout;
+                btn_row->addStretch(1);
+                auto* cancel = new QPushButton(QString::fromUtf8("Cancel"));
+                auto* apply  = new QPushButton(QString::fromUtf8("Apply"));
+                for (auto* b : {cancel, apply}) {
+                    char bs[256];
+                    std::snprintf(bs, sizeof(bs),
+                        "QPushButton { background: %s; color: %s; border: 1px solid %s; "
+                        "border-radius: %dpx; padding: %dpx %dpx; font-size: %dpx; }"
+                        "QPushButton:hover { background: %s; }",
+                        tt::bg_elevated, tt::text_primary, tt::border,
+                        tt::radius_sm, tt::space_xs, tt::space_md + 2,
+                        tt::font_small, tt::fill_primary_mid);
+                    b->setStyleSheet(QString::fromUtf8(bs));
+                    b->setCursor(Qt::PointingHandCursor);
+                }
+                btn_row->addWidget(cancel);
+                btn_row->addWidget(apply);
+                vl->addLayout(btn_row);
+
+                QObject::connect(cancel, &QPushButton::clicked,
+                    &dlg, &QDialog::reject);
+                QObject::connect(apply, &QPushButton::clicked,
+                    &dlg, &QDialog::accept);
+
+                if (dlg.exec() != QDialog::Accepted) return;
+
+                std::vector<std::string> picked;
+                for (int i = 0; i < list->count() && (int)picked.size() < 6; ++i) {
+                    auto* it = list->item(i);
+                    if (it->checkState() == Qt::Checked) {
+                        picked.push_back(it->text().toStdString());
+                    }
+                }
+                if (picked.empty()) return;
+                *selected_channels = std::move(picked);
+                (*rebuild_timeline)();
+            });
+
+        // Shared CSV-text → imported snapshot + replay + timeline. Used
+        // by both the file-picker import (below) and the Airbear SD
+        // download (further below). Returns true on success so the
+        // caller can report import/failure cleanly.
+        auto apply_csv = std::make_shared<
+            std::function<bool(std::istream&, const std::string&)>>();
+        *apply_csv = [replay_records, replay_card, values_card,
+                      row_spin, refresh_replay, timeline,
+                      shared_snap, selected_channels, rebuild_timeline](
+            std::istream& in, const std::string& source_name) -> bool {
+
             std::string header_line;
-            if (!std::getline(in, header_line)) return;
+            if (!std::getline(in, header_line)) return false;
             if (!header_line.empty() && header_line.back() == '\r')
                 header_line.pop_back();
-
             std::vector<std::string> headers;
             {
                 std::istringstream hs(header_line);
@@ -13069,9 +14428,8 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
                     headers.push_back(col);
                 }
             }
-            if (headers.empty()) return;
+            if (headers.empty()) return false;
 
-            // Parse data rows.
             std::vector<dli::CsvRow> csv_rows;
             std::string line;
             while (std::getline(in, line)) {
@@ -13090,17 +14448,13 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
                 }
                 csv_rows.push_back(std::move(row));
             }
-            in.close();
-            if (csv_rows.empty()) return;
+            if (csv_rows.empty()) return false;
 
-            // Import via the service.
-            auto fname = std::filesystem::path(path.toStdString()).filename().string();
             dli::ImportSnapshot snap;
             try {
-                snap = dli::import_rows(headers, csv_rows, fname);
-            } catch (...) { return; }
+                snap = dli::import_rows(headers, csv_rows, source_name);
+            } catch (...) { return false; }
 
-            // Convert import records → replay records.
             replay_records->clear();
             replay_records->reserve(snap.records.size());
             for (const auto& ir : snap.records) {
@@ -13113,16 +14467,233 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
                     rr.values.emplace_back(k, v);
                 replay_records->push_back(std::move(rr));
             }
+            if (replay_records->empty()) return false;
 
-            if (replay_records->empty()) return;
+            *shared_snap = snap;
+            selected_channels->clear();
+            const char* preferred[] = {
+                "rpm", "RPM", "map", "MAP", "afr", "AFR", "afr1", "AFR1",
+                "tps", "TPS", "clt", "CLT", "coolant", "iat", "IAT",
+                "advance", "Advance", "batt", "Battery"
+            };
+            auto has_channel = [&](const std::string& name) {
+                return std::find(snap.channel_names.begin(),
+                    snap.channel_names.end(), name)
+                    != snap.channel_names.end();
+            };
+            for (const char* name : preferred) {
+                if (selected_channels->size() >= 6) break;
+                std::string s(name);
+                if (!has_channel(s)) continue;
+                auto ci_eq = [](const std::string& a, const std::string& b) {
+                    if (a.size() != b.size()) return false;
+                    for (size_t i = 0; i < a.size(); ++i)
+                        if (std::tolower(static_cast<unsigned char>(a[i]))
+                         != std::tolower(static_cast<unsigned char>(b[i])))
+                            return false;
+                    return true;
+                };
+                bool dup = false;
+                for (const auto& p : *selected_channels)
+                    if (ci_eq(p, s)) { dup = true; break; }
+                if (!dup) selected_channels->push_back(s);
+            }
+            if (selected_channels->empty()) {
+                for (int i = 0; i < static_cast<int>(snap.channel_names.size())
+                     && i < 6; ++i)
+                    selected_channels->push_back(snap.channel_names[i]);
+            }
+            (*rebuild_timeline)();
 
-            // Configure UI.
             row_spin->setMaximum(static_cast<int>(replay_records->size()));
             row_spin->setValue(1);
             replay_card->show();
             values_card->show();
+            timeline->show();
             (*refresh_replay)(1);
-        });
+            return true;
+        };
+
+        // Import button handler — parse CSV, populate replay state.
+        QObject::connect(import_btn, &QPushButton::clicked,
+            [container, apply_csv]() {
+                auto path = QFileDialog::getOpenFileName(container,
+                    QString::fromUtf8("Import Datalog CSV"),
+                    QDir::homePath(),
+                    QString::fromUtf8("CSV Files (*.csv);;All Files (*)"));
+                if (path.isEmpty()) return;
+                std::ifstream in(path.toStdString(),
+                    std::ios::in | std::ios::binary);
+                if (!in) return;
+                auto fname = std::filesystem::path(
+                    path.toStdString()).filename().string();
+                (*apply_csv)(in, fname);
+            });
+
+        // Airbear datalog browser — targets the `/api/log/status` +
+        // `/api/log/download` endpoints that Airbear v0.2.0 exposes
+        // today (single on-device log.csv; multi-file SD browser is
+        // a future roadmap item). Source: `Airbear-main/src/rest_api.cpp`
+        // handleLogStatus / handleLogDownload.
+        namespace aa = tuner_core::airbear_api;
+
+        auto* ab_card = new QWidget;
+        auto* ab_layout = new QVBoxLayout(ab_card);
+        ab_layout->setContentsMargins(tt::space_md, tt::space_sm,
+                                      tt::space_md, tt::space_sm);
+        ab_layout->setSpacing(tt::space_sm);
+        ab_card->setStyleSheet(QString::fromUtf8(tt::card_style().c_str()));
+
+        auto* ab_header = new QLabel;
+        ab_header->setTextFormat(Qt::RichText);
+        {
+            char hh[256];
+            std::snprintf(hh, sizeof(hh),
+                "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
+                "Airbear Datalog</span><br>"
+                "<span style='color: %s; font-size: %dpx;'>"
+                "Check the bridge's current log and pull it into the "
+                "timeline. Airbear v0.2.0 stores one log at a time; "
+                "multi-file SD browsing is on a future Airbear release.</span>",
+                tt::text_secondary, tt::font_body,
+                tt::text_dim, tt::font_small);
+            ab_header->setText(QString::fromUtf8(hh));
+        }
+        ab_header->setStyleSheet("border: none;");
+        ab_layout->addWidget(ab_header);
+
+        auto* ab_host_row = new QHBoxLayout;
+        ab_host_row->setSpacing(tt::space_sm);
+        auto* ab_host_label = new QLabel(QString::fromUtf8("Host:"));
+        {
+            char s[96];
+            std::snprintf(s, sizeof(s),
+                "color: %s; border: none;", tt::text_muted);
+            ab_host_label->setStyleSheet(QString::fromUtf8(s));
+        }
+        ab_host_row->addWidget(ab_host_label);
+        auto* ab_host_edit = new QLineEdit(
+            QString::fromUtf8("speeduino.local"));
+        {
+            char ls[256];
+            std::snprintf(ls, sizeof(ls),
+                "QLineEdit { background: %s; color: %s; "
+                "border: 1px solid %s; border-radius: %dpx; "
+                "padding: 4px 8px; font-size: %dpx; }",
+                tt::bg_elevated, tt::text_primary, tt::border,
+                tt::radius_sm, tt::font_small);
+            ab_host_edit->setStyleSheet(QString::fromUtf8(ls));
+        }
+        ab_host_row->addWidget(ab_host_edit, 1);
+        auto* ab_status_btn = new QPushButton(QString::fromUtf8("Check Status"));
+        ab_status_btn->setCursor(Qt::PointingHandCursor);
+        auto* ab_download_btn = new QPushButton(
+            QString::fromUtf8("Download + Open in Timeline"));
+        ab_download_btn->setEnabled(false);
+        ab_download_btn->setCursor(Qt::PointingHandCursor);
+        {
+            char bs[256];
+            std::snprintf(bs, sizeof(bs),
+                "QPushButton { background: %s; color: %s; border: 1px solid %s; "
+                "border-radius: %dpx; padding: %dpx %dpx; font-size: %dpx; }"
+                "QPushButton:hover { background: %s; }"
+                "QPushButton:disabled { color: %s; }",
+                tt::bg_elevated, tt::text_primary, tt::border,
+                tt::radius_sm, tt::space_xs, tt::space_md, tt::font_small,
+                tt::fill_primary_mid, tt::text_dim);
+            ab_status_btn->setStyleSheet(QString::fromUtf8(bs));
+            ab_download_btn->setStyleSheet(QString::fromUtf8(bs));
+        }
+        ab_host_row->addWidget(ab_status_btn);
+        ab_host_row->addWidget(ab_download_btn);
+        ab_layout->addLayout(ab_host_row);
+
+        auto* ab_status_lbl = new QLabel;
+        ab_status_lbl->setTextFormat(Qt::RichText);
+        ab_status_lbl->setWordWrap(true);
+        {
+            char s[96];
+            std::snprintf(s, sizeof(s),
+                "color: %s; font-size: %dpx; border: none;",
+                tt::text_muted, tt::font_small);
+            ab_status_lbl->setStyleSheet(QString::fromUtf8(s));
+        }
+        ab_status_lbl->setText(QString::fromUtf8(
+            "Press Check Status to see if a log is available."));
+        ab_layout->addWidget(ab_status_lbl);
+
+        layout->addWidget(ab_card);
+
+        auto format_bytes = [](long long bytes) -> std::string {
+            char buf[32];
+            if (bytes < 1024) std::snprintf(buf, sizeof(buf), "%lld B", bytes);
+            else if (bytes < 1024LL * 1024)
+                std::snprintf(buf, sizeof(buf), "%.1f KB", bytes / 1024.0);
+            else
+                std::snprintf(buf, sizeof(buf), "%.2f MB",
+                    bytes / (1024.0 * 1024.0));
+            return std::string(buf);
+        };
+
+        QObject::connect(ab_status_btn, &QPushButton::clicked,
+            [ab_host_edit, ab_status_lbl, ab_download_btn, format_bytes]() {
+                auto host = ab_host_edit->text().trimmed().toStdString();
+                if (host.empty()) {
+                    ab_status_lbl->setText(QString::fromUtf8(
+                        "Enter the Airbear host (mDNS or IP) first."));
+                    return;
+                }
+                ab_status_lbl->setText(QString::fromUtf8(
+                    "Contacting device\xe2\x80\xa6"));
+                QApplication::processEvents();
+
+                auto status = aa::fetch_log_status(
+                    host, 80, std::chrono::milliseconds(2000));
+                if (!status) {
+                    ab_status_lbl->setText(QString::fromUtf8(
+                        "Could not reach device or /api/log/status "
+                        "not available."));
+                    ab_download_btn->setEnabled(false);
+                    return;
+                }
+                char html[512];
+                std::snprintf(html, sizeof(html),
+                    "<span style='color: %s;'>%s</span> \xc2\xb7 "
+                    "%lld row%s \xc2\xb7 %s on device",
+                    status->active ? tt::accent_ok : tt::text_muted,
+                    status->active ? "Recording" : "Idle",
+                    status->rows.value_or(0),
+                    status->rows.value_or(0) == 1 ? "" : "s",
+                    format_bytes(status->file_bytes.value_or(0)).c_str());
+                ab_status_lbl->setText(QString::fromUtf8(html));
+                ab_download_btn->setEnabled(
+                    status->file_bytes.value_or(0) > 0);
+            });
+
+        QObject::connect(ab_download_btn, &QPushButton::clicked,
+            [ab_host_edit, ab_status_lbl, apply_csv]() {
+                auto host = ab_host_edit->text().trimmed().toStdString();
+                if (host.empty()) return;
+                ab_status_lbl->setText(QString::fromUtf8(
+                    "Downloading log.csv\xe2\x80\xa6"));
+                QApplication::processEvents();
+
+                auto bytes = aa::fetch_log_csv(
+                    host, 80, std::chrono::milliseconds(30000));
+                if (!bytes) {
+                    ab_status_lbl->setText(QString::fromUtf8(
+                        "Download failed."));
+                    return;
+                }
+                std::istringstream iss(*bytes);
+                if (!(*apply_csv)(iss, "airbear-log.csv")) {
+                    ab_status_lbl->setText(QString::fromUtf8(
+                        "Downloaded, but no numeric rows found."));
+                    return;
+                }
+                ab_status_lbl->setText(QString::fromUtf8(
+                    "Loaded airbear-log.csv into the timeline."));
+            });
     }
 
     layout->addStretch(1);
@@ -13551,7 +15122,7 @@ public:
         // tune_signature is populated by build_tune_tab above.
         auto save_as_native_handler = [this, shared_edit_svc, save_path, tune_signature,
                                        shared_workspace, refresh_tune_badge,
-                                       tune_slot_index, tune_slot_name]() {
+                                       tune_slot_index, tune_slot_name, ecu_conn]() {
             namespace ntw = tuner_core::native_tune_writer;
             // Build the tune from the live edit service.
             auto tune = ntw::from_edit_service(
@@ -13561,6 +15132,15 @@ public:
             // saving doesn't silently strip a multi-tune slot label.
             tune.slot_index = *tune_slot_index;
             tune.slot_name  = *tune_slot_name;
+            // Capture the firmware definition hash from the currently
+            // connected ECU (P16-1 / firmware 14B). When the firmware
+            // reports a hash, we bake it into the saved tune so a
+            // future burn against a different firmware build gets
+            // caught before the RAM write fires.
+            if (ecu_conn && ecu_conn->connected
+                && !ecu_conn->capabilities.definition_hash.empty()) {
+                tune.definition_hash = ecu_conn->capabilities.definition_hash;
+            }
             auto json = ntw::export_json(tune);
 
             // Determine file path — reuse last path or ask.
@@ -14585,6 +16165,125 @@ public:
                 }
             });
             this->addAction(open_action);
+
+            // File → Open Tune from ECU SD... (Phase 15 item 9 step 7).
+            // DISABLED — verified against `Airbear-main/src/rest_api.cpp`
+            // v0.2.0: no `/api/sd/tunes` endpoint exists. Also needs
+            // Firmware Slice 14D for the ECU to expose tune.bin on SD
+            // in the first place. The code below uses a proposed
+            // endpoint shape that'll get conformed when the Airbear +
+            // firmware PRs land. Enable the action then.
+            auto* open_sd_tune_action = file_menu->addAction(
+                QString::fromUtf8("Open &Tune from ECU SD\xe2\x80\xa6"));
+            open_sd_tune_action->setEnabled(false);
+            open_sd_tune_action->setToolTip(QString::fromUtf8(
+                "Pending Airbear v0.4 `/api/sd/tunes` + firmware Slice 14D."));
+            QObject::connect(open_sd_tune_action, &QAction::triggered,
+                [this, shared_workspace, reload_active_project]() {
+                namespace aa = tuner_core::airbear_api;
+
+                if (shared_workspace->staged_count() > 0) {
+                    auto answer = QMessageBox::question(this,
+                        QString::fromUtf8("Discard staged changes?"),
+                        QString::fromUtf8(
+                            "Loading a tune from the ECU SD card "
+                            "will discard the current staged edits.\n\n"
+                            "Continue?"),
+                        QMessageBox::Yes | QMessageBox::Cancel,
+                        QMessageBox::Cancel);
+                    if (answer != QMessageBox::Yes) return;
+                }
+
+                bool ok = false;
+                QString host = QInputDialog::getText(this,
+                    QString::fromUtf8("Airbear Host"),
+                    QString::fromUtf8("Host (mDNS / IP):"),
+                    QLineEdit::Normal, "speeduino.local", &ok);
+                if (!ok || host.trimmed().isEmpty()) return;
+                std::string host_s = host.trimmed().toStdString();
+
+                auto listing = aa::fetch_sd_tune_list(
+                    host_s, 80, std::chrono::milliseconds(3000));
+                if (!listing) {
+                    QMessageBox::warning(this,
+                        QString::fromUtf8("SD Tunes"),
+                        QString::fromUtf8(
+                            "Could not reach device or endpoint "
+                            "not available (firmware G5 pending)."));
+                    return;
+                }
+                if (listing->empty()) {
+                    QMessageBox::information(this,
+                        QString::fromUtf8("SD Tunes"),
+                        QString::fromUtf8(
+                            "No .tuner files found on SD card."));
+                    return;
+                }
+
+                QStringList items;
+                for (const auto& e : *listing) {
+                    char row[160];
+                    std::snprintf(row, sizeof(row), "%s  (%lld bytes)",
+                        e.name.c_str(), e.size);
+                    items.append(QString::fromUtf8(row));
+                }
+                QString pick = QInputDialog::getItem(this,
+                    QString::fromUtf8("Pick a Tune"),
+                    QString::fromUtf8(
+                        "Tune files on ECU SD card:"),
+                    items, 0, false, &ok);
+                if (!ok || pick.isEmpty()) return;
+                int pick_idx = items.indexOf(pick);
+                if (pick_idx < 0
+                 || pick_idx >= static_cast<int>(listing->size())) return;
+                const auto& entry = (*listing)[pick_idx];
+
+                auto bytes = aa::fetch_sd_tune_bytes(host_s, 80,
+                    entry.name, std::chrono::milliseconds(15000));
+                if (!bytes) {
+                    QMessageBox::warning(this,
+                        QString::fromUtf8("Download Failed"),
+                        QString::fromUtf8(
+                            "Could not fetch the selected tune."));
+                    return;
+                }
+
+                // Cache in user-data/tunes so later "Open Recent" keeps
+                // working even after the ECU goes offline. File name
+                // mirrors the SD side so round-tripping is obvious.
+                auto cache_dir = QStandardPaths::writableLocation(
+                    QStandardPaths::AppLocalDataLocation);
+                QDir().mkpath(cache_dir + "/sd_tunes");
+                std::filesystem::path cache_path =
+                    std::filesystem::path(cache_dir.toStdString())
+                    / "sd_tunes" / entry.name;
+                std::ofstream out(cache_path, std::ios::binary);
+                if (!out) {
+                    QMessageBox::warning(this,
+                        QString::fromUtf8("Save Failed"),
+                        QString::fromUtf8(
+                            "Could not cache downloaded tune to:\n")
+                            + QString::fromUtf8(
+                                cache_path.string().c_str()));
+                    return;
+                }
+                out.write(bytes->data(),
+                    static_cast<std::streamsize>(bytes->size()));
+                out.close();
+
+                try {
+                    auto rp = project_from_file(cache_path);
+                    push_recent_project(rp);
+                    save_current_project(rp);
+                    reload_active_project();
+                } catch (const std::exception& e) {
+                    QMessageBox::warning(this,
+                        QString::fromUtf8("Open Failed"),
+                        QString::fromUtf8(e.what()));
+                }
+            });
+            this->addAction(open_sd_tune_action);
+
             // Open Recent submenu — shows up to 5 recent projects
             // in MRU order. Each entry is a no-op for now (the app
             // loads the most recent project on startup automatically).
@@ -15089,6 +16788,258 @@ public:
                 }
             });
 
+            // ECU Capabilities viewer (P15-9 step 6). Read-only summary
+            // of the live capability header the app got back from the
+            // `'f'` query at connect time + currently-running slot
+            // from the runtime packet. Slot fingerprints populate
+            // once firmware 14B ships; until then each slot row
+            // shows a plain-language "pending firmware 14B" note.
+            auto* caps_action = file_menu->addAction(
+                QString::fromUtf8("Show ECU &Capabilities\xe2\x80\xa6"));
+            QObject::connect(caps_action, &QAction::triggered,
+                [this, ecu_conn]() {
+                namespace rtl = tuner_core::runtime_telemetry;
+                if (!ecu_conn || !ecu_conn->connected) {
+                    QMessageBox::information(this,
+                        QString::fromUtf8("ECU Capabilities"),
+                        QString::fromUtf8(
+                            "Connect to an ECU first."));
+                    return;
+                }
+                const auto& cap = ecu_conn->capabilities;
+                rtl::ValueMap vm(ecu_conn->runtime.begin(),
+                                 ecu_conn->runtime.end());
+                auto telem = rtl::decode(vm);
+                std::optional<int> active = telem.runtime_status.active_tune_slot;
+
+                std::string html;
+                auto add_row = [&](const char* label, const std::string& val,
+                                   const char* value_color) {
+                    char row[512];
+                    std::snprintf(row, sizeof(row),
+                        "<tr>"
+                        "<td style='color: %s; padding: 3px 14px 3px 0;'>%s</td>"
+                        "<td style='color: %s; padding: 3px 0;'>%s</td>"
+                        "</tr>",
+                        tt::text_muted, label,
+                        value_color, val.c_str());
+                    html += row;
+                };
+
+                html += "<table style='font-family: monospace;'>";
+                add_row("Signature", ecu_conn->info.signature.empty()
+                    ? "(unknown)" : ecu_conn->info.signature,
+                    tt::text_primary);
+                if (cap.parsed) {
+                    add_row("Protocol version",
+                        std::to_string(cap.serial_protocol_version),
+                        tt::text_primary);
+                    add_row("Blocking factor",
+                        std::to_string(cap.blocking_factor),
+                        tt::text_primary);
+                    add_row("Table blocking factor",
+                        std::to_string(cap.table_blocking_factor),
+                        tt::text_primary);
+                } else {
+                    add_row("Capability header", "(not reported)",
+                        tt::text_dim);
+                }
+                add_row("Active tune slot",
+                    active.has_value()
+                        ? ("Slot " + std::to_string(*active))
+                        : std::string("(pending firmware 14G)"),
+                    active.has_value() ? tt::accent_primary : tt::text_dim);
+                add_row("Definition hash",
+                    cap.definition_hash.empty()
+                        ? std::string("(pending firmware 14B)")
+                        : cap.definition_hash,
+                    cap.definition_hash.empty()
+                        ? tt::text_dim : tt::text_primary);
+                // Render the page-format bitmap as a comma-separated
+                // list of U16 page indices, or "all U08" when the mask
+                // is zero but present. Absent = pending firmware 14B.
+                std::string page_fmt_val;
+                const char* page_fmt_color = tt::text_dim;
+                if (!cap.page_format_bitmap.has_value()) {
+                    page_fmt_val = "(pending firmware 14B)";
+                } else if (*cap.page_format_bitmap == 0) {
+                    page_fmt_val = "all U08";
+                    page_fmt_color = tt::text_muted;
+                } else {
+                    auto mask = *cap.page_format_bitmap;
+                    std::string u16s;
+                    for (int i = 0; i < 64; ++i) {
+                        if (mask & (std::uint64_t(1) << i)) {
+                            if (!u16s.empty()) u16s += ",";
+                            u16s += std::to_string(i);
+                        }
+                    }
+                    page_fmt_val = "U16 pages: " + u16s;
+                    page_fmt_color = tt::text_primary;
+                }
+                add_row("Page formats", page_fmt_val, page_fmt_color);
+
+                html += "</table>";
+
+                html += "<br><b style='color: ";
+                html += tt::text_primary;
+                html += ";'>Slot fingerprints</b><br>";
+                html += "<table style='font-family: monospace; margin-top: 6px;'>";
+                for (int i = 0; i < 4; ++i) {
+                    const auto& fp = cap.slot_fingerprints[i];
+                    char slot_lbl[16];
+                    std::snprintf(slot_lbl, sizeof(slot_lbl), "Slot %d", i);
+                    const char* color;
+                    std::string val;
+                    if (fp.empty()) {
+                        val = "(pending firmware 14B)";
+                        color = tt::text_dim;
+                    } else if (fp == "0000000000000000") {
+                        val = "(slot empty)";
+                        color = tt::text_muted;
+                    } else {
+                        val = fp;
+                        color = (active.has_value() && *active == i)
+                            ? tt::accent_primary : tt::text_primary;
+                    }
+                    add_row(slot_lbl, val, color);
+                }
+                html += "</table>";
+
+                QMessageBox box(this);
+                box.setWindowTitle(
+                    QString::fromUtf8("ECU Capabilities"));
+                box.setTextFormat(Qt::RichText);
+                box.setText(QString::fromUtf8(html.c_str()));
+                box.setStandardButtons(QMessageBox::Close);
+                box.exec();
+            });
+            this->addAction(caps_action);
+
+            // Airbear Health dialog (Phase 16 item 4). Fetches
+            // /api/status from the configured bridge and surfaces the
+            // health counters. Counters that haven't shipped yet render
+            // as `—` so the dialog is useful today as a basic status
+            // read and grows rows organically as the Airbear firmware
+            // adds them.
+            auto* airbear_health_action = file_menu->addAction(
+                QString::fromUtf8("Airbear &Health\xe2\x80\xa6"));
+            QObject::connect(airbear_health_action, &QAction::triggered,
+                [this]() {
+                namespace aa = tuner_core::airbear_api;
+                bool ok = false;
+                QString host = QInputDialog::getText(this,
+                    QString::fromUtf8("Airbear Host"),
+                    QString::fromUtf8("Host (mDNS / IP):"),
+                    QLineEdit::Normal, "speeduino.local", &ok);
+                if (!ok || host.trimmed().isEmpty()) return;
+                auto status = aa::fetch_status(
+                    host.trimmed().toStdString(), 80,
+                    std::chrono::milliseconds(1500));
+                if (!status) {
+                    QMessageBox::warning(this,
+                        QString::fromUtf8("Airbear Health"),
+                        QString::fromUtf8(
+                            "Could not reach bridge or /api/status "
+                            "not available."));
+                    return;
+                }
+                const auto& s = *status;
+
+                auto row = [&](std::string& html, const char* label,
+                               const std::string& val,
+                               const char* color) {
+                    char buf[512];
+                    std::snprintf(buf, sizeof(buf),
+                        "<tr>"
+                        "<td style='color: %s; padding: 3px 14px 3px 0;'>%s</td>"
+                        "<td style='color: %s; padding: 3px 0;'>%s</td>"
+                        "</tr>",
+                        tt::text_muted, label, color, val.c_str());
+                    html += buf;
+                };
+                auto opt_int = [](const std::optional<long long>& v) {
+                    return v.has_value() ? std::to_string(*v)
+                                         : std::string("\xe2\x80\x94");
+                };
+                auto opt_str = [](const std::optional<std::string>& v) {
+                    return v.has_value() && !v->empty()
+                        ? *v : std::string("\xe2\x80\x94");
+                };
+
+                std::string html = "<table style='font-family: monospace;'>";
+                row(html, "Product",     opt_str(s.product),     tt::text_primary);
+                row(html, "FW version",  opt_str(s.fw_version),  tt::text_primary);
+                row(html, "FW variant",  opt_str(s.fw_variant),  tt::text_primary);
+                row(html, "IP",          opt_str(s.ip),          tt::text_primary);
+                row(html, "AP IP",       opt_str(s.ap_ip),       tt::text_primary);
+                row(html, "MAC",         opt_str(s.mac),         tt::text_primary);
+                row(html, "Wi-Fi SSID",  opt_str(s.wifi_ssid),   tt::text_primary);
+                row(html, "Wi-Fi RSSI",
+                    s.wifi_rssi.has_value()
+                        ? (std::to_string(*s.wifi_rssi) + " dBm")
+                        : std::string("\xe2\x80\x94"),
+                    tt::text_primary);
+                row(html, "Uptime",
+                    s.uptime_ms.has_value()
+                        ? (std::to_string(*s.uptime_ms / 1000) + " s")
+                        : std::string("\xe2\x80\x94"),
+                    tt::text_primary);
+                row(html, "Free heap",
+                    s.free_heap.has_value()
+                        ? (std::to_string(*s.free_heap) + " B")
+                        : std::string("\xe2\x80\x94"),
+                    tt::text_primary);
+                row(html, "Min free heap",
+                    s.min_free_heap.has_value()
+                        ? (std::to_string(*s.min_free_heap) + " B")
+                        : std::string("\xe2\x80\x94"),
+                    tt::text_primary);
+                html += "</table>";
+
+                html += "<br><b style='color: ";
+                html += tt::text_primary;
+                html += ";'>Error counters</b><br>";
+                html += "<table style='font-family: monospace; margin-top: 6px;'>";
+                auto counter_color = [](const std::optional<long long>& v) {
+                    if (!v.has_value()) return tt::text_dim;
+                    if (*v == 0)       return tt::accent_ok;
+                    if (*v < 10)       return tt::accent_warning;
+                    return tt::accent_danger;
+                };
+                // tcp_requests is a volume counter (supposed to grow),
+                // so it renders neutral. ecu_timeouts / ecu_busy are
+                // error counters — 0 good, growth bad.
+                row(html, "TS/ECU requests", opt_int(s.tcp_requests),
+                    s.tcp_requests.has_value() ? tt::text_primary : tt::text_dim);
+                row(html, "ECU timeouts",    opt_int(s.ecu_timeouts),
+                    counter_color(s.ecu_timeouts));
+                row(html, "ECU busy",        opt_int(s.ecu_busy),
+                    counter_color(s.ecu_busy));
+                html += "</table>";
+
+                if (!s.tcp_requests.has_value()
+                 && !s.ecu_timeouts.has_value()
+                 && !s.ecu_busy.has_value()) {
+                    html += "<br><span style='color: ";
+                    html += tt::text_dim;
+                    html += "; font-size: 11px;'>"
+                        "Airbear firmware has not rolled out error "
+                        "counters yet \xe2\x80\x94 all four rows will "
+                        "populate once a future build starts emitting "
+                        "them.</span>";
+                }
+
+                QMessageBox box(this);
+                box.setWindowTitle(
+                    QString::fromUtf8("Airbear Health"));
+                box.setTextFormat(Qt::RichText);
+                box.setText(QString::fromUtf8(html.c_str()));
+                box.setStandardButtons(QMessageBox::Close);
+                box.exec();
+            });
+            this->addAction(airbear_health_action);
+
             file_menu->addSeparator();
             auto* exit_action = file_menu->addAction("E&xit");
             exit_action->setShortcut(QKeySequence::Quit);
@@ -15169,6 +17120,97 @@ public:
                 ->setEnabled(false);
             tune_menu->addAction("&Burn to Flash (Ctrl+B on Tune tab)")
                 ->setEnabled(false);
+
+            // Copy current tune to a different slot. Pure desktop
+            // operation — clones the in-memory NativeTune, overrides
+            // slot_index + slot_name, writes the clone to a new
+            // `.tuner` file. The burn-to-slot-N firmware path is
+            // blocked on Firmware Slice 14G, but the on-disk clone is
+            // already useful: operators can prepare pump/race/valet
+            // tune files ahead of time and burn them when 14G ships.
+            tune_menu->addSeparator();
+            auto* copy_slot_action = tune_menu->addAction(
+                "&Copy Current Tune to Slot...");
+            QObject::connect(copy_slot_action, &QAction::triggered,
+                [this, shared_edit_svc, tune_signature,
+                 tune_slot_index, tune_slot_name]() {
+                namespace ntw = tuner_core::native_tune_writer;
+
+                int default_target = tune_slot_index->has_value()
+                    ? ((**tune_slot_index + 1) % 4) : 1;
+                int source_slot = tune_slot_index->value_or(0);
+
+                char prompt[160];
+                std::snprintf(prompt, sizeof(prompt),
+                    "Target slot (0\xe2\x80\x93""3). "
+                    "Cloning from slot %d.", source_slot);
+
+                bool ok = false;
+                int target_slot = QInputDialog::getInt(
+                    this, QString::fromUtf8("Copy Tune to Slot"),
+                    QString::fromUtf8(prompt),
+                    default_target, 0, 3, 1, &ok);
+                if (!ok) return;
+                if (target_slot == source_slot) {
+                    QMessageBox::information(this,
+                        QString::fromUtf8("Copy Tune to Slot"),
+                        QString::fromUtf8(
+                            "Target slot matches the source slot. "
+                            "Nothing to copy."));
+                    return;
+                }
+
+                QString name = QInputDialog::getText(this,
+                    QString::fromUtf8("Slot Name"),
+                    QString::fromUtf8(
+                        "Optional label (e.g. Pump / Race / Valet):"),
+                    QLineEdit::Normal, QString(), &ok);
+                if (!ok) return;
+
+                char default_name[64];
+                std::snprintf(default_name, sizeof(default_name),
+                    "slot%d.tuner", target_slot);
+                QString path = QFileDialog::getSaveFileName(
+                    this, QString::fromUtf8("Save Cloned Tune"),
+                    QString::fromUtf8(default_name),
+                    QString::fromUtf8(
+                        "Native Tune (*.tuner);;All Files (*)"));
+                if (path.isEmpty()) return;
+
+                auto tune = ntw::from_edit_service(
+                    *shared_edit_svc,
+                    tune_signature->empty()
+                        ? "speeduino 202501-T41"
+                        : *tune_signature);
+                tune.slot_index = target_slot;
+                if (!name.trimmed().isEmpty()) {
+                    tune.slot_name = name.trimmed().toStdString();
+                } else {
+                    tune.slot_name = std::nullopt;
+                }
+
+                auto json = ntw::export_json(tune);
+                std::ofstream out(path.toStdString(), std::ios::binary);
+                if (!out) {
+                    QMessageBox::warning(this,
+                        QString::fromUtf8("Save Failed"),
+                        QString::fromUtf8("Could not write: ")
+                            + path);
+                    return;
+                }
+                out.write(json.data(),
+                    static_cast<std::streamsize>(json.size()));
+                out.close();
+
+                std::string label = name.trimmed().toStdString();
+                std::string msg = "Wrote tune for slot "
+                    + std::to_string(target_slot);
+                if (!label.empty()) msg += " (" + label + ")";
+                msg += " to:\n" + path.toStdString();
+                QMessageBox::information(this,
+                    QString::fromUtf8("Copy Tune to Slot"),
+                    QString::fromUtf8(msg.c_str()));
+            });
 
             // Help menu ------------------------------------------------
             auto* help_menu = menu_bar->addMenu("&Help");

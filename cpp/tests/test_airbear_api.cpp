@@ -69,6 +69,58 @@ TEST_CASE("parse_status_json parses the /api/status shape") {
     CHECK(s.ip.value_or("") == "192.168.1.50");
 }
 
+TEST_CASE("parse_status_json parses the post-health-counter shape") {
+    const char* body =
+        R"({"product":"AirBear","fw_version":"0.2.1",)"
+        R"("uptime_ms":300000,"free_heap":123456,"min_free_heap":98765,)"
+        R"("wifi_rssi":-62,"ip":"192.168.1.50","ap_ip":"192.168.4.1",)"
+        R"("tcp_requests":4211,"ecu_timeouts":3,"ecu_busy":0})";
+    auto s = parse_status_json(body);
+    CHECK(s.min_free_heap.value_or(-1) == 98765);
+    CHECK(s.ap_ip.value_or("") == "192.168.4.1");
+    CHECK(s.tcp_requests.value_or(-1) == 4211);
+    CHECK(s.ecu_timeouts.value_or(-1) == 3);
+    CHECK(s.ecu_busy.value_or(-1) == 0);
+}
+
+TEST_CASE("parse_status_json absent counters stay nullopt") {
+    // Pre-counter Airbear build — counters missing from the JSON.
+    const char* body = R"({"product":"AirBear","fw_version":"0.2.0"})";
+    auto s = parse_status_json(body);
+    CHECK_FALSE(s.tcp_requests.has_value());
+    CHECK_FALSE(s.ecu_timeouts.has_value());
+    CHECK_FALSE(s.ecu_busy.has_value());
+    CHECK_FALSE(s.min_free_heap.has_value());
+    CHECK_FALSE(s.ap_ip.has_value());
+}
+
+TEST_CASE("parse_log_status_json parses an active-capture status") {
+    const char* body =
+        R"({"active":true,"rows":1200,"file_bytes":48000,)"
+        R"("max_bytes":1048576,"elapsed_ms":12000,)"
+        R"("trig_enabled":true,"trig_field":"rpm"})";
+    auto s = parse_log_status_json(body);
+    CHECK(s.active);
+    CHECK(s.rows.value_or(-1) == 1200);
+    CHECK(s.file_bytes.value_or(-1) == 48000);
+    CHECK(s.max_bytes.value_or(-1) == 1048576);
+    CHECK(s.elapsed_ms.value_or(-1) == 12000);
+    CHECK(s.trigger_enabled);
+    CHECK(s.trigger_field.value_or("") == "rpm");
+}
+
+TEST_CASE("parse_log_status_json idle with no log") {
+    const char* body =
+        R"({"active":false,"rows":0,"file_bytes":0,)"
+        R"("max_bytes":1048576,"elapsed_ms":0,"trig_enabled":false})";
+    auto s = parse_log_status_json(body);
+    CHECK_FALSE(s.active);
+    CHECK(s.rows.value_or(-1) == 0);
+    CHECK(s.file_bytes.value_or(-1) == 0);
+    CHECK_FALSE(s.trigger_enabled);
+    CHECK_FALSE(s.trigger_field.has_value());
+}
+
 TEST_CASE("signatures_match: ECU signature contains fw_variant -> Match") {
     auto r = signatures_match("speeduino 202501-T41", "202501-T41");
     CHECK(r.state == SignatureMatch::Match);

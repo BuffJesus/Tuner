@@ -358,6 +358,9 @@ std::string dump_tune(const NativeTune& tune, int indent) {
         doc["slot_index"] = *tune.slot_index;
     }
     put_optional_string(doc, "slot_name", tune.slot_name);
+    // Firmware definition hash (P16-1) — only emitted when captured
+    // at save time from a hash-aware ECU.
+    put_optional_string(doc, "definition_hash", tune.definition_hash);
 
     json values = json::object();
     for (const auto& [key, value] : tune.values) {
@@ -434,6 +437,7 @@ NativeTune load_tune(std::string_view text) {
         tune.slot_index = data["slot_index"].get<int>();
     }
     tune.slot_name = get_optional_string(data, "slot_name");
+    tune.definition_hash = get_optional_string(data, "definition_hash");
 
     if (data.contains("values") && data["values"].is_object()) {
         for (auto it = data["values"].begin(); it != data["values"].end(); ++it) {

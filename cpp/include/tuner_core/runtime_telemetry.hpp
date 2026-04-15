@@ -43,6 +43,11 @@ struct RuntimeStatus {
     bool transient_active = false;
     bool warmup_or_ase_active = false;
     bool tune_learn_valid = false;
+    // P15-9 step 2 — the slot the ECU is currently running. Populated
+    // from the `activeTuneSlot` channel when firmware 14G ships it
+    // (0-3 valid; 0xFF or out of range → nullopt). Pre-14G firmware
+    // doesn't emit the byte so this stays nullopt on current builds.
+    std::optional<int> active_tune_slot;
 };
 
 struct TelemetrySummary {

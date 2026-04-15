@@ -78,13 +78,21 @@ StatusResponse parse_status_json(std::string_view body) {
     read_str("product",     out.product);
     read_str("fw_version",  out.fw_version);
     read_str("fw_variant",  out.fw_variant);
-    read_int("uptime_ms",   out.uptime_ms);
-    read_int("free_heap",   out.free_heap);
-    read_str("wifi_ssid",   out.wifi_ssid);
+    read_int("uptime_ms",     out.uptime_ms);
+    read_int("free_heap",     out.free_heap);
+    read_int("min_free_heap", out.min_free_heap);
+    read_str("wifi_ssid",     out.wifi_ssid);
     if (doc.contains("wifi_rssi") && doc["wifi_rssi"].is_number_integer())
         out.wifi_rssi = doc["wifi_rssi"].get<int>();
-    read_str("ip",          out.ip);
-    read_str("mac",         out.mac);
+    read_str("ip",            out.ip);
+    read_str("ap_ip",         out.ap_ip);
+    read_str("mac",           out.mac);
+    // Phase 16 item 4 — Airbear health counters. Missing keys leave
+    // each optional as nullopt so older Airbear builds before these
+    // landed still pass through cleanly.
+    read_int("tcp_requests",  out.tcp_requests);
+    read_int("ecu_timeouts",  out.ecu_timeouts);
+    read_int("ecu_busy",      out.ecu_busy);
     return out;
 }
 
@@ -197,6 +205,20 @@ std::optional<RealtimeResponse> fetch_realtime(std::string_view host,
     }
 }
 
+std::optional<StatusResponse> fetch_status(std::string_view host,
+                                           int port,
+                                           std::chrono::milliseconds timeout) {
+    auto raw = http_get(host, port, "/api/status", timeout);
+    if (!raw) return std::nullopt;
+    auto body = parse_http_body(*raw);
+    if (!body) return std::nullopt;
+    try {
+        return parse_status_json(*body);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
 #endif  // _WIN32
 
 std::string build_multipart_body(std::string_view boundary,
@@ -302,6 +324,221 @@ std::optional<std::string> post_firmware(std::string_view host,
     closesocket(sock);
     if (response.empty()) return std::nullopt;
     return response;
+}
+
+#endif  // _WIN32
+
+// --- Airbear v0.2 datalog endpoints (actually exists today) ---------
+
+#ifdef _WIN32
+namespace {
+
+// Shared helper used by all download-ish fetchers — bigger-buffer
+// variant of http_get that lets the caller cap at an explicit size
+// instead of the 64KB default of the original http_get.
+std::optional<std::string> http_get_bounded(std::string_view host,
+                                            int port,
+                                            std::string_view path,
+                                            std::chrono::milliseconds timeout,
+                                            std::size_t max_bytes) {
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET) return std::nullopt;
+
+    DWORD to_ms = static_cast<DWORD>(timeout.count());
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+               reinterpret_cast<const char*>(&to_ms), sizeof(to_ms));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
+               reinterpret_cast<const char*>(&to_ms), sizeof(to_ms));
+
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    std::string host_s(host);
+    std::string port_s = std::to_string(port);
+    addrinfo* res = nullptr;
+    if (getaddrinfo(host_s.c_str(), port_s.c_str(), &hints, &res) != 0 || !res) {
+        closesocket(sock);
+        return std::nullopt;
+    }
+    if (connect(sock, res->ai_addr, static_cast<int>(res->ai_addrlen)) != 0) {
+        freeaddrinfo(res);
+        closesocket(sock);
+        return std::nullopt;
+    }
+    freeaddrinfo(res);
+
+    std::string req;
+    req += "GET ";
+    req += std::string(path);
+    req += " HTTP/1.1\r\nHost: ";
+    req += host_s;
+    req += "\r\nConnection: close\r\nUser-Agent: tuner_app/0.1\r\n\r\n";
+    if (send(sock, req.data(), static_cast<int>(req.size()), 0) < 0) {
+        closesocket(sock);
+        return std::nullopt;
+    }
+
+    std::string response;
+    char buf[4096];
+    while (true) {
+        int n = recv(sock, buf, sizeof(buf), 0);
+        if (n <= 0) break;
+        response.append(buf, static_cast<std::size_t>(n));
+        if (response.size() > max_bytes) {
+            closesocket(sock);
+            return std::nullopt;
+        }
+    }
+    closesocket(sock);
+    if (response.empty()) return std::nullopt;
+    return response;
+}
+
+}  // namespace
+#endif  // _WIN32
+
+LogStatusResponse parse_log_status_json(std::string_view body) {
+    LogStatusResponse out;
+    auto doc = nlohmann::json::parse(body);
+    if (doc.contains("active") && doc["active"].is_boolean())
+        out.active = doc["active"].get<bool>();
+    if (doc.contains("rows") && doc["rows"].is_number_integer())
+        out.rows = doc["rows"].get<long long>();
+    if (doc.contains("file_bytes") && doc["file_bytes"].is_number_integer())
+        out.file_bytes = doc["file_bytes"].get<long long>();
+    if (doc.contains("max_bytes") && doc["max_bytes"].is_number_integer())
+        out.max_bytes = doc["max_bytes"].get<long long>();
+    if (doc.contains("elapsed_ms") && doc["elapsed_ms"].is_number_integer())
+        out.elapsed_ms = doc["elapsed_ms"].get<long long>();
+    if (doc.contains("trig_enabled") && doc["trig_enabled"].is_boolean())
+        out.trigger_enabled = doc["trig_enabled"].get<bool>();
+    if (doc.contains("trig_field") && doc["trig_field"].is_string())
+        out.trigger_field = doc["trig_field"].get<std::string>();
+    return out;
+}
+
+#ifdef _WIN32
+std::optional<LogStatusResponse> fetch_log_status(
+    std::string_view host, int port,
+    std::chrono::milliseconds timeout) {
+    auto raw = http_get(host, port, "/api/log/status", timeout);
+    if (!raw) return std::nullopt;
+    auto body = parse_http_body(*raw);
+    if (!body) return std::nullopt;
+    try {
+        return parse_log_status_json(*body);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<std::string> fetch_log_csv(
+    std::string_view host, int port,
+    std::chrono::milliseconds timeout,
+    std::size_t max_bytes) {
+    auto raw = http_get_bounded(host, port, "/api/log/download", timeout,
+                                max_bytes + 4096);
+    if (!raw) return std::nullopt;
+    return parse_http_body(*raw);
+}
+#endif
+
+// --- SD card log list + download (Phase 15 item 4) ------------------
+
+std::vector<SdLogEntry> parse_sd_log_list_json(std::string_view body) {
+    std::vector<SdLogEntry> out;
+    auto doc = nlohmann::json::parse(body);
+    if (!doc.is_array()) return out;
+    for (const auto& e : doc) {
+        SdLogEntry entry;
+        if (e.contains("name") && e["name"].is_string())
+            entry.name = e["name"].get<std::string>();
+        if (e.contains("size") && e["size"].is_number_integer())
+            entry.size = e["size"].get<long long>();
+        if (e.contains("mtime_unix") && e["mtime_unix"].is_number_integer())
+            entry.mtime_unix = e["mtime_unix"].get<long long>();
+        if (!entry.name.empty())
+            out.push_back(std::move(entry));
+    }
+    return out;
+}
+
+std::string build_sd_log_path(std::string_view prefix,
+                              std::string_view filename) {
+    std::string out(prefix);
+    if (!out.empty() && out.back() != '/') out += '/';
+    for (char c : filename) {
+        unsigned char uc = static_cast<unsigned char>(c);
+        bool safe = std::isalnum(uc) || c == '.' || c == '-' || c == '_';
+        if (safe) {
+            out += c;
+        } else {
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "%%%02X", uc);
+            out += buf;
+        }
+    }
+    return out;
+}
+
+#ifdef _WIN32
+
+std::optional<std::vector<SdLogEntry>> fetch_sd_log_list(
+    std::string_view host, int port,
+    std::chrono::milliseconds timeout) {
+    auto raw = http_get_bounded(host, port, "/api/sd/logs", timeout,
+                                256 * 1024);
+    if (!raw) return std::nullopt;
+    auto body = parse_http_body(*raw);
+    if (!body) return std::nullopt;
+    try {
+        return parse_sd_log_list_json(*body);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<std::string> fetch_sd_log_bytes(
+    std::string_view host, int port,
+    std::string_view filename,
+    std::chrono::milliseconds timeout,
+    std::size_t max_bytes) {
+    // max_bytes covers the raw response including headers; give the
+    // caller some headroom for a couple of KB of HTTP header framing.
+    std::string path = build_sd_log_path("/api/sd/logs", filename);
+    auto raw = http_get_bounded(host, port, path, timeout,
+                                max_bytes + 4096);
+    if (!raw) return std::nullopt;
+    return parse_http_body(*raw);
+}
+
+std::optional<std::vector<SdLogEntry>> fetch_sd_tune_list(
+    std::string_view host, int port,
+    std::chrono::milliseconds timeout) {
+    auto raw = http_get_bounded(host, port, "/api/sd/tunes", timeout,
+                                256 * 1024);
+    if (!raw) return std::nullopt;
+    auto body = parse_http_body(*raw);
+    if (!body) return std::nullopt;
+    try {
+        return parse_sd_log_list_json(*body);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<std::string> fetch_sd_tune_bytes(
+    std::string_view host, int port,
+    std::string_view filename,
+    std::chrono::milliseconds timeout,
+    std::size_t max_bytes) {
+    std::string path = build_sd_log_path("/api/sd/tunes", filename);
+    auto raw = http_get_bounded(host, port, path, timeout,
+                                max_bytes + 4096);
+    if (!raw) return std::nullopt;
+    return parse_http_body(*raw);
 }
 
 #endif  // _WIN32

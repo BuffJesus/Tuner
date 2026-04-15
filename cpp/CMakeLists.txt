@@ -152,6 +152,7 @@ add_library(tuner_core STATIC
     src/ts_dash_file.cpp
     src/wue_analyze_accumulator.cpp
     src/virtual_dyno.cpp
+    src/chart_axes.cpp
     src/boost_table_generator.cpp
     src/compressor_map_modeling.cpp
     src/ve_analyze_accumulator.cpp
@@ -349,6 +350,7 @@ if(TUNER_CORE_BUILD_TESTS)
         tests/test_udp_discovery.cpp
         tests/test_airbear_api.cpp
         tests/test_compressor_map_modeling.cpp
+        tests/test_chart_axes.cpp
     )
     target_include_directories(tuner_core_tests
         PRIVATE

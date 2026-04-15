@@ -54,6 +54,8 @@ std::string export_json(const TunerTune& tune) {
     j["modified"] = tune.modified_iso;
     if (tune.slot_index.has_value()) j["slot_index"] = *tune.slot_index;
     if (tune.slot_name.has_value())  j["slot_name"]  = *tune.slot_name;
+    if (tune.definition_hash.has_value())
+        j["definition_hash"] = *tune.definition_hash;
 
     nlohmann::ordered_json values;
     for (const auto& [name, val] : tune.values)
@@ -94,6 +96,8 @@ TunerTune import_json(const std::string& json_text) {
         tune.slot_index = j["slot_index"].get<int>();
     if (j.contains("slot_name") && j["slot_name"].is_string())
         tune.slot_name = j["slot_name"].get<std::string>();
+    if (j.contains("definition_hash") && j["definition_hash"].is_string())
+        tune.definition_hash = j["definition_hash"].get<std::string>();
 
     if (j.contains("values") && j["values"].is_object()) {
         for (auto& [key, val] : j["values"].items())

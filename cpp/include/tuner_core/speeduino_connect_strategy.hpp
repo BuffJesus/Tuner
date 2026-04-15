@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -85,16 +86,55 @@ double connect_delay_seconds(const std::map<std::string, std::string>& metadata)
 // I/O and stays Python.
 // ---------------------------------------------------------------------
 
-// Parsed shape of the 6-byte "f" capability query response:
+// Parsed shape of the capability query response:
 //   byte 0: must be 0x00 (otherwise treated as unknown)
 //   byte 1: serial protocol version
 //   bytes 2..4: blocking_factor       (big-endian u16)
 //   bytes 4..6: table_blocking_factor (big-endian u16)
+//
+// Optional Firmware Slice 14B extension (pending commit):
+//   bytes 6..38:  4 slots × 8 bytes = 32 bytes of truncated SHA-256
+//                 fingerprints identifying the tune currently burned
+//                 in each flash slot.
+//   bytes 38..54: 16-byte truncated SHA-256 of `live_data_map.h` +
+//                 `tune_storage_map.h` + `BOARD_ID`, baked at firmware
+//                 build time (Phase 16 item 1: Definition hash in
+//                 firmware capability). Desktop compares this against
+//                 the loaded tune's `definition_hash` (when set) and
+//                 warns on mismatch — prevents burning a tune built
+//                 against a different firmware schema.
+//   bytes 54..62: 64-bit per-page format bitmap (Phase 16 item 2).
+//                 Bit i set = page i uses U16 encoding; bit clear = U08.
+//                 Pre-14B firmware omits these 8 bytes so the desktop
+//                 keeps inferring the format from the INI.
+//   bytes 62..:   reserved for future extensions.
+//
+// Missing trailing bytes mean pre-14B firmware; the desktop treats
+// absent fingerprints / absent definition hash as "unknown" rather
+// than "mismatch" so the UI doesn't scream at every connect while the
+// firmware PR is in flight.
 struct CapabilityHeader {
     bool parsed = false;            // true iff payload is valid
     int serial_protocol_version = 0;
     int blocking_factor = 0;
     int table_blocking_factor = 0;
+
+    // Hex-encoded 8-byte fingerprints per slot (16 hex chars). Empty
+    // string = slot fingerprint not reported (pre-14B firmware) or the
+    // slot is unused (firmware reports all zeros → "0000000000000000").
+    std::array<std::string, 4> slot_fingerprints;
+
+    // Hex-encoded 16-byte firmware definition hash (32 hex chars).
+    // Empty = not reported. Identifies the firmware-side data layout
+    // (channel map + tune storage map + board id) so a desktop tune
+    // built against a different firmware can be caught at connect.
+    std::string definition_hash;
+
+    // Phase 16 item 2 — 64-bit per-page format bitmap. nullopt when
+    // firmware omits the trailing bytes. When populated, bit i set
+    // means page i is U16; otherwise U08. Lets the desktop skip the
+    // INI-based inference for high-resolution 3D tables.
+    std::optional<std::uint64_t> page_format_bitmap;
 };
 
 // `_read_capabilities` parity (payload parse half). Returns

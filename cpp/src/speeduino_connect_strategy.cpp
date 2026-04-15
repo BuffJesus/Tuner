@@ -160,6 +160,62 @@ CapabilityHeader parse_capability_header(
         (static_cast<int>(p[2]) << 8) | static_cast<int>(p[3]);
     header.table_blocking_factor =
         (static_cast<int>(p[4]) << 8) | static_cast<int>(p[5]);
+
+    // Firmware 14B extension — 4 × 8-byte slot fingerprints starting
+    // at offset 6. Pre-14B firmware omits the trailing bytes; the loop
+    // below leaves each slot_fingerprint empty which the UI renders as
+    // "— pending firmware 14B —". When 14B lands we just start getting
+    // real hex strings back from the same call path.
+    constexpr std::size_t kFpBytes = 8;
+    constexpr std::size_t kSlotCount = 4;
+    constexpr std::size_t kDefHashBytes = 16;
+    constexpr std::size_t kDefHashOffset = 6 + kFpBytes * kSlotCount;
+    if (p.size() >= 6 + kFpBytes * kSlotCount) {
+        for (std::size_t slot = 0; slot < kSlotCount; ++slot) {
+            std::string hex;
+            hex.reserve(kFpBytes * 2);
+            for (std::size_t b = 0; b < kFpBytes; ++b) {
+                char buf[3];
+                std::snprintf(buf, sizeof(buf), "%02x",
+                    p[6 + slot * kFpBytes + b]);
+                hex += buf;
+            }
+            header.slot_fingerprints[slot] = std::move(hex);
+        }
+    }
+
+    // Phase 16 item 1 — firmware definition hash (16 bytes after the
+    // slot fingerprints). Pre-14B firmware omits these; the desktop
+    // leaves `definition_hash` empty and the capability dialog shows
+    // "(pending firmware 14B)". When the hash is all-zero the firmware
+    // is explicitly declaring "no hash computed" — treat like unknown.
+    if (p.size() >= kDefHashOffset + kDefHashBytes) {
+        std::string hex;
+        hex.reserve(kDefHashBytes * 2);
+        bool any_non_zero = false;
+        for (std::size_t b = 0; b < kDefHashBytes; ++b) {
+            char buf[3];
+            std::snprintf(buf, sizeof(buf), "%02x",
+                p[kDefHashOffset + b]);
+            hex += buf;
+            if (p[kDefHashOffset + b] != 0) any_non_zero = true;
+        }
+        if (any_non_zero) header.definition_hash = std::move(hex);
+    }
+
+    // Phase 16 item 2 — 64-bit per-page format bitmap (8 bytes little-
+    // endian at offset 54). Pre-14B firmware omits these and we leave
+    // the optional unset.
+    constexpr std::size_t kPageBitmapOffset = kDefHashOffset + kDefHashBytes;
+    constexpr std::size_t kPageBitmapBytes = 8;
+    if (p.size() >= kPageBitmapOffset + kPageBitmapBytes) {
+        std::uint64_t mask = 0;
+        for (std::size_t b = 0; b < kPageBitmapBytes; ++b) {
+            mask |= static_cast<std::uint64_t>(p[kPageBitmapOffset + b])
+                 << (b * 8);
+        }
+        header.page_format_bitmap = mask;
+    }
     return header;
 }
 

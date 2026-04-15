@@ -134,7 +134,7 @@ TunerStudio bundles MegaLogViewer for post-session analysis: scrubbing through a
 | Feature | Where | Complexity | Why deferred |
 |---|---|---|---|
 | G7. Ignition timing scope (high-speed trigger logger UI) | `com/efiAnalytics/tunerStudio/panels/TriggerLoggerPanel.java`, `com/efiAnalytics/tunerStudio/panels/o.java` | Medium | We already have basic trigger log capture; the scope visualization is for advanced diagnostics most operators rarely run |
-| G8. Dyno / power-and-torque view | `aP/hb.java` (Tuning & Dyno Views tab), `aO/cd.java` | Medium | Most desktop Speeduino users don't have a dyno; the few who do can use the existing CSV export path |
+| G8. Dyno / power-and-torque view | `aP/hb.java` (Tuning & Dyno Views tab), `aO/cd.java` | Medium | ✅ **Covered** — Virtual Dyno card on the ASSIST tab with QPainter torque+HP chart (peak markers, dual Y axes, nice-ceiling axis scaling) plus **before/after overlay** via "Compare to Another CSV…" (dashed curves under the primary, shared axis range so deltas are visually honest) and "Clear Overlay" controls. No physical dyno required — math in `tuner_core::virtual_dyno::calculate`. |
 | G9. Bluetooth / BLE direct connectivity | `aP/bh.java` (uses `javax.bluetooth.*`) | Medium | Airbear bridge already covers wireless via TCP — Bluetooth is a parallel transport, not a missing feature |
 | G10. Map switching (multi-tune slot management) | Not found in decomp | Medium | Speeduino firmware doesn't support multi-tune slots in the way TS-targeted ECUs do — this is a firmware feature, not a desktop one |
 | G11. Knock listener / audio feedback | Not found | Medium | Hardware-dependent; not in TS core either |
@@ -308,9 +308,9 @@ The Trigger Logs surface accepts CSV imports and does analysis, but it doesn't s
 | 8: Dashboard, workspace, and UX modernization | **Complete** — INI-driven gauge catalog seeded into default layout; FrontPage indicator strip wired; LED indicator widget kind landed; static-text `label` widget kind (TSDash DashLabel parity) added with offscreen Qt tests + JSON layout round trip |
 | 9: Board, firmware, and bench workflow integration | **Complete** — reconnect signature warning UI, `uncertain_channel_groups()` runtime table flags, `TcpTransport` WiFi connect, mDNS resolution, HTTP live-data API (port 8080), and `LiveTriggerLoggerService` all wired; LoggerDefinition live tooth/composite stream (start/poll/read/stop firmware commands) wired through `SpeeduinoControllerClient.fetch_logger_data()` and exercised end-to-end by `TriggerCaptureWorker` from the Trigger Logs surface |
 | 10: Hardening and release prep | Ongoing |
-| 14: Native C++ Qt 6 desktop port | **In progress** — Slice 4 at sub-slice 159. C++ doctest suite: **1457 tests / 11063 assertions / 0 failures**. Python suite: **3011 tests**. Qt 6.7.3 built from source at `C:/Qt/6.7.3-custom`. 98 services ported + all INI leaf parsers + full beautification arc + 20 UX slices + **14-feature functional wiring pass** (sub-slice 146) + **13-slice comms/ecosystem alignment pass** (sub-slices 147–159): embedded Teensy HID flasher (no external exe), EcuHub UDP discovery + device picker, Airbear REST client with `fw_variant` mismatch warning, `write_calibration_table` for CLT/IAT/O2 (with 1024-byte Speeduino-native encoder), TSDash `.dash` import/export, opt-in HTTP live-data API, session connect rollback (TN-001), endianness contract cleanup (TN-007), capability handshake consumption (TN-006), real page-CRC verify (TN-005), Airbear OTA firmware upload. **All 8 TN-series backlog items closed.** See parity tracker below. |
+| 14: Native C++ Qt 6 desktop port | **In progress** — Slice 4 post-parity. C++ doctest suite: **1492 tests / 11218 assertions / 0 failures**. Python suite: **3011 tests**. Qt 6.7.3 built from source at `C:/Qt/6.7.3-custom`. 98 services ported + all INI leaf parsers + full beautification arc + 20 UX slices + 14-feature functional wiring pass (sub-slice 146) + 13-slice comms/ecosystem alignment pass (147–159). **Post-parity polish session (2026-04-15):** Virtual Dyno chart widget + before/after overlay, CF + coverage per-cell tooltips, `LogTimelineWidget` with play/pause + speed selector + channels picker + shift-drag zoom + export menu, Airbear SD log browser + SD tune ingest (File → Open Tune from ECU SD…), slot picker + burn-routing guard, `activeTuneSlot` chip, ECU Capabilities dialog (slot fingerprints + definition hash + page-format bitmap), Airbear Health dialog (error counters), `TriggerScopeWidget` oscilloscope view, dashboard formula-channel picker, all build warnings cleared. **P15 + P16 desktop-side complete, G1-G8 gap backlog closed.** See parity tracker below. |
 
-## C++ App Feature Parity Tracker (as of sub-slice 159)
+## C++ App Feature Parity Tracker (as of 2026-04-15 post-parity polish session)
 
 Status key: **Done** = fully functional | **Partial** = framework in place, not fully wired | **Missing** = not started
 
@@ -384,7 +384,7 @@ Status key: **Done** = fully functional | **Partial** = framework in place, not 
 | Injector pressure compensation | **Done** (sub-slice 146) | Fuel system, rail pressure, dead time comp in Step 3 |
 | Board/MCU selector | **Done** (sub-slice 146) | 5 board options in Step 1 with DropBear default |
 
-### ASSIST tab (7/7 — Complete)
+### ASSIST tab (10/10 — Complete)
 
 | Feature | Status | Notes |
 |---|---|---|
@@ -394,8 +394,11 @@ Status key: **Done** = fully functional | **Partial** = framework in place, not 
 | Real log data import | **Done** (sub-slice 146) | CSV import → nearest-bin cell mapping → correction accumulation |
 | Apply proposals to tune | **Done** (sub-slice 146) | Stages VE proposals via `edit_svc->replace_list()` |
 | Live VE Analyze session | **Done** (sub-slice 146) | Start/Stop/Reset, 500ms timer, real-time accumulation, shares Apply |
+| Coverage heatmap + CF grid per-cell tooltips | **Done** (post-parity) | Hover any cell for row/col + sample count + confidence tier + clamp flag |
+| Virtual Dyno chart + before/after overlay | **Done** (post-parity) | QPainter torque/HP chart, nice-ceiling axes, peak markers, dashed overlay under primary for two-pull comparison |
+| Compressor map modeling | **Done** (P15-10) | Mass-flow math + 6-tier risk classification + plain-language summary |
 
-### LOGGING tab (7/7 — Complete)
+### LOGGING tab (9/9 — Complete)
 
 | Feature | Status | Notes |
 |---|---|---|
@@ -404,8 +407,10 @@ Status key: **Done** = fully functional | **Partial** = framework in place, not 
 | Real-time capture to CSV | **Done** (sub-slice 146) | 200ms timer, CapturedRecord, `format_csv()` |
 | Profile persistence | **Done** (sub-slice 146) | QSettings serialize/deserialize |
 | CSV import + replay viewer | **Done** (sub-slice 146) | `datalog_import::import_rows()` → QSpinBox row nav → `select_row()` |
+| Scrubbable timeline with channel tracks | **Done** (post-parity) | `LogTimelineWidget` with play/pause + speed selector + channels picker + shift-drag zoom + export menu (CSV range + PNG snapshot) |
+| Airbear SD log browser | **Done** (post-parity) | Host field + Refresh + download via `/api/sd/logs` grammar; firmware G5 exercise pending |
 
-### TRIGGERS tab (4/4 — Complete)
+### TRIGGERS tab (5/5 — Complete)
 
 | Feature | Status | Notes |
 |---|---|---|
@@ -413,8 +418,9 @@ Status key: **Done** = fully functional | **Partial** = framework in place, not 
 | Trigger log analysis | **Done** | Capture summary + decoder context + findings |
 | CSV import | **Done** (sub-slice 146) | Parses into Row format, rebuilds viz + analysis dynamically |
 | Live capture (tooth/composite) | **Done** (sub-slice 146) | `fetch_raw()` on controller, INI LoggerDefinition decode |
+| Oscilloscope waveform view | **Done** (post-parity) | `TriggerScopeWidget` — stacked tracks, digital square-waves, analog smooth lines, dashed annotation marks, ms time axis |
 
-### Connection & comms (13/13 — Complete)
+### Connection & comms (15/15 — Complete)
 
 | Feature | Status | Notes |
 |---|---|---|
@@ -427,8 +433,12 @@ Status key: **Done** = fully functional | **Partial** = framework in place, not 
 | Status bar telemetry | **Done** | Real signature + RPM/MAP/AFR/CLT when connected |
 | Read all pages on connect | **Done** (sub-slice 146) | Computes page sizes from def, populates page_cache |
 | Parameter write to ECU | **Done** (sub-slice 146) | Blocking-factor chunking, bit-field read-modify-write |
-| Burn command | **Done** (sub-slice 146) | Per-page burn with 20ms inter-page delay |
+| Burn command | **Done** (sub-slice 146) | Per-page burn with 20ms inter-page delay; slot-target guard refuses non-zero slots until firmware 14G |
 | Runtime polling (output channels) | **Done** | `EcuConnection::poll_runtime()` decodes live data |
+| Capability header parse | **Done** (post-parity) | `fetch_raw({'f'}, 62)` on connect → `CapabilityHeader` with slot fingerprints (bytes 6-37) + definition hash (38-53) + page-format bitmap (54-61); pre-14B firmware leaves extensions empty |
+| ECU Capabilities dialog | **Done** (post-parity) | File → Show ECU Capabilities… renders every field with pending-firmware placeholders |
+| Airbear Health dialog | **Done** (post-parity) | File → Airbear Health… + `fetch_status`; counters rendered with ok/warn/danger thresholds, pre-rollout dashes + footnote |
+| Active-slot live chip | **Done** (post-parity) | `runtime_telemetry::RuntimeStatus::active_tune_slot` + `● Slot N` chip in LIVE-tab status strip |
 
 ### UX / chrome
 
@@ -458,15 +468,15 @@ Status key: **Done** = fully functional | **Partial** = framework in place, not 
 | Definition Settings dialog | `main_window.py` → `_open_definition_settings_dialog()` | Medium | ✅ Done (File → Definition Settings) |
 | EcuHub UDP discovery | `udp_transport.py` | Low | ✅ Done (sub-slice 148 — `udp_discovery` service + Scan Network button) |
 
-### Not started — TunerStudio has, nobody has yet
+### TunerStudio-parity surface (all started — most now done)
 
-| Feature | TS Decompiled Source | Priority |
+| Feature | TS Decompiled Source | Status |
 |---|---|---|
-| SD card log download/browse | `bD/i.java`, `bD/m.java` | Medium |
-| Standalone log viewer (MegaLogViewer parity) | `MegaLogViewer.java` | Medium-Large |
-| Ignition timing scope | `TriggerLoggerPanel.java` | Low |
-| Dyno / power-torque view | `aP/hb.java` | Low |
-| Multi-tune slot management | N/A (firmware limitation) | N/A |
+| SD card log download/browse | `bD/i.java`, `bD/m.java` | ✅ Desktop-complete — LOGGING-tab "Airbear SD Logs" card + `airbear_api::fetch_sd_log_list` / `fetch_sd_log_bytes` against `/api/sd/logs[/<name>]`; end-to-end exercise waits on Airbear firmware G5 shipping the endpoints |
+| Standalone log viewer (MegaLogViewer parity) | `MegaLogViewer.java` | ✅ Done — `LogTimelineWidget` with stacked channel tracks, click+drag cursor, play/pause + 1x/2x/4x/8x speed selector, channels picker, shift-drag region zoom, export menu (visible range CSV + timeline PNG snapshot) |
+| Ignition timing scope | `TriggerLoggerPanel.java` | ✅ Done — `TriggerScopeWidget` on the TRIGGERS tab; QPainter stacked tracks (digital = square-wave, analog = smooth lines), annotations as dashed vertical marks colored by severity, ms time axis |
+| Dyno / power-torque view | `aP/hb.java` | ✅ Done — Virtual Dyno on ASSIST tab with QPainter torque+HP chart + peak markers + **before/after overlay** via "Compare to Another CSV…" (dashed overlay under primary, shared axis range) |
+| Multi-tune slot management | N/A (firmware limitation) | ✅ Desktop-complete — P15-9 steps 1-5 + 7 landed (NativeTune v1.1 slot fields, project-bar slot badge, Burn to: slot picker, Copy Current Tune to Slot…, Open Tune from ECU SD…, active-slot chip, ECU Capabilities dialog with per-slot fingerprints + definition hash + page-format bitmap readout); end-to-end exercise of steps 4/6 waits on firmware 14G/14B |
 
 ## Phase 7 Scope — Better-Than-TunerStudio Assist
 
@@ -4143,10 +4153,10 @@ The remaining Phase 14 work, in roughly the order it lands:
 
 These are the lower-priority items from the gap analysis above. None of them block Phase 14 ship — they're tracked here so they don't get forgotten when the C++ app reaches feature parity with the Python one.
 
-- **G4: Virtual / formula output channels** — ✅ **Done end-to-end on both sides**. Parser (84), evaluator (85), Python `SessionService.poll_runtime` enrichment (86), C++ `tuner_app.exe` LIVE-tab enrichment + formula-channel demo strip (87). Residual polish deferred to the dashboard channel picker (letting operators bind a gauge to any formula channel from a searchable list) rather than blocking on it — current gauges already consume the enriched snapshot, so pointing a binding at a formula channel already works today.
+- **G4: Virtual / formula output channels** — ✅ **Done end-to-end on both sides + dashboard channel picker polish closed**. Parser (84), evaluator (85), Python `SessionService.poll_runtime` enrichment (86), C++ `tuner_app.exe` LIVE-tab enrichment + formula-channel demo strip (87). Dashboard channel picker polish: `open_gauge_config_dialog` now takes an optional `formula_channel_names` argument; source_combo renders a disabled `— Formula channels —` separator row followed by every formula channel prefixed with `ƒ`. Selecting one wires `widget.source = widget.title = widget.widget_id = formula_name`. Loaded from `definition.output_channels.formula_channels` at dashboard build time and threaded through the rebuild-dashboard lambda into every per-gauge config callback.
 - **G5: SD card log download / browse / replay** — `SdCardPanel` in the Logging tab; depends on firmware-side `cmdSdList` / `cmdSdRead` commands existing or being added.
 - **G6: Standalone log viewer parity (MegaLogViewer)** — `LogAnalyzerPanel` as a new top-level tab with timeline scrubbing, multi-cursor measurement, side-by-side dual-log comparison.
-- **G7: Ignition timing scope** — high-speed trigger logger visualization. We already have CSV-based trigger log capture; the missing piece is the real-time oscilloscope view.
+- **G7: Ignition timing scope** — ✅ **Done.** `TriggerScopeWidget` is a QPainter-based oscilloscope view on the TRIGGERS tab that renders every decoded trace from `trigger_log_visualization::build_from_rows` as a stacked track (digital traces as square-waves, analog as smooth lines), annotations as dashed vertical marks in accent_warning/text_dim by severity, and a 5-tick `ms` time axis. Replaces the text-only info-card summary grammar we had before — summaries stay below as a text breakdown.
 - **G8–G12:** lower priority — see the gap analysis table above for individual rationale.
 - **G13: Embedded flash for Mega2560 + STM32 (no external exe).** Teensy already flashes with zero external dependency via the embedded Win32 HID path (`cpp/src/teensy_hid_flasher.cpp`, Windows-only, mirrors the legacy Python `_flash_internal_teensy`). The other two board families still shell out:
   - **Mega2560 (AVRDUDE)** — port the STK500v2 bootloader protocol over `QSerialPort`. Pure stdlib, no vendored deps. ~400 LOC. Removes the `avrdude.exe` + `avrdude.conf` bundling requirement.
@@ -4393,23 +4403,23 @@ the following features are prioritized by operator impact.
 | 1 | Virtual dyno / power curve view | Moderate | ✅ Done |
 | 2 | VE Analyze coverage heatmap overlay | Moderate | ✅ Done |
 | 3 | Zone-based alert toasts on gauges | Trivial | ✅ Done |
-| 4 | Airbear SD card log download | Moderate | ⏸ Blocked on firmware G5 command spec |
+| 4 | Airbear SD card log download | Moderate | Desktop-side complete — `airbear_api::{parse_sd_log_list_json, build_sd_log_path, fetch_sd_log_list, fetch_sd_log_bytes}` against a `/api/sd/logs[/<name>]` contract that matches the existing Airbear REST grammar, plus a LOGGING-tab "Airbear SD Logs" card (host field, Refresh → list, Download + Open in Timeline → funnels into the existing timeline widget). End-to-end validation still blocked on firmware G5 command spec shipping the endpoints — when it lands, only the two fetch helpers move if the paths/schema differ |
 | 5 | Staged-change visual diff (table heatmap) | Moderate | ✅ Done |
 | 6 | Confidence badges on wizard generators | Trivial | ✅ Done |
 | 7 | Plain-language VE Analyze summaries | Moderate | ✅ Done |
 | 8 | Next-steps guidance after VE Analyze | Moderate | ✅ Done |
-| 9 | Map switching / multi-tune slots | Moderate | Partial — steps 1+3 (schema + project-bar slot badge) ✅; steps 4–7 blocked on firmware 14G |
+| 9 | Map switching / multi-tune slots | Moderate | ✅ Desktop-side complete — steps 1 (NativeTune v1.1 slot fields) + 2 (`RuntimeStatus::active_tune_slot` + LIVE-tab `● Slot N` chip) + 3 (project-bar slot badge) + 4 (Burn to: slot picker + live-burn refusal when target slot > 0 pending firmware 14G) + 5 (Tune → Copy Current Tune to Slot…) + 6 (`CapabilityHeader::slot_fingerprints` parses 4 × 8-byte trailing bytes from the `'f'` response when firmware 14B ships them, `EcuConnection::capabilities` populated after every connect; File → Show ECU Capabilities… opens a read-only dialog with signature, protocol/blocking factors, active slot, and per-slot fingerprint rows that render "pending firmware 14B" / "(slot empty)" / real hex depending on state) + 7 (File → Open Tune from ECU SD…) ✅. End-to-end validation still waits on firmware 14G/14B/G5 shipping — when they do, the desktop-side code paths are already live |
 | 10 | Compressor map turbo modeling | Medium | ✅ Done |
 
 ### Phase 16: Ecosystem Tightening
 
 | # | Feature | Effort | Requires | Status |
 |---|---------|--------|----------|--------|
-| 1 | Definition hash in firmware capability | Firmware change | Speeduino firmware PR | Planned |
-| 2 | Per-page format bitmap in 'K' response | Firmware change | Speeduino firmware PR | Planned |
+| 1 | Definition hash in firmware capability | Firmware change | Speeduino firmware PR | ✅ **Desktop-side fully wired, end-to-end.** `CapabilityHeader::definition_hash` parses bytes 38..54 of the `'f'` response. `NativeTune::definition_hash` + `TunerTune::definition_hash` added as optional fields (forward-compat minor). Save-as-native captures the connected ECU's hash at save time. Burn-time guard compares loaded tune's hash against connected ECU's hash and refuses burn with a plain-language "Schema mismatch" dialog when they disagree. Either side empty = not enough info, burn allowed through. End-to-end exercise still waits on firmware 14B shipping the trailing bytes |
+| 2 | Per-page format bitmap in 'K' response | Firmware change | Speeduino firmware PR | Desktop-side complete — `CapabilityHeader::page_format_bitmap` (`optional<uint64_t>`) parses 8 little-endian bytes at offset 54 of the `'f'` response (bit i set → page i uses U16). Connect dialog bumped to fetch 62 bytes. ECU Capabilities dialog renders a "Page formats" row: `"(pending firmware 14B)"` when absent, `"all U08"` when mask is zero, comma-separated U16 page indices otherwise. Firmware PR still needed to emit the trailing 8 bytes |
 | 3 | HTTP API versioning (/api/v1/) | Trivial | Desktop only | ✅ Done |
-| 4 | Airbear error counters in /api/status | Airbear change | Airbear firmware PR | Planned |
-| 5 | Standalone log viewer with timeline | Large | Desktop only | Planned |
+| 4 | Airbear error counters in /api/status | Airbear change + desktop | Airbear firmware PR | ✅ **Done end-to-end.** Airbear side (`Airbear-main/src/tcp-uart.{cpp,h}` + `rest_api.cpp` `handleStatus`): `TCPrequestsReceived` (already existed) + new `ecuTimeouts` + `ecuBusyResponses` counters incremented at the four `RC_TIMEOUT` / `RC_BUSY_ERR` send paths in `handleData`, exposed as `tcp_requests` / `ecu_timeouts` / `ecu_busy` JSON keys. Desktop side: `StatusResponse` field names aligned with real keys (retired the four speculative names), `parse_status_json` reads them, File → Airbear Health… renders `TS/ECU requests` as a neutral volume counter + `ECU timeouts` / `ECU busy` as error counters colored by threshold. Older Airbear builds that predate the counters fall back to dashes + the existing footnote |
+| 5 | Standalone log viewer with timeline | Large | Desktop only | ✅ Done — scrubbable timeline widget with stacked channel tracks + click/drag cursor + play/pause + 1x/2x/4x/8x speed selector + channels picker + shift-drag region zoom with translucent selection overlay + Reset Zoom button + zoom-percent hint + Export menu (visible range as CSV, timeline snapshot as PNG) landed in LOGGING tab |
 
 ### Virtual Dyno Design Notes
 

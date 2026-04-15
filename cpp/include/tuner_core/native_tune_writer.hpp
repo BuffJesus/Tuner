@@ -35,6 +35,10 @@ struct TunerTune {
     // slot 0 implicitly.
     std::optional<int> slot_index;
     std::optional<std::string> slot_name;
+    // P16-1 — firmware definition hash captured at save time. Burn
+    // guard refuses to burn when this disagrees with the connected
+    // ECU's capability-reported hash.
+    std::optional<std::string> definition_hash;
 };
 
 /// Export a TunerTune to JSON string.

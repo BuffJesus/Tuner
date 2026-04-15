@@ -44,22 +44,39 @@ BoardCapabilities decode_board_capabilities(const ValueMap& values) {
 }
 
 RuntimeStatus decode_runtime_status(const ValueMap& values) {
+    RuntimeStatus out;
     auto raw = channel_int(values, "runtimeStatusA");
     if (raw.has_value()) {
         int r = *raw;
-        return {raw, bool(r & (1 << 0)), bool(r & (1 << 1)), bool(r & (1 << 2)),
-                bool(r & (1 << 3)), bool(r & (1 << 4)), bool(r & (1 << 5)),
-                bool(r & (1 << 6)), bool(r & (1 << 7))};
+        out.raw_value               = raw;
+        out.fuel_pump_on            = bool(r & (1 << 0));
+        out.launch_hard_active      = bool(r & (1 << 1));
+        out.flat_shift_hard_active  = bool(r & (1 << 2));
+        out.idle_up_active          = bool(r & (1 << 3));
+        out.full_sync               = bool(r & (1 << 4));
+        out.transient_active        = bool(r & (1 << 5));
+        out.warmup_or_ase_active    = bool(r & (1 << 6));
+        out.tune_learn_valid        = bool(r & (1 << 7));
+    } else {
+        out.fuel_pump_on            = channel_bool(values, "rSA_fuelPump");
+        out.launch_hard_active      = channel_bool(values, "rSA_launchHard");
+        out.flat_shift_hard_active  = channel_bool(values, "rSA_flatShift");
+        out.idle_up_active          = channel_bool(values, "rSA_idleUp");
+        out.full_sync               = channel_bool(values, "rSA_fullSync");
+        out.transient_active        = channel_bool(values, "rSA_transient");
+        out.warmup_or_ase_active    = channel_bool(values, "rSA_warmupASE");
+        out.tune_learn_valid        = channel_bool(values, "rSA_tuneValid");
     }
-    return {std::nullopt,
-            channel_bool(values, "rSA_fuelPump"),
-            channel_bool(values, "rSA_launchHard"),
-            channel_bool(values, "rSA_flatShift"),
-            channel_bool(values, "rSA_idleUp"),
-            channel_bool(values, "rSA_fullSync"),
-            channel_bool(values, "rSA_transient"),
-            channel_bool(values, "rSA_warmupASE"),
-            channel_bool(values, "rSA_tuneValid")};
+    // Active tune slot — firmware 14G adds an `activeTuneSlot` byte
+    // to the runtime packet. 0-3 are valid slots; pre-14G firmware
+    // doesn't emit the channel so channel_int returns nullopt and
+    // we leave `active_tune_slot` unset. 0xFF is the "unknown/none"
+    // sentinel firmware uses when the field isn't meaningful.
+    auto slot = channel_int(values, "activeTuneSlot");
+    if (slot.has_value() && *slot >= 0 && *slot <= 3) {
+        out.active_tune_slot = *slot;
+    }
+    return out;
 }
 
 std::optional<bool> decode_spi_flash_health(const ValueMap& values) {
