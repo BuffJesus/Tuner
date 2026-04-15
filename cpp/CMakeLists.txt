@@ -359,6 +359,16 @@ if(TUNER_CORE_BUILD_TESTS)
 endif()
 
 # ---------------------------------------------------------------------------
+# Offline tool: compile an INI into a schema-v2 .tunerdef. Run once
+# after an INI change to refresh the shipped native fixture so the
+# app loads from the native format without falling back to INI.
+# ---------------------------------------------------------------------------
+
+add_executable(gen_v2_tunerdef tools/gen_v2_tunerdef.cpp)
+target_link_libraries(gen_v2_tunerdef PRIVATE tuner_core)
+target_include_directories(gen_v2_tunerdef PRIVATE include)
+
+# ---------------------------------------------------------------------------
 # Python bindings (nanobind, optional)
 # ---------------------------------------------------------------------------
 

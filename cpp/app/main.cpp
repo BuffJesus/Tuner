@@ -137,6 +137,8 @@ namespace tt = tuner_theme;
 #include <QFont>
 #include <QPainter>
 #include <QPainterPath>
+#include <QIcon>
+#include <QPixmap>
 #include <QPointer>
 #include <QPushButton>
 #include <QPaintEvent>
@@ -814,8 +816,22 @@ std::filesystem::path find_native_definition() {
     QSettings settings;
     auto def_path = settings.value("projects/current/tunerdef", "").toString().toStdString();
     if (!def_path.empty() && std::filesystem::exists(def_path)) return def_path;
-    // Search fixture directory.
+    // Search fixture directory. Prefer the schema-v2 generated
+    // definition (full layout, loads directly via the v2 path) over
+    // the semantic-only v1 Ford300 fixture. The v2 file is produced
+    // by `gen_v2_tunerdef` from the production INI; regenerate after
+    // any INI change via:
+    //   ./build/cpp/gen_v2_tunerdef.exe \
+    //     tests/fixtures/speeduino-dropbear-v2.0.1.ini \
+    //     tests/fixtures/native/speeduino-dropbear-v2.0.1.tunerdef
     const char* candidates[] = {
+        // Primary: full-layout v2 definition.
+        "tests/fixtures/native/speeduino-dropbear-v2.0.1.tunerdef",
+        "../tests/fixtures/native/speeduino-dropbear-v2.0.1.tunerdef",
+        "../../tests/fixtures/native/speeduino-dropbear-v2.0.1.tunerdef",
+        "../../../tests/fixtures/native/speeduino-dropbear-v2.0.1.tunerdef",
+        "D:/Documents/JetBrains/Python/Tuner/tests/fixtures/native/speeduino-dropbear-v2.0.1.tunerdef",
+        // Fallback: legacy v1 semantic-only fixture.
         "tests/fixtures/native/Ford300_TwinGT28_BaseStartup.tunerdef",
         "../tests/fixtures/native/Ford300_TwinGT28_BaseStartup.tunerdef",
         "../../tests/fixtures/native/Ford300_TwinGT28_BaseStartup.tunerdef",
@@ -1012,6 +1028,34 @@ std::optional<tuner_core::NativeEcuDefinition> load_active_definition() {
             || !def.table_editors.editors.empty();
     };
 
+    // Process-lifetime cache — tabs call this during construction, and
+    // the production INI is 5000+ lines, so every tab-local call used
+    // to pay a full parse. Cache keyed on the source paths + their
+    // mtimes so switching projects or editing the INI on disk
+    // invalidates the cache automatically.
+    static std::string cached_key;
+    static std::optional<tuner_core::NativeEcuDefinition> cached;
+    auto mtime_token = [](const std::filesystem::path& p) -> std::string {
+        std::error_code ec;
+        if (p.empty() || !std::filesystem::exists(p, ec)) return {};
+        auto t = std::filesystem::last_write_time(p, ec);
+        if (ec) return {};
+        return std::to_string(t.time_since_epoch().count());
+    };
+    {
+        auto native_probe = find_native_definition();
+        auto ini_probe = find_production_ini();
+        std::string key = native_probe.string() + "|" + mtime_token(native_probe)
+                        + "||" + ini_probe.string() + "|" + mtime_token(ini_probe);
+        if (key == cached_key && cached.has_value()) return cached;
+        cached_key = std::move(key);
+    }
+    auto publish_and_return = [&](std::optional<tuner_core::NativeEcuDefinition> value)
+        -> std::optional<tuner_core::NativeEcuDefinition> {
+        cached = value;
+        return cached;
+    };
+
     // Try native .tunerdef v2 first (full layout sections).
     std::optional<tuner_core::NativeEcuDefinition> native_def;
     auto native_path = find_native_definition();
@@ -1025,7 +1069,7 @@ std::optional<tuner_core::NativeEcuDefinition> load_active_definition() {
                 + std::to_string(def.menus.menus.size())
                 + " dialogs=" + std::to_string(def.dialogs.dialogs.size())
                 + " table_editors=" + std::to_string(def.table_editors.editors.size()));
-            if (has_layout(def)) return def;
+            if (has_layout(def)) return publish_and_return(def);
             native_def = std::move(def);
         } catch (const std::exception& e) {
             std::printf("[def] v2 load failed (%s), trying v1 semantic\n",
@@ -1052,9 +1096,11 @@ std::optional<tuner_core::NativeEcuDefinition> load_active_definition() {
                     def.table_editors.editors.size(),
                     def.curve_editors.curves.size());
                 std::fflush(stdout);
-                if (has_layout(def)) return def;
+                if (has_layout(def)) return publish_and_return(def);
                 native_def = std::move(def);
             } catch (const std::exception& e2) {
+                std::printf("[def] v1 synth failed: %s\n", e2.what());
+                std::fflush(stdout);
                 debug_log(std::string("load_active_definition v1 threw: ") + e2.what());
             }
         }
@@ -1072,7 +1118,7 @@ std::optional<tuner_core::NativeEcuDefinition> load_active_definition() {
                 + std::to_string(def.menus.menus.size())
                 + " dialogs=" + std::to_string(def.dialogs.dialogs.size())
                 + " table_editors=" + std::to_string(def.table_editors.editors.size()));
-            return def;
+            return publish_and_return(def);
         } catch (const std::exception& e) {
             std::printf("[def] INI load failed: %s\n", e.what());
             std::fflush(stdout);
@@ -1082,8 +1128,8 @@ std::optional<tuner_core::NativeEcuDefinition> load_active_definition() {
     // INI unavailable. If we had a layout-less native def, return it
     // anyway so downstream code has SOMETHING — better a half-empty
     // editor than a completely blank workspace.
-    if (native_def) return native_def;
-    return std::nullopt;
+    if (native_def) return publish_and_return(native_def);
+    return publish_and_return(std::nullopt);
 }
 
 // ---------------------------------------------------------------------------
@@ -2145,6 +2191,75 @@ void build_channel_layouts(
     }
 }
 
+// -----------------------------------------------------------------------
+// Tree-item icon factories. Each leaf picks one of three icons based
+// on what's on the other side of the click: a 3x3 table, a curve, or
+// a scalar parameter form. The icons are painted once at tree-build
+// time and cached implicitly by Qt via QIcon's internal refcounting.
+// Having distinct glyphs means the operator can see page type at a
+// glance without reading the label, and the color tints line up with
+// the category accent on the group row above.
+// -----------------------------------------------------------------------
+
+static QIcon make_tree_leaf_icon(char kind, const char* accent_hex) {
+    QPixmap pm(16, 16);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    QColor fill(QString::fromUtf8(accent_hex));
+    QColor dim(QString::fromUtf8(tt::bg_inset));
+
+    if (kind == 't') {
+        // Table — 3x3 grid of tiny cells.
+        p.setPen(Qt::NoPen);
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) {
+                int x = 2 + c * 4;
+                int y = 4 + r * 3;
+                // Center cell gets the accent; surrounding cells stay dim
+                // so the icon reads as "data grid".
+                p.setBrush((r == 1 && c == 1) ? fill : dim);
+                p.drawRoundedRect(x, y, 3, 2, 0.5, 0.5);
+            }
+    } else if (kind == 'c') {
+        // Curve — a short rising line, signals a 1D look-up.
+        p.setPen(QPen(fill, 1.8));
+        p.drawLine(3, 11, 7, 8);
+        p.drawLine(7, 8, 13, 5);
+        p.setPen(Qt::NoPen);
+        p.setBrush(fill);
+        p.drawEllipse(QPointF(3, 11), 1.4, 1.4);
+        p.drawEllipse(QPointF(13, 5), 1.4, 1.4);
+    } else {
+        // Scalar — a thin horizontal chip, signals "a single value".
+        p.setPen(Qt::NoPen);
+        p.setBrush(fill);
+        p.drawRoundedRect(3, 7, 10, 2, 1.0, 1.0);
+    }
+    p.end();
+    return QIcon(pm);
+}
+
+// Category accent color per group. Picked from the same keyword
+// grammar used everywhere else so the category "palette" stays
+// consistent across the tree, the menu synthesiser, and future
+// generator cards.
+static const char* group_accent_for_title(const std::string& title) {
+    std::string lower = title;
+    for (auto& c : lower)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    auto has = [&](const char* kw) { return lower.find(kw) != std::string::npos; };
+    if (has("ignition") || has("spark") || has("dwell")) return tt::accent_warning;
+    if (has("fuel")     || has("ve")    || has("afr"))   return tt::accent_ok;
+    if (has("idle"))                                      return tt::accent_special;
+    if (has("boost")    || has("airflow") || has("vvt"))  return tt::accent_danger;
+    if (has("enrich")   || has("warmup")  || has("startup")) return tt::accent_warning;
+    if (has("sensor"))                                    return tt::accent_primary;
+    if (has("protect"))                                   return tt::accent_danger;
+    if (has("comms")    || has("can"))                    return tt::accent_primary;
+    return tt::accent_primary;
+}
+
 QWidget* build_tune_tab(
     std::shared_ptr<tuner_core::workspace_state::Workspace> workspace,
     std::shared_ptr<tuner_core::local_tune_edit::EditService> shared_edit_svc,
@@ -2267,6 +2382,37 @@ QWidget* build_tune_tab(
 
     auto* tree = new QTreeWidget;
     tree->setHeaderHidden(true);
+    tree->setAnimated(true);
+    tree->setIndentation(tt::space_md);
+    tree->setUniformRowHeights(false);
+    tree->setFrameShape(QFrame::NoFrame);
+    tree->setExpandsOnDoubleClick(false);
+    // Expose a hit area to the left of each row so the hover/select
+    // background hugs the widget edge instead of leaving a dead strip.
+    tree->setIndentation(14);
+    {
+        // Themed tree stylesheet — hover + selected + rounded rows +
+        // muted default text so leaves read as "below the hero level"
+        // against the right-pane content that matters more.
+        char ts[1024];
+        std::snprintf(ts, sizeof(ts),
+            "QTreeWidget { background: %s; border: none; outline: none; "
+            "  font-size: %dpx; padding: %dpx 0; }"
+            "QTreeWidget::item { padding: %dpx %dpx; margin: 1px %dpx; "
+            "  border-radius: %dpx; color: %s; }"
+            "QTreeWidget::item:hover { background: %s; color: %s; }"
+            "QTreeWidget::item:selected { background: %s; color: %s; }"
+            "QTreeWidget::branch { background: transparent; }"
+            "QTreeWidget::branch:selected { background: transparent; }",
+            tt::bg_base,
+            tt::font_body, tt::space_xs,
+            tt::space_xs + 1, tt::space_sm, tt::space_xs,
+            tt::radius_sm,
+            tt::text_secondary,
+            tt::bg_inset, tt::text_primary,
+            tt::fill_primary_mid, tt::text_primary);
+        tree->setStyleSheet(QString::fromUtf8(ts));
+    }
     left_layout->addWidget(tree, 1);
 
     // ---- right pane ----
@@ -2447,13 +2593,19 @@ QWidget* build_tune_tab(
             clear_selection();
             sel_top = std::min(r1, r2); sel_left = std::min(c1, c2);
             sel_bottom = std::max(r1, r2); sel_right = std::max(c1, c2);
-            // Apply selection highlight.
+            // Apply selection highlight — `fill_primary_mid` fill +
+            // `accent_primary` border matches the sidebar selection
+            // grammar so "selected" reads as the same state-color
+            // across every surface in the app.
             for (int r = sel_top; r <= sel_bottom && r < static_cast<int>(cell_labels.size()); ++r)
                 for (int c = sel_left; c <= sel_right && c < static_cast<int>(cell_labels[r].size()); ++c) {
-                    char sel_style[128];
+                    char sel_style[192];
                     std::snprintf(sel_style, sizeof(sel_style),
-                        "background-color: #2a4a6e; color: #ffffff; border: 1px solid #4b7bd1; "
-                        "padding: 0px; font-size: 10px; font-family: monospace;");
+                        "background-color: %s; color: %s; "
+                        "border: 1px solid %s; padding: 0px; "
+                        "font-size: %dpx; font-family: monospace;",
+                        tt::fill_primary_mid, tt::text_primary,
+                        tt::accent_primary, tt::font_micro);
                     cell_labels[r][c]->setStyleSheet(QString::fromUtf8(sel_style));
                 }
         }
@@ -2677,8 +2829,16 @@ QWidget* build_tune_tab(
         std::string title;
         std::string target;
         std::string base_label;
+        int subgroup_index = -1;  // -1 = leaf is direct child of group
     };
-    struct TreeGroupRef { QTreeWidgetItem* group; std::vector<TreeLeafInfo> leaves; };
+    struct TreeGroupRef {
+        QTreeWidgetItem* group;
+        std::vector<TreeLeafInfo> leaves;
+        // Subgroup items (bucketing inside an oversized group). Empty
+        // when the group is small enough to render leaves directly.
+        // Parallel to leaves via `TreeLeafInfo::subgroup_index`.
+        std::vector<QTreeWidgetItem*> subgroups;
+    };
     auto tree_refs = std::make_shared<std::vector<TreeGroupRef>>();
 
     auto rebuild_tree = [tree, item_info, all_groups, tree_refs](const std::string& needle) {
@@ -2686,11 +2846,45 @@ QWidget* build_tune_tab(
         if (tree_refs->empty()) {
             for (const auto& grp : *all_groups) {
                 TreeGroupRef ref;
-                char group_buf[128];
-                std::snprintf(group_buf, sizeof(group_buf), "%s  (%d)",
-                              grp.title.c_str(), static_cast<int>(grp.pages.size()));
+                // Group headers read as SECTION dividers: uppercase,
+                // bold, muted color, count in a dim trailing chip. The
+                // title drops the leading space for a cleaner left
+                // edge and gains letter-spacing via an extra space
+                // between characters — cheap way to echo the small-
+                // caps effect QSS can't do directly on a tree item.
+                std::string upper = grp.title;
+                for (auto& c : upper)
+                    c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                char group_buf[192];
+                std::snprintf(group_buf, sizeof(group_buf),
+                    "%s   \xc2\xb7 %d",
+                    upper.c_str(), static_cast<int>(grp.pages.size()));
                 ref.group = new QTreeWidgetItem(tree);
                 ref.group->setText(0, QString::fromUtf8(group_buf));
+                {
+                    QFont gf = ref.group->font(0);
+                    gf.setBold(true);
+                    gf.setPixelSize(tt::font_small);
+                    gf.setLetterSpacing(QFont::AbsoluteSpacing, 0.6);
+                    ref.group->setFont(0, gf);
+                }
+                ref.group->setForeground(0, QBrush(
+                    QColor(QString::fromUtf8(tt::text_muted))));
+                // Category accent on the group icon — a 4px vertical bar
+                // in the category's palette color. Thin enough to read
+                // as chrome, loud enough to give the tree a vertical
+                // "category palette" you can skim in one glance.
+                {
+                    const char* accent = group_accent_for_title(grp.title);
+                    QPixmap bar(16, 16);
+                    bar.fill(Qt::transparent);
+                    QPainter bp(&bar);
+                    bp.setPen(Qt::NoPen);
+                    bp.setBrush(QColor(QString::fromUtf8(accent)));
+                    bp.drawRoundedRect(5, 3, 4, 10, 1.2, 1.2);
+                    bp.end();
+                    ref.group->setIcon(0, QIcon(bar));
+                }
                 char group_tip[128];
                 std::snprintf(group_tip, sizeof(group_tip),
                               "%s \xe2\x80\x94 %d page%s",
@@ -2698,38 +2892,153 @@ QWidget* build_tune_tab(
                               static_cast<int>(grp.pages.size()),
                               grp.pages.size() == 1 ? "" : "s");
                 ref.group->setToolTip(0, QString::fromUtf8(group_tip));
-                for (const auto& pg : grp.pages) {
-                    char leaf_buf[256];
-                    std::snprintf(leaf_buf, sizeof(leaf_buf), "%s%s",
-                                  pg.display.c_str(), pg.type_tag.c_str());
-                    auto* leaf = new QTreeWidgetItem(ref.group);
-                    leaf->setText(0, QString::fromUtf8(leaf_buf));
-                    // Hover tooltip — shows the context description
-                    // from the page_context_hint mapping, or falls back
-                    // to the raw target key so every leaf has some hover
-                    // context (no silently-missing tooltips).
+
+                // ---- Subgroup split for oversized groups ---------------
+                // When a top-level group carries more than ~6 pages the
+                // flat list becomes a wall of text an operator has to
+                // read end-to-end. Splitting into keyword-scoped
+                // buckets (Tables / Injectors / Enrichment / ...) means
+                // every page is still reachable, but the tree reads as
+                // a two-level hierarchy the eye can skim.
+                const char* group_accent = group_accent_for_title(grp.title);
+                std::string gt_lower = grp.title;
+                for (auto& c : gt_lower)
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+                struct SubRule { const char* title; std::vector<const char*> keywords; };
+                std::vector<SubRule> rules;
+                if (grp.pages.size() > 6 && gt_lower.find("fuel") != std::string::npos) {
+                    rules = {
+                        {"Tables",           {"ve ", "vetable", "afr", "fuel table", "fueltable", "lambda"}},
+                        {"Injectors",        {"injector", "injection", "inj ", "deadtime"}},
+                        {"Staged",           {"staged", "stagedinj"}},
+                        {"Flex Fuel",        {"flex"}},
+                        {"Trims & Comp",     {"trim", "compens", "baro", "altitude"}},
+                        {"Required Fuel",    {"required", "reqfuel", "reqfuel"}},
+                        {"Parameters",       {}},  // catch-all bucket
+                    };
+                } else if (grp.pages.size() > 6 && gt_lower.find("ignition") != std::string::npos) {
+                    rules = {
+                        {"Timing Tables",    {"spark table", "advance table", "ignition table", "timing table"}},
+                        {"Dwell",            {"dwell"}},
+                        {"Knock",            {"knock"}},
+                        {"Rev Limiter",      {"rev lim", "rpm limit", "soft limit"}},
+                        {"Trigger",          {"trigger", "decoder"}},
+                        {"Parameters",       {}},
+                    };
+                } else if (grp.pages.size() > 6 && gt_lower.find("settings") != std::string::npos) {
+                    rules = {
+                        {"Engine",           {"engine", "cylinder", "displacement"}},
+                        {"Sensors",          {"sensor", "calibrat", "thermistor", "baro", "map ", "iat", "clt", "tps"}},
+                        {"Limits",           {"limit", "rev", "soft"}},
+                        {"Comms",            {"can ", "canbus", "serial", "comms"}},
+                        {"Outputs",          {"output", "programmable", "tacho", "fan", "oil"}},
+                        {"Parameters",       {}},
+                    };
+                }
+
+                auto pick_subgroup = [&](const std::string& display,
+                                        const std::string& target) -> int {
+                    if (rules.empty()) return -1;
+                    std::string hay = display + " " + target;
+                    for (auto& c : hay)
+                        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                    for (int i = 0; i < static_cast<int>(rules.size()); ++i) {
+                        const auto& r = rules[i];
+                        if (r.keywords.empty()) continue;  // catch-all handled later
+                        for (const char* kw : r.keywords) {
+                            if (hay.find(kw) != std::string::npos) return i;
+                        }
+                    }
+                    // Fall to catch-all ("Parameters") — always the last rule.
+                    for (int i = 0; i < static_cast<int>(rules.size()); ++i)
+                        if (rules[i].keywords.empty()) return i;
+                    return -1;
+                };
+
+                // Allocate subgroup items only for buckets that actually
+                // receive pages, so a rule that matches nothing doesn't
+                // leave an empty header in the tree.
+                std::vector<int> subgroup_count(rules.size(), 0);
+                std::vector<int> page_subgroup(grp.pages.size(), -1);
+                for (std::size_t i = 0; i < grp.pages.size(); ++i) {
+                    int idx = pick_subgroup(grp.pages[i].display, grp.pages[i].target);
+                    page_subgroup[i] = idx;
+                    if (idx >= 0) subgroup_count[idx]++;
+                }
+                // Create real subgroup items in rule order, mapping the
+                // rule index to a dense subgroup slot.
+                std::vector<int> rule_to_slot(rules.size(), -1);
+                for (int i = 0; i < static_cast<int>(rules.size()); ++i) {
+                    if (subgroup_count[i] <= 0) continue;
+                    auto* sg = new QTreeWidgetItem(ref.group);
+                    char sg_buf[96];
+                    std::snprintf(sg_buf, sizeof(sg_buf),
+                        "%s  \xc2\xb7 %d", rules[i].title, subgroup_count[i]);
+                    sg->setText(0, QString::fromUtf8(sg_buf));
+                    QFont sf = sg->font(0);
+                    sf.setBold(true);
+                    sf.setPixelSize(tt::font_small);
+                    sg->setFont(0, sf);
+                    sg->setForeground(0, QBrush(
+                        QColor(QString::fromUtf8(tt::text_dim))));
+                    rule_to_slot[i] = static_cast<int>(ref.subgroups.size());
+                    ref.subgroups.push_back(sg);
+                }
+
+                for (std::size_t i = 0; i < grp.pages.size(); ++i) {
+                    const auto& pg = grp.pages[i];
+                    int rule_idx = page_subgroup[i];
+                    QTreeWidgetItem* parent = ref.group;
+                    int subgroup_slot = -1;
+                    if (rule_idx >= 0 && rule_to_slot[rule_idx] >= 0) {
+                        subgroup_slot = rule_to_slot[rule_idx];
+                        parent = ref.subgroups[subgroup_slot];
+                    }
+                    auto* leaf = new QTreeWidgetItem(parent);
+                    std::string label_only = pg.display;
+                    leaf->setText(0, QString::fromUtf8(label_only.c_str()));
+                    char kind = 's';
+                    if (pg.type_tag.find("\xe2\x96\xa3") != std::string::npos) kind = 't';
+                    else if (pg.type_tag.find("\xe2\x8c\xa1") != std::string::npos) kind = 'c';
+                    leaf->setIcon(0, make_tree_leaf_icon(kind, group_accent));
                     const char* hint = page_context_hint(pg.display);
                     if (*hint)
                         leaf->setToolTip(0, QString::fromUtf8(hint));
                     else
                         leaf->setToolTip(0, QString::fromUtf8(pg.target.c_str()));
                     (*item_info)[leaf] = {pg.display, pg.target};
-                    ref.leaves.push_back({leaf, pg.display, pg.target, leaf_buf});
+                    ref.leaves.push_back({leaf, pg.display, pg.target,
+                                           label_only, subgroup_slot});
                 }
                 tree_refs->push_back(std::move(ref));
             }
             return;
         }
-        // Subsequent calls: show/hide.
+        // Subsequent calls: show/hide. Subgroup visibility is derived
+        // from its leaves — an empty subgroup hides so a narrow search
+        // doesn't leave phantom headers behind.
         for (auto& ref : *tree_refs) {
-            int visible = 0;
+            std::vector<int> per_subgroup_visible(ref.subgroups.size(), 0);
+            int total_visible = 0;
             for (auto& lf : ref.leaves) {
                 bool match = needle.empty() || icontains(lf.title, needle);
                 lf.item->setHidden(!match);
-                if (match) visible++;
+                if (match) {
+                    total_visible++;
+                    if (lf.subgroup_index >= 0 &&
+                        lf.subgroup_index < static_cast<int>(per_subgroup_visible.size()))
+                        per_subgroup_visible[lf.subgroup_index]++;
+                }
             }
-            ref.group->setHidden(visible == 0 && !needle.empty());
-            ref.group->setExpanded(!needle.empty() && visible > 0);
+            for (std::size_t i = 0; i < ref.subgroups.size(); ++i) {
+                ref.subgroups[i]->setHidden(
+                    per_subgroup_visible[i] == 0 && !needle.empty());
+                if (!needle.empty() && per_subgroup_visible[i] > 0)
+                    ref.subgroups[i]->setExpanded(true);
+            }
+            ref.group->setHidden(total_visible == 0 && !needle.empty());
+            ref.group->setExpanded(!needle.empty() && total_visible > 0);
         }
     };
 
@@ -3206,9 +3515,12 @@ QWidget* build_tune_tab(
         try { new_val = std::stod(editor->text().toStdString()); }
         catch (...) {
             // Flash the cell editor red briefly to signal invalid input.
-            editor->setStyleSheet(QString::fromUtf8(
-                "QLineEdit { background: #3d2020; color: #e08080; "
-                "border: 2px solid #d65a5a; }"));
+            char s[192];
+            std::snprintf(s, sizeof(s),
+                "QLineEdit { background: %s; color: %s; "
+                "border: 2px solid %s; }",
+                tt::bg_panel, tt::accent_danger, tt::accent_danger);
+            editor->setStyleSheet(QString::fromUtf8(s));
             QTimer::singleShot(800, editor, [editor]() { editor->hide(); });
             return;
         }
@@ -11391,33 +11703,46 @@ QWidget* build_setup_tab(
     }
 
     // ---- Hardware Setup Validation (sub-slice 7) ----
+    // Pull every parameter from the live edit service so the validator
+    // sees the operator's actual tune, not a hard-coded demo snapshot.
+    // Without this the card always showed the same "injOpen = 0.0"
+    // warning regardless of what was staged.
     {
         namespace hsv = tuner_core::hardware_setup_validation;
         std::vector<std::string> params = {
-            "dwellLim", "injOpen", "TrigPattern", "nTeeth",
+            "dwellLim", "dwellRun", "dwellcrank",
+            "injOpen", "TrigPattern", "nTeeth", "missingTeeth",
+            "egoType", "stoich",
         };
-        auto issues = hsv::validate(params, [](std::string_view name) -> std::optional<double> {
-            if (name == "dwellLim") return 5.0;
-            if (name == "injOpen") return 0.0;  // triggers warning
-            if (name == "TrigPattern") return 0.0;
-            if (name == "nTeeth") return 36.0;
-            return std::nullopt;
-        });
+        auto issues = hsv::validate(params,
+            [edit_svc](std::string_view name) -> std::optional<double> {
+                if (!edit_svc) return std::nullopt;
+                auto* tv = edit_svc->get_value(std::string(name));
+                if (tv == nullptr) return std::nullopt;
+                if (std::holds_alternative<double>(tv->value))
+                    return std::get<double>(tv->value);
+                return std::nullopt;
+            });
+        const char* status_card_title = "Hardware Validation";
         if (issues.empty()) {
             layout->addWidget(make_info_card(
-                "Hardware Validation",
-                "All validation rules passed.", tt::accent_ok));
+                status_card_title,
+                has_tune
+                    ? "All validation rules passed against the loaded tune."
+                    : "No tune loaded \xe2\x80\x94 run the Engine Setup Wizard "
+                      "to generate a starter tune before validating.",
+                has_tune ? tt::accent_ok : tt::text_muted));
         } else {
-            char buf[512];
+            char buf[1024];
             int off = 0;
             for (const auto& issue : issues) {
                 if (off > 0) off += std::snprintf(buf + off, sizeof(buf) - off, "\n");
-                off += std::snprintf(buf + off, sizeof(buf) - off, "%s",
-                                      issue.message.c_str());
+                off += std::snprintf(buf + off, sizeof(buf) - off,
+                    "\xe2\x80\xa2 %s", issue.message.c_str());
                 if (off >= static_cast<int>(sizeof(buf) - 1)) break;
             }
             layout->addWidget(make_info_card(
-                "Hardware Validation", buf, tt::accent_warning));
+                status_card_title, buf, tt::accent_warning));
         }
     }
 
@@ -11452,7 +11777,6 @@ QWidget* build_setup_tab(
         sensor_header->setStyleSheet(QString::fromUtf8("margin-top: 8px;"));
         layout->addWidget(sensor_header);
 
-        // Simulated sensor pages with typical Speeduino parameters.
         ssc::Page sensor_page;
         sensor_page.parameters = {
             {"egoType", "O2 Sensor Type", {}, {}},
@@ -11462,14 +11786,17 @@ QWidget* build_setup_tab(
             {"mapMin", "MAP Sensor Min", {}, {}},
             {"mapMax", "MAP Sensor Max", {}, {}},
         };
-        std::map<std::string, double> sensor_vals = {
-            {"egoType", 2.0}, {"stoich", 14.7},
-            {"tpsMin", 12.0}, {"tpsMax", 850.0},
-            {"mapMin", 10.0}, {"mapMax", 260.0},
-        };
-        ssc::ValueGetter svg = [&sensor_vals](const std::string& name) -> std::optional<double> {
-            auto it = sensor_vals.find(name);
-            return (it != sensor_vals.end()) ? std::optional(it->second) : std::nullopt;
+        // Pull live tune values via the edit service — no more frozen
+        // demo snapshot so the card reflects the operator's actual
+        // staged sensor config.
+        ssc::ValueGetter svg =
+            [edit_svc](const std::string& name) -> std::optional<double> {
+            if (!edit_svc) return std::nullopt;
+            auto* tv = edit_svc->get_value(name);
+            if (!tv) return std::nullopt;
+            if (std::holds_alternative<double>(tv->value))
+                return std::get<double>(tv->value);
+            return std::nullopt;
         };
         ssc::OptionLabelGetter solg = [](const ssc::Parameter&) -> std::string { return ""; };
         auto checks = ssc::validate({sensor_page}, svg, solg);
@@ -11492,19 +11819,23 @@ QWidget* build_setup_tab(
         gen_header->setStyleSheet(QString::fromUtf8("margin-top: 8px;"));
         layout->addWidget(gen_header);
 
-        // Use the operator context from the SETUP demo above.
+        // Operator context read from the loaded tune where possible;
+        // the non-tune-backed fields (cam duration, head flow class,
+        // induction topology) still come from the wizard's declared
+        // context defaults until they get their own scalar-backed
+        // storage. Everything tune-backed uses the live edit service
+        // so the card reflects the operator's real setup.
         tuner_core::operator_engine_context::OperatorEngineContext op_ctx;
-        op_ctx.displacement_cc = 2998.0;
-        op_ctx.cylinder_count = 6;
-        op_ctx.compression_ratio = 10.5;
+        op_ctx.displacement_cc = disp;
+        op_ctx.cylinder_count = ncyl;
+        op_ctx.compression_ratio = cr;
         op_ctx.cam_duration_deg = 280.0;
         op_ctx.head_flow_class = "race_ported";
         op_ctx.forced_induction_topology =
             tuner_core::generator_types::ForcedInductionTopology::SINGLE_TURBO;
-        op_ctx.boost_target_kpa = 200.0;
+        op_ctx.boost_target_kpa = boost_kpa;
         op_ctx.intercooler_present = true;
 
-        // Simulated tune pages with some values populated.
         hsgc::Page gen_page;
         gen_page.parameters = {
             {"injFlow1", "Injector Flow Rate"},
@@ -11513,16 +11844,17 @@ QWidget* build_setup_tab(
             {"stoich", "Stoichiometric AFR"},
             {"dwellRun", "Running Dwell"},
         };
-        std::map<std::string, double> gen_vals = {
-            {"injFlow1", 550.0}, {"reqFuel", 8.5}, {"rpmHard", 7200.0},
-            {"stoich", 14.7}, {"dwellRun", 3.5},
-        };
-        hsgc::ValueGetter gen_gv = [](const std::string& name, void* user) -> std::optional<double> {
-            auto* m = static_cast<std::map<std::string, double>*>(user);
-            auto it = m->find(name);
-            return (it != m->end()) ? std::optional(it->second) : std::nullopt;
-        };
-        auto gen_ctx = hsgc::build({gen_page}, gen_gv, &gen_vals, &op_ctx);
+        hsgc::ValueGetter gen_gv =
+            [](const std::string& name, void* user) -> std::optional<double> {
+                auto* svc = static_cast<tuner_core::local_tune_edit::EditService*>(user);
+                if (!svc) return std::nullopt;
+                auto* tv = svc->get_value(name);
+                if (!tv) return std::nullopt;
+                if (std::holds_alternative<double>(tv->value))
+                    return std::get<double>(tv->value);
+                return std::nullopt;
+            };
+        auto gen_ctx = hsgc::build({gen_page}, gen_gv, edit_svc.get(), &op_ctx);
 
         // Show what's ready and what's missing.
         char gen_buf[512];
