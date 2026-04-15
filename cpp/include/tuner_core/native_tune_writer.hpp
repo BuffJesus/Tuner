@@ -30,6 +30,11 @@ struct TunerTune {
     std::vector<std::pair<std::string, Value>> values;
     // Optional operator context.
     std::optional<operator_engine_context::OperatorEngineContext> operator_context;
+    // Multi-tune slot metadata (mirrors NativeTune v1.1). Emitted only
+    // when set; readers that don't understand the keys fall back to
+    // slot 0 implicitly.
+    std::optional<int> slot_index;
+    std::optional<std::string> slot_name;
 };
 
 /// Export a TunerTune to JSON string.

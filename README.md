@@ -6,7 +6,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/C%2B%2B-20-blue?style=flat-square" alt="C++20" />
   <img src="https://img.shields.io/badge/Qt-6.7-green?style=flat-square" alt="Qt 6.7" />
-  <img src="https://img.shields.io/badge/tests-1395%20passing-brightgreen?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/tests-1484%20passing-brightgreen?style=flat-square" alt="Tests" />
   <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="MIT" />
 </p>
 
@@ -18,14 +18,15 @@ A native C++ Qt 6 desktop workstation for tuning [Speeduino](https://speeduino.c
 
 | | |
 |---|---|
-| **Tune** | Edit scalars, tables, curves. Staged changes with review, undo, write-to-RAM, burn-to-flash. |
-| **Live** | Configurable gauge dashboard with drag-and-drop, fullscreen (F11), 40+ status indicators. |
-| **Analyze** | Import datalogs or run live VE sessions. Accumulate corrections, smooth, diagnose, apply. |
+| **Tune** | Edit scalars, tables, curves. Staged changes with review, undo, write-to-RAM, burn-to-flash. Definition-aware min/max clamping on every edit path. Staged-change visual diff on tables. |
+| **Live** | Configurable gauge dashboard with drag-and-drop, fullscreen (F11), 40+ status indicators. Zone-entry alert toasts, auto-fade recovery. |
+| **Analyze** | Import datalogs or run live VE sessions. Plain-language summary + next-steps, coverage heatmap, per-cell correction grid. Accumulate → smooth → diagnose → apply. |
 | **Log** | Real-time capture to CSV. Multi-profile with add/delete/switch. Replay with row navigation. |
 | **Flash** | Board-aware firmware flashing (AVRDUDE / Teensy CLI / dfu-util). Progress bar + output log. |
-| **Setup** | 6-step engine wizard: Engine, Induction, Injectors, Trigger & Ignition, Sensors, Review. |
+| **Setup** | 6-step engine wizard. Generator cards with traffic-light confidence badges on every assumption. Compressor-map modeling with surge / choke / off-map risk. |
 | **Diagnose** | Trigger log capture (tooth / composite) — CSV import or live from ECU. Analysis pipeline. |
-| **Connect** | Serial (USB) or TCP/WiFi via Airbear. EcuHub UDP auto-discovery. HTTP API on port 8080. |
+| **Dyno** | Virtual dyno — estimated torque/HP curve from ECU sensor data during a WOT pull. Before/after overlay for tune comparison. |
+| **Connect** | Serial (USB) or TCP/WiFi via Airbear. EcuHub UDP + mDNS auto-discovery. Versioned HTTP API (`/api/v1/…`) on port 8080. |
 
 ## Supported Hardware
 
@@ -75,19 +76,22 @@ cmake --build build/pi --target tuner_app
 ```bash
 cmake --build build/cpp --target tuner_core_tests
 ./build/cpp/tuner_core_tests
-# 1395 tests · 10899 assertions · 0 failures
+# 1484 tests · 11150 assertions · 0 failures
 ```
 </details>
 
 ## Native File Formats
 
-The app uses its own JSON5-based file formats. Legacy INI/MSQ files can be imported once via **File > Import Legacy INI**.
+The app uses its own JSON5-based file formats. Legacy INI/MSQ files can still be opened directly (the app synthesises the layout for v1 semantic `.tunerdef` files that lack `menus`/`dialogs`/`table_editors`).
 
 | Extension | Schema | Purpose |
 |-----------|--------|---------|
-| `.tunerdef` | JSON5 v2.0 | Firmware definition — parameters, gauges, channels, commands, menus |
-| `.tuner` | JSON5 v1.0 | Tune data — all parameter values |
-| `.tunerproj` | JSON | Project metadata |
+| `.tunerdef` | JSON5 v1.0 / v2.0 | Firmware definition — parameters, gauges, channels, commands, menus. v2 carries the full legacy layout; v1 is semantic-only and auto-synthesises layout on load. |
+| `.tuner` | JSON v1.1 | Tune data — parameter values + optional `slot_index` / `slot_name` for multi-tune setups |
+| `.tunerproj` | JSON | Project metadata — definition path, tune path, active settings, signature |
+
+**File menu** maps to the project-oriented workflow:
+`New Project...` · `Open Project...` (Ctrl+O) · `Save Tune...` (Ctrl+S) · `Save Project...` (Ctrl+Shift+S)
 
 ```json5
 // Example: native tune file with operator comments
@@ -107,16 +111,16 @@ The app uses its own JSON5-based file formats. Legacy INI/MSQ files can be impor
 ```
 cpp/
   app/
-    main.cpp        Qt 6 application shell (~12,500 lines)
+    main.cpp        Qt 6 application shell (~14,500 lines)
     theme.hpp       Dark theme token system (40+ tokens)
   include/
     tuner_core/     130+ public headers
-  src/              173 service implementations
+  src/              174 service implementations
   tests/            60+ doctest suites
   cmake/            Cross-compile toolchains
 ```
 
-Built on the `tuner_core` static library — 98 services covering parsing, protocol, analysis, generation, and visualization. The library has zero Qt dependency; the app is the only Qt consumer.
+Built on the `tuner_core` static library — ~100 services covering parsing, protocol, analysis, generation, visualization, virtual dyno, compressor-map modeling. The library has zero Qt dependency; the app is the only Qt consumer.
 
 ## Ecosystem
 

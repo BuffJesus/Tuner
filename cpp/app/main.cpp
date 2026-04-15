@@ -2150,7 +2150,9 @@ QWidget* build_tune_tab(
     std::shared_ptr<tuner_core::local_tune_edit::EditService> shared_edit_svc,
     std::shared_ptr<EcuConnection> ecu_conn = nullptr,
     std::shared_ptr<std::string> out_signature = nullptr,
-    StagedChangedCallback on_staged_changed = nullptr) {
+    StagedChangedCallback on_staged_changed = nullptr,
+    std::shared_ptr<std::optional<int>> out_slot_index = nullptr,
+    std::shared_ptr<std::optional<std::string>> out_slot_name = nullptr) {
     auto* container = new QWidget;
     auto* outer = new QVBoxLayout(container);
     outer->setContentsMargins(tt::space_lg, tt::space_lg, tt::space_lg, tt::space_lg);
@@ -2537,6 +2539,9 @@ QWidget* build_tune_tab(
                 if (out_signature) *out_signature = tune_file->signature;
                 // Slot metadata — surface in the project bar so the
                 // operator always sees which slot this tune targets.
+                // Out-params mirror the loaded values back to the
+                // caller so save_as_native_handler can round-trip
+                // them into the next .tuner write.
                 if (native_tune.slot_index.has_value()) {
                     char slot_buf[96];
                     if (native_tune.slot_name.has_value()
@@ -2553,6 +2558,8 @@ QWidget* build_tune_tab(
                 } else {
                     slot_badge_text->clear();
                 }
+                if (out_slot_index) *out_slot_index = native_tune.slot_index;
+                if (out_slot_name)  *out_slot_name  = native_tune.slot_name;
                 for (const auto& [name, val] : native_tune.values) {
                     lte::TuneValue tv;
                     tv.name = name;
@@ -2637,7 +2644,7 @@ QWidget* build_tune_tab(
                 "No tune loaded for this project.  "
                 "\xc2\xb7  Run the <b>Engine Setup Wizard</b> (Setup tab) "
                 "to generate a base tune from your engine specs.  "
-                "\xc2\xb7  Or use <b>File \xe2\x86\x92 Open Tune...</b> "
+                "\xc2\xb7  Or use <b>File \xe2\x86\x92 Open Project...</b> "
                 "to load an existing .tuner or .msq.");
         } else {
             std::snprintf(msg, sizeof(msg),
@@ -8091,7 +8098,7 @@ QWidget* build_flash_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
         } else {
             std::snprintf(fw_desc, sizeof(fw_desc),
                 "Load a project first to get firmware recommendations.\n"
-                "Use File \xe2\x86\x92 Open Tune to load an INI + MSQ pair.");
+                "Use File \xe2\x86\x92 Open Project to load a .tunerproj or tune.");
             set_info_card_accent(firmware_card, tt::accent_primary);
         }
         firmware_body_label->setText(QString::fromUtf8(fw_desc));
@@ -13068,7 +13075,10 @@ public:
         debug_log("TunerMainWindow building tune tab");
         auto shared_edit_svc = std::make_shared<tuner_core::local_tune_edit::EditService>();
         auto tune_signature = std::make_shared<std::string>();
-        stack->addWidget(build_tune_tab(shared_workspace, shared_edit_svc, ecu_conn, tune_signature, refresh_tune_badge));
+        auto tune_slot_index = std::make_shared<std::optional<int>>();
+        auto tune_slot_name  = std::make_shared<std::optional<std::string>>();
+        stack->addWidget(build_tune_tab(shared_workspace, shared_edit_svc, ecu_conn,
+            tune_signature, refresh_tune_badge, tune_slot_index, tune_slot_name));
         {
             auto proj = active_project();
             *project_name = proj.name.empty() ? "Speeduino Project" : proj.name;
@@ -13117,12 +13127,17 @@ public:
         }
         // tune_signature is populated by build_tune_tab above.
         auto save_as_native_handler = [this, shared_edit_svc, save_path, tune_signature,
-                                       shared_workspace, refresh_tune_badge]() {
+                                       shared_workspace, refresh_tune_badge,
+                                       tune_slot_index, tune_slot_name]() {
             namespace ntw = tuner_core::native_tune_writer;
             // Build the tune from the live edit service.
             auto tune = ntw::from_edit_service(
                 *shared_edit_svc,
                 tune_signature->empty() ? "speeduino 202501-T41" : *tune_signature);
+            // Round-trip slot metadata captured at load time so
+            // saving doesn't silently strip a multi-tune slot label.
+            tune.slot_index = *tune_slot_index;
+            tune.slot_name  = *tune_slot_name;
             auto json = ntw::export_json(tune);
 
             // Determine file path — reuse last path or ask.
@@ -14077,7 +14092,7 @@ public:
                 dlg->deleteLater();
             });
 
-            auto* open_action = file_menu->addAction("&Open Tune...");
+            auto* open_action = file_menu->addAction("&Open Project...");
             open_action->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_O));
             open_action->setShortcutContext(Qt::ApplicationShortcut);
             QObject::connect(open_action, &QAction::triggered,
@@ -14085,9 +14100,9 @@ public:
                 debug_log("File/Open triggered");
                 QString path = QFileDialog::getOpenFileName(
                     this,
-                    "Open Tune File",
+                    "Open Project",
                     QString(),
-                    "Tune Files (*.tuner *.msq);;Native Tune (*.tuner);;Speeduino Tune (*.msq);;Project (*.tunerproj);;All Files (*)");
+                    "Tuner Project (*.tunerproj);;Native Tune (*.tuner);;Speeduino Tune (*.msq);;All Files (*)");
                 debug_log("File/Open selected=\"" + path.toStdString() + "\"");
                 if (path.isEmpty()) return;
                 if (shared_workspace->staged_count() > 0) {
