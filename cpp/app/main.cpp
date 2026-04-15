@@ -2240,7 +2240,9 @@ void build_channel_layouts(
 // -----------------------------------------------------------------------
 
 static QIcon make_tree_leaf_icon(char kind, const char* accent_hex) {
-    QPixmap pm(16, 16);
+    // 18×18 to match QTreeWidget::setIconSize so paint strokes stay crisp
+    // (scaling blurs the thin lines on these glyphs).
+    QPixmap pm(18, 18);
     pm.fill(Qt::transparent);
     QPainter p(&pm);
     p.setRenderHint(QPainter::Antialiasing);
@@ -2248,31 +2250,41 @@ static QIcon make_tree_leaf_icon(char kind, const char* accent_hex) {
     QColor dim(QString::fromUtf8(tt::bg_inset));
 
     if (kind == 't') {
-        // Table — 3x3 grid of tiny cells.
+        // Table — 2×2 grid, clear cell separation. Accent tint on the
+        // filled cells so the icon picks up the parent group's color.
         p.setPen(Qt::NoPen);
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c) {
-                int x = 2 + c * 4;
-                int y = 4 + r * 3;
-                // Center cell gets the accent; surrounding cells stay dim
-                // so the icon reads as "data grid".
-                p.setBrush((r == 1 && c == 1) ? fill : dim);
-                p.drawRoundedRect(x, y, 3, 2, 0.5, 0.5);
+        const int s = 6;   // cell size
+        const int g = 1;   // gap
+        const int x0 = (18 - (s * 2 + g)) / 2;
+        const int y0 = (18 - (s * 2 + g)) / 2;
+        for (int r = 0; r < 2; ++r)
+            for (int c = 0; c < 2; ++c) {
+                int x = x0 + c * (s + g);
+                int y = y0 + r * (s + g);
+                // Alternating fill for a subtle checker — reads as "grid".
+                p.setBrush(((r + c) % 2 == 0) ? fill : dim);
+                p.drawRoundedRect(x, y, s, s, 1.2, 1.2);
             }
     } else if (kind == 'c') {
-        // Curve — a short rising line, signals a 1D look-up.
-        p.setPen(QPen(fill, 1.8));
-        p.drawLine(3, 11, 7, 8);
-        p.drawLine(7, 8, 13, 5);
+        // Curve — a rising sweep with endpoint dots. Thicker stroke
+        // than before so the line reads at 18px.
+        QPainterPath path;
+        path.moveTo(3, 14);
+        path.cubicTo(7, 14, 9, 6, 15, 4);
+        p.setPen(QPen(fill, 2.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p.drawPath(path);
         p.setPen(Qt::NoPen);
         p.setBrush(fill);
-        p.drawEllipse(QPointF(3, 11), 1.4, 1.4);
-        p.drawEllipse(QPointF(13, 5), 1.4, 1.4);
+        p.drawEllipse(QPointF(3, 14), 2.0, 2.0);
+        p.drawEllipse(QPointF(15, 4), 2.0, 2.0);
     } else {
-        // Scalar — a thin horizontal chip, signals "a single value".
+        // Scalar — a chunky horizontal pill, signals "one value".
         p.setPen(Qt::NoPen);
         p.setBrush(fill);
-        p.drawRoundedRect(3, 7, 10, 2, 1.0, 1.0);
+        p.drawRoundedRect(3, 8, 12, 3, 1.5, 1.5);
+        // A tiny value dot on the right so the icon isn't just a flat bar.
+        p.setBrush(dim);
+        p.drawEllipse(QPointF(14.5, 9.5), 1.2, 1.2);
     }
     p.end();
     return QIcon(pm);
@@ -2421,17 +2433,17 @@ QWidget* build_tune_tab(
     auto* tree = new QTreeWidget;
     tree->setHeaderHidden(true);
     tree->setAnimated(true);
-    tree->setIndentation(tt::space_md);
-    tree->setUniformRowHeights(false);
+    tree->setIndentation(22);                       // room for the expand chevron
     tree->setFrameShape(QFrame::NoFrame);
-    tree->setExpandsOnDoubleClick(false);
-    // Expose a hit area to the left of each row so the hover/select
-    // background hugs the widget edge instead of leaving a dead strip.
-    tree->setIndentation(14);
+    tree->setExpandsOnDoubleClick(true);
+    tree->setRootIsDecorated(true);                 // show default expand arrows
+    tree->setIconSize(QSize(18, 18));
     {
         // Themed tree stylesheet — hover + selected + rounded rows +
-        // muted default text so leaves read as "below the hero level"
-        // against the right-pane content that matters more.
+        // muted default text. Deliberately leaves the QTreeWidget::branch
+        // block alone so Qt still draws its default expand chevrons;
+        // overriding that block previously killed the visual cue that a
+        // group could be opened.
         char ts[1024];
         std::snprintf(ts, sizeof(ts),
             "QTreeWidget { background: %s; border: none; outline: none; "
@@ -2439,9 +2451,7 @@ QWidget* build_tune_tab(
             "QTreeWidget::item { padding: %dpx %dpx; margin: 1px %dpx; "
             "  border-radius: %dpx; color: %s; }"
             "QTreeWidget::item:hover { background: %s; color: %s; }"
-            "QTreeWidget::item:selected { background: %s; color: %s; }"
-            "QTreeWidget::branch { background: transparent; }"
-            "QTreeWidget::branch:selected { background: transparent; }",
+            "QTreeWidget::item:selected { background: %s; color: %s; }",
             tt::bg_base,
             tt::font_body, tt::space_xs,
             tt::space_xs + 1, tt::space_sm, tt::space_xs,
@@ -2712,6 +2722,31 @@ QWidget* build_tune_tab(
     {
         bool& loaded = tune_loaded;
         std::filesystem::path user_tune = current_project->msq_path;
+        // Auto-demo fallback — if the project has no tune path at all
+        // (fresh install, or a New Project accepted with `(create empty)`
+        // before we shipped the base-tune pre-fill), load the bundled
+        // base tune so the editor isn't blank. This is the "load a
+        // demo so the UI isn't empty" pattern, but constrained to the
+        // case where the operator has NOT explicitly picked a file —
+        // we never overwrite an operator-chosen tune path.
+        if (user_tune.empty()) {
+            const char* base_tune_candidates[] = {
+                "tests/fixtures/native/speeduino-dropbear-v2.0.1-base-tune.tuner",
+                "../tests/fixtures/native/speeduino-dropbear-v2.0.1-base-tune.tuner",
+                "../../tests/fixtures/native/speeduino-dropbear-v2.0.1-base-tune.tuner",
+                "../../../tests/fixtures/native/speeduino-dropbear-v2.0.1-base-tune.tuner",
+                "D:/Documents/JetBrains/Python/Tuner/tests/fixtures/native/speeduino-dropbear-v2.0.1-base-tune.tuner",
+            };
+            for (const char* c : base_tune_candidates) {
+                if (std::filesystem::exists(c)) {
+                    user_tune = c;
+                    std::printf("[tune] no project tune set \xe2\x80\x94 "
+                        "loading bundled base tune: %s\n", c);
+                    std::fflush(stdout);
+                    break;
+                }
+            }
+        }
         std::string ext;
         bool exists_ok = !user_tune.empty() && std::filesystem::exists(user_tune);
         if (exists_ok) {
@@ -2721,6 +2756,9 @@ QWidget* build_tune_tab(
         }
         debug_log("build_tune_tab user_tune=\"" + user_tune.string()
             + "\" ext=\"" + ext + "\" exists=" + (exists_ok ? "1" : "0"));
+        std::printf("[tune] project tune path=\"%s\" ext=\"%s\" exists=%d\n",
+            user_tune.string().c_str(), ext.c_str(), exists_ok ? 1 : 0);
+        std::fflush(stdout);
 
         if (exists_ok && ext == ".tuner") {
             try {
@@ -2774,6 +2812,9 @@ QWidget* build_tune_tab(
                 push_recent_project(*current_project);
                 save_current_project(*current_project);
                 refresh_project_label();
+                std::printf("[tune] Loaded native .tuner: %s (%zu values)\n",
+                    user_tune.string().c_str(), native_tune.values.size());
+                std::fflush(stdout);
                 debug_log("build_tune_tab loaded native values="
                     + std::to_string(native_tune.values.size()));
             } catch (const std::exception& e) {
@@ -2813,6 +2854,9 @@ QWidget* build_tune_tab(
                 push_recent_project(*current_project);
                 save_current_project(*current_project);
                 refresh_project_label();
+                std::printf("[tune] Loaded .msq: %s (%zu constants)\n",
+                    user_tune.string().c_str(), msq.constants.size());
+                std::fflush(stdout);
                 debug_log("build_tune_tab loaded msq constants="
                     + std::to_string(msq.constants.size()));
             } catch (const std::exception& e) {
@@ -2914,12 +2958,12 @@ QWidget* build_tune_tab(
                 // "category palette" you can skim in one glance.
                 {
                     const char* accent = group_accent_for_title(grp.title);
-                    QPixmap bar(16, 16);
+                    QPixmap bar(18, 18);
                     bar.fill(Qt::transparent);
                     QPainter bp(&bar);
                     bp.setPen(Qt::NoPen);
                     bp.setBrush(QColor(QString::fromUtf8(accent)));
-                    bp.drawRoundedRect(5, 3, 4, 10, 1.2, 1.2);
+                    bp.drawRoundedRect(6, 3, 5, 12, 1.5, 1.5);
                     bp.end();
                     ref.group->setIcon(0, QIcon(bar));
                 }
@@ -3050,6 +3094,15 @@ QWidget* build_tune_tab(
                                            label_only, subgroup_slot});
                 }
                 tree_refs->push_back(std::move(ref));
+            }
+            // First-build expansion: open every top-level group (and
+            // every subgroup under one) by default so first-time
+            // operators see the whole surface. The session-restore
+            // pass below will override this with per-group state once
+            // the operator has expanded/collapsed anything manually.
+            for (auto& ref : *tree_refs) {
+                ref.group->setExpanded(true);
+                for (auto* sg : ref.subgroups) sg->setExpanded(true);
             }
             return;
         }

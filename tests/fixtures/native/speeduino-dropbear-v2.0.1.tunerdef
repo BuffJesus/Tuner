@@ -116187,8 +116187,1390 @@
       ]
     }
   ],
-  "table_editors": [],
-  "curve_editors": [],
+  "table_editors": [
+    {
+      "table_id": "veTable1Tbl",
+      "map_id": "veTable1Map",
+      "title": "VE Table",
+      "page": 2,
+      "x_bins": "rpmBins",
+      "y_bins": "fuelLoadBins",
+      "z_bins": "veTable",
+      "x_channel": "rpm",
+      "y_channel": "fuelLoad",
+      "x_label": "RPM",
+      "y_label": "Fuel Load: ",
+      "topic_help": "http://wiki.speeduino.com/en/configuration/VE_table",
+      "grid_height": 2.0,
+      "grid_orient": [
+        250.0,
+        0.0,
+        340.0
+      ],
+      "up_label": "(RICHER)",
+      "down_label": "(LEANER)"
+    },
+    {
+      "table_id": "fuelTable2Tbl",
+      "map_id": "fuel2Map",
+      "title": "Fuel Table 2",
+      "page": 11,
+      "x_bins": "fuelRPM2Bins",
+      "y_bins": "fuelLoad2Bins",
+      "z_bins": "veTable2",
+      "x_channel": "rpm",
+      "y_channel": "fuelLoad2",
+      "x_label": "RPM",
+      "y_label": "Fuel Load: ",
+      "topic_help": "http://wiki.speeduino.com/en/configuration/VE_table#secondary-fuel-table",
+      "grid_height": 2.0,
+      "grid_orient": [
+        250.0,
+        0.0,
+        340.0
+      ],
+      "up_label": "(RICHER)",
+      "down_label": "(LEANER)"
+    },
+    {
+      "table_id": "sparkTbl",
+      "map_id": "sparkMap",
+      "title": "Ignition Advance Table",
+      "page": 3,
+      "x_bins": "rpmBins2",
+      "y_bins": "mapBins1",
+      "z_bins": "advTable1",
+      "x_channel": "rpm",
+      "y_channel": "ignLoad",
+      "x_label": "RPM",
+      "y_label": "Ignition Load: ",
+      "topic_help": null,
+      "grid_height": 3.0,
+      "grid_orient": null,
+      "up_label": "ADVANCING",
+      "down_label": "RETARDING"
+    },
+    {
+      "table_id": "spark2Tbl",
+      "map_id": "spark2Map",
+      "title": "Second Ignition Advance Table",
+      "page": 14,
+      "x_bins": "rpmBins3",
+      "y_bins": "mapBins2",
+      "z_bins": "advTable2",
+      "x_channel": "rpm",
+      "y_channel": "ignLoad2",
+      "x_label": "RPM",
+      "y_label": "Ignition Load: ",
+      "topic_help": null,
+      "grid_height": 3.0,
+      "grid_orient": null,
+      "up_label": "ADVANCING",
+      "down_label": "RETARDING"
+    },
+    {
+      "table_id": "afrTable1Tbl",
+      "map_id": "afrTable1Map",
+      "title": "AFR Table",
+      "page": 5,
+      "x_bins": "rpmBinsAFR",
+      "y_bins": "loadBinsAFR",
+      "z_bins": "afrTable",
+      "x_channel": "rpm",
+      "y_channel": "fuelLoad",
+      "x_label": null,
+      "y_label": null,
+      "topic_help": null,
+      "grid_height": 1.0,
+      "grid_orient": [
+        250.0,
+        0.0,
+        340.0
+      ],
+      "up_label": "RICHER",
+      "down_label": "LEANER"
+    },
+    {
+      "table_id": "lambdaTable1Tbl",
+      "map_id": "lambdaTable1Map",
+      "title": "Lambda Table",
+      "page": 5,
+      "x_bins": "rpmBinsAFR",
+      "y_bins": "loadBinsAFR",
+      "z_bins": "lambdaTable",
+      "x_channel": "rpm",
+      "y_channel": "fuelLoad",
+      "x_label": null,
+      "y_label": null,
+      "topic_help": null,
+      "grid_height": 1.0,
+      "grid_orient": [
+        250.0,
+        0.0,
+        340.0
+      ],
+      "up_label": "RICHER",
+      "down_label": "LEANER"
+    },
+    {
+      "table_id": "boostTbl",
+      "map_id": "boostMap",
+      "title": "Boost Duty / Target",
+      "page": 7,
+      "x_bins": "rpmBinsBoost",
+      "y_bins": "tpsBinsBoost",
+      "z_bins": "boostTable",
+      "x_channel": "rpm",
+      "y_channel": "throttle",
+      "x_label": null,
+      "y_label": null,
+      "topic_help": null,
+      "grid_height": 3.0,
+      "grid_orient": null,
+      "up_label": "HIGHER",
+      "down_label": "LOWER"
+    },
+    {
+      "table_id": "boostDCLupTbl",
+      "map_id": "boostDutyLookup",
+      "title": "Base duty for closed loop",
+      "page": 7,
+      "x_bins": "rpmBinsDutyLookup",
+      "y_bins": "loadBinsDutyLookup",
+      "z_bins": "boostTableDutyLookup",
+      "x_channel": "rpm",
+      "y_channel": "boostTarget",
+      "x_label": null,
+      "y_label": null,
+      "topic_help": null,
+      "grid_height": 3.0,
+      "grid_orient": null,
+      "up_label": "HIGHER",
+      "down_label": "LOWER"
+    },
+    {
+      "table_id": "vvtTbl",
+      "map_id": "vvtMap",
+      "title": "VVT control Table",
+      "page": 7,
+      "x_bins": "rpmBinsVVT",
+      "y_bins": "loadBinsVVT",
+      "z_bins": "vvtTable",
+      "x_channel": "rpm",
+      "y_channel": "vvtLoad",
+      "x_label": "RPM",
+      "y_label": "VVT Load: ",
+      "topic_help": null,
+      "grid_height": 3.0,
+      "grid_orient": null,
+      "up_label": "HIGHER",
+      "down_label": "LOWER"
+    },
+    {
+      "table_id": "vvt2Tbl",
+      "map_id": "vvt2Map",
+      "title": "VVT2 control Table",
+      "page": 12,
+      "x_bins": "rpmBinsVVT2",
+      "y_bins": "loadBinsVVT2",
+      "z_bins": "vvt2Table",
+      "x_channel": "rpm",
+      "y_channel": "vvtLoad",
+      "x_label": "RPM",
+      "y_label": "VVT Load: ",
+      "topic_help": null,
+      "grid_height": 3.0,
+      "grid_orient": null,
+      "up_label": "HIGHER",
+      "down_label": "LOWER"
+    },
+    {
+      "table_id": "wmiTbl",
+      "map_id": "wmiMapMap",
+      "title": "WMI control Table",
+      "page": 12,
+      "x_bins": "rpmBinsWMI",
+      "y_bins": "mapBinsWMI",
+      "z_bins": "wmiTable",
+      "x_channel": "rpm",
+      "y_channel": "map",
+      "x_label": "RPM",
+      "y_label": "WMI Load: ",
+      "topic_help": null,
+      "grid_height": 3.0,
+      "grid_orient": null,
+      "up_label": "HIGHER",
+      "down_label": "LOWER"
+    },
+    {
+      "table_id": "stagingTbl",
+      "map_id": "stagingMap",
+      "title": "Fuel Staging Table",
+      "page": 7,
+      "x_bins": "rpmBinsStaging",
+      "y_bins": "loadBinsStaging",
+      "z_bins": "stagingTable",
+      "x_channel": "rpm",
+      "y_channel": "fuelLoad",
+      "x_label": null,
+      "y_label": null,
+      "topic_help": null,
+      "grid_height": 3.0,
+      "grid_orient": null,
+      "up_label": "HIGHER",
+      "down_label": "LOWER"
+    },
+    {
+      "table_id": "fuelTrimTable1Tbl",
+      "map_id": "fuelTrimTable1Map",
+      "title": "Fuel trim Table 1",
+      "page": 8,
+      "x_bins": "fuelTrim1rpmBins",
+      "y_bins": "fuelTrim1loadBins",
+      "z_bins": "fuelTrim1Table",
+      "x_channel": "rpm",
+      "y_channel": "fuelLoad",
+      "x_label": null,
+      "y_label": null,
+      "topic_help": null,
+      "grid_height": 2.0,
+      "grid_orient": [
+        250.0,
+        0.0,
+        340.0
+      ],
+      "up_label": "(RICHER)",
+      "down_label": "(LEANER)"
+    },
+    {
+      "table_id": "fuelTrimTable2Tbl",
+      "map_id": "fuelTrimTable2Map",
+      "title": "Fuel trim Table 2",
+      "page": 8,
+      "x_bins": "fuelTrim2rpmBins",
+      "y_bins": "fuelTrim2loadBins",
+      "z_bins": "fuelTrim2Table",
+      "x_channel": "rpm",
+      "y_channel": "fuelLoad",
+      "x_label": null,
+      "y_label": null,
+      "topic_help": null,
+      "grid_height": 2.0,
+      "grid_orient": [
+        250.0,
+        0.0,
+        340.0
+      ],
+      "up_label": "(RICHER)",
+      "down_label": "(LEANER)"
+    },
+    {
+      "table_id": "fuelTrimTable3Tbl",
+      "map_id": "fuelTrimTable3Map",
+      "title": "Fuel trim Table 3",
+      "page": 8,
+      "x_bins": "fuelTrim3rpmBins",
+      "y_bins": "fuelTrim3loadBins",
+      "z_bins": "fuelTrim3Table",
+      "x_channel": "rpm",
+      "y_channel": "fuelLoad",
+      "x_label": null,
+      "y_label": null,
+      "topic_help": null,
+      "grid_height": 2.0,
+      "grid_orient": [
+        250.0,
+        0.0,
+        340.0
+      ],
+      "up_label": "(RICHER)",
+      "down_label": "(LEANER)"
+    },
+    {
+      "table_id": "fuelTrimTable4Tbl",
+      "map_id": "fuelTrimTable4Map",
+      "title": "Fuel trim Table 4",
+      "page": 8,
+      "x_bins": "fuelTrim4rpmBins",
+      "y_bins": "fuelTrim4loadBins",
+      "z_bins": "fuelTrim4Table",
+      "x_channel": "rpm",
+      "y_channel": "fuelLoad",
+      "x_label": null,
+      "y_label": null,
+      "topic_help": null,
+      "grid_height": 2.0,
+      "grid_orient": [
+        250.0,
+        0.0,
+        340.0
+      ],
+      "up_label": "(RICHER)",
+      "down_label": "(LEANER)"
+    },
+    {
+      "table_id": "fuelTrimTable5Tbl",
+      "map_id": "fuelTrimTable5Map",
+      "title": "Fuel trim Table 5",
+      "page": 8,
+      "x_bins": "fuelTrim5rpmBins",
+      "y_bins": "fuelTrim5loadBins",
+      "z_bins": "fuelTrim5Table",
+      "x_channel": "rpm",
+      "y_channel": "fuelLoad",
+      "x_label": null,
+      "y_label": null,
+      "topic_help": null,
+      "grid_height": 2.0,
+      "grid_orient": [
+        250.0,
+        0.0,
+        340.0
+      ],
+      "up_label": "(RICHER)",
+      "down_label": "(LEANER)"
+    },
+    {
+      "table_id": "fuelTrimTable6Tbl",
+      "map_id": "fuelTrimTable6Map",
+      "title": "Fuel trim Table 6",
+      "page": 8,
+      "x_bins": "fuelTrim6rpmBins",
+      "y_bins": "fuelTrim6loadBins",
+      "z_bins": "fuelTrim6Table",
+      "x_channel": "rpm",
+      "y_channel": "fuelLoad",
+      "x_label": null,
+      "y_label": null,
+      "topic_help": null,
+      "grid_height": 2.0,
+      "grid_orient": [
+        250.0,
+        0.0,
+        340.0
+      ],
+      "up_label": "(RICHER)",
+      "down_label": "(LEANER)"
+    },
+    {
+      "table_id": "fuelTrimTable7Tbl",
+      "map_id": "fuelTrimTable7Map",
+      "title": "Fuel trim Table 7",
+      "page": 8,
+      "x_bins": "fuelTrim7rpmBins",
+      "y_bins": "fuelTrim7loadBins",
+      "z_bins": "fuelTrim7Table",
+      "x_channel": "rpm",
+      "y_channel": "fuelLoad",
+      "x_label": null,
+      "y_label": null,
+      "topic_help": null,
+      "grid_height": 2.0,
+      "grid_orient": [
+        250.0,
+        0.0,
+        340.0
+      ],
+      "up_label": "(RICHER)",
+      "down_label": "(LEANER)"
+    },
+    {
+      "table_id": "fuelTrimTable8Tbl",
+      "map_id": "fuelTrimTable8Map",
+      "title": "Fuel trim Table 8",
+      "page": 8,
+      "x_bins": "fuelTrim8rpmBins",
+      "y_bins": "fuelTrim8loadBins",
+      "z_bins": "fuelTrim8Table",
+      "x_channel": "rpm",
+      "y_channel": "fuelLoad",
+      "x_label": null,
+      "y_label": null,
+      "topic_help": null,
+      "grid_height": 2.0,
+      "grid_orient": [
+        250.0,
+        0.0,
+        340.0
+      ],
+      "up_label": "(RICHER)",
+      "down_label": "(LEANER)"
+    },
+    {
+      "table_id": "dwell_map",
+      "map_id": "dwell_tblMap",
+      "title": "Dwell map",
+      "page": 12,
+      "x_bins": "rpmBinsDwell",
+      "y_bins": "loadBinsDwell",
+      "z_bins": "dwellTable",
+      "x_channel": "rpm",
+      "y_channel": "ignLoad",
+      "x_label": "RPM",
+      "y_label": "Load: ",
+      "topic_help": null,
+      "grid_height": 3.0,
+      "grid_orient": null,
+      "up_label": "HIGHER",
+      "down_label": "LOWER"
+    }
+  ],
+  "curve_editors": [
+    {
+      "name": "time_accel_tpsdot_curve",
+      "title": "TPS based AE",
+      "x_bins_param": "taeBins",
+      "x_channel": "TPSdot",
+      "y_bins_list": [
+        {
+          "param": "taeRates",
+          "label": null
+        }
+      ],
+      "x_label": "TPSdot",
+      "y_label": "Added",
+      "x_axis": {
+        "min": 0.0,
+        "max": 1200.0,
+        "steps": 6
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 250.0,
+        "steps": 4
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": null
+    },
+    {
+      "name": "time_accel_mapdot_curve",
+      "title": "MAP based AE",
+      "x_bins_param": "maeBins",
+      "x_channel": "MAPdot",
+      "y_bins_list": [
+        {
+          "param": "maeRates",
+          "label": null
+        }
+      ],
+      "x_label": "MAPdot",
+      "y_label": "Added",
+      "x_axis": {
+        "min": 0.0,
+        "max": 1200.0,
+        "steps": 6
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 250.0,
+        "steps": 4
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": null
+    },
+    {
+      "name": "dwell_correction_curve",
+      "title": "Dwell voltage correction",
+      "x_bins_param": "brvBins",
+      "x_channel": "batteryVoltage",
+      "y_bins_list": [
+        {
+          "param": "dwellRates",
+          "label": null
+        }
+      ],
+      "x_label": "Voltage",
+      "y_label": "Dwell",
+      "x_axis": {
+        "min": 6.0,
+        "max": 22.0,
+        "steps": 6
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 255.0,
+        "steps": 6
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": null
+    },
+    {
+      "name": "injector_voltage_curve",
+      "title": "Injector voltage correction",
+      "x_bins_param": "brvBins",
+      "x_channel": "batteryVoltage",
+      "y_bins_list": [
+        {
+          "param": "injBatRates",
+          "label": null
+        }
+      ],
+      "x_label": "Voltage",
+      "y_label": "Injector",
+      "x_axis": {
+        "min": 6.0,
+        "max": 22.0,
+        "steps": 6
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 255.0,
+        "steps": 6
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": null
+    },
+    {
+      "name": "injector_timing_curve",
+      "title": "Injector timing",
+      "x_bins_param": "injAngRPM",
+      "x_channel": "rpm",
+      "y_bins_list": [
+        {
+          "param": "injAng",
+          "label": null
+        }
+      ],
+      "x_label": "RPM",
+      "y_label": "Injector",
+      "x_axis": {
+        "min": 0.0,
+        "max": 7000.0,
+        "steps": 6
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 720.0,
+        "steps": 5
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": null
+    },
+    {
+      "name": "airdensity_curve",
+      "title": "IAT density correction",
+      "x_bins_param": "airDenBins",
+      "x_channel": "iat",
+      "y_bins_list": [
+        {
+          "param": "airDenRates",
+          "label": null
+        }
+      ],
+      "x_label": "Air Temperature",
+      "y_label": "Fuel Amount",
+      "x_axis": {
+        "min": -40.0,
+        "max": 160.0,
+        "steps": 6
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 255.0,
+        "steps": 6
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": null
+    },
+    {
+      "name": "baroFuel_curve",
+      "title": "Baro fuel correction",
+      "x_bins_param": "baroFuelBins",
+      "x_channel": "baro",
+      "y_bins_list": [
+        {
+          "param": "baroFuelValues",
+          "label": null
+        }
+      ],
+      "x_label": "Baro Pressure",
+      "y_label": "Fuel Amount",
+      "x_axis": {
+        "min": 75.0,
+        "max": 112.0,
+        "steps": 6
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 255.0,
+        "steps": 6
+      },
+      "topic_help": "http://wiki.speeduino.com/en/configuration/Barometric_Correction",
+      "gauge": null,
+      "size": null
+    },
+    {
+      "name": "fuelTemp_curve",
+      "title": "Fuel temp correction",
+      "x_bins_param": "fuelTempBins",
+      "x_channel": "fuelTemp",
+      "y_bins_list": [
+        {
+          "param": "fuelTempValues",
+          "label": null
+        }
+      ],
+      "x_label": "Fuel Temperature",
+      "y_label": "Fuel Amount",
+      "x_axis": {
+        "min": -40.0,
+        "max": 125.0,
+        "steps": 6
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 255.0,
+        "steps": 6
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": null
+    },
+    {
+      "name": "iat_retard_curve",
+      "title": "IAT timing retard",
+      "x_bins_param": "iatRetBins",
+      "x_channel": "iat",
+      "y_bins_list": [
+        {
+          "param": "iatRetRates",
+          "label": null
+        }
+      ],
+      "x_label": "Inlet Air Temp",
+      "y_label": "Retard",
+      "x_axis": {
+        "min": 32.0,
+        "max": 257.0,
+        "steps": 5
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 30.0,
+        "steps": 5
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": null
+    },
+    {
+      "name": "clt_advance_curve",
+      "title": "Cold Advance",
+      "x_bins_param": "cltAdvBins",
+      "x_channel": "coolant",
+      "y_bins_list": [
+        {
+          "param": "cltAdvValues",
+          "label": null
+        }
+      ],
+      "x_label": "Coolant Temp",
+      "y_label": "Advance",
+      "x_axis": {
+        "min": -40.0,
+        "max": 200.0,
+        "steps": 5
+      },
+      "y_axis": {
+        "min": -12.7,
+        "max": 12.7,
+        "steps": 5
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": null
+    },
+    {
+      "name": "idle_advance_curve",
+      "title": "Idle Advance",
+      "x_bins_param": "idleAdvBins",
+      "x_channel": "CLIdleDelta",
+      "y_bins_list": [
+        {
+          "param": "idleAdvValues",
+          "label": null
+        }
+      ],
+      "x_label": "RPM Delta",
+      "y_label": "Advance",
+      "x_axis": {
+        "min": -500.0,
+        "max": 500.0,
+        "steps": 5
+      },
+      "y_axis": {
+        "min": -15.0,
+        "max": 50.0,
+        "steps": 5
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": [
+        450,
+        200
+      ]
+    },
+    {
+      "name": "pwm_fan_curve",
+      "title": "Fan PWM Duty",
+      "x_bins_param": "fanPWMBins",
+      "x_channel": "coolant",
+      "y_bins_list": [
+        {
+          "param": "PWMFanDuty",
+          "label": null
+        }
+      ],
+      "x_label": "Temp",
+      "y_label": "Duty %",
+      "x_axis": {
+        "min": -40.0,
+        "max": 215.0,
+        "steps": 4
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 100.0,
+        "steps": 4
+      },
+      "topic_help": null,
+      "gauge": "cltGauge",
+      "size": [
+        400,
+        400
+      ]
+    },
+    {
+      "name": "iacPwm_curve",
+      "title": "IAC PWM Duty",
+      "x_bins_param": "iacBins",
+      "x_channel": "coolant",
+      "y_bins_list": [
+        {
+          "param": "iacOLPWMVal",
+          "label": null
+        }
+      ],
+      "x_label": "Coolant Temperature",
+      "y_label": "Valve",
+      "x_axis": {
+        "min": -40.0,
+        "max": 315.0,
+        "steps": 6
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 100.0,
+        "steps": 4
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": null
+    },
+    {
+      "name": "iacPwmCrank_curve",
+      "title": "IAC PWM Cranking Duty",
+      "x_bins_param": "iacCrankBins",
+      "x_channel": "coolant",
+      "y_bins_list": [
+        {
+          "param": "iacCrankDuty",
+          "label": null
+        }
+      ],
+      "x_label": "Coolant Temperature",
+      "y_label": "Valve",
+      "x_axis": {
+        "min": -40.0,
+        "max": 215.0,
+        "steps": 6
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 100.0,
+        "steps": 4
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": null
+    },
+    {
+      "name": "iacStep_curve",
+      "title": "IAC Stepper Motor",
+      "x_bins_param": "iacBins",
+      "x_channel": "coolant",
+      "y_bins_list": [
+        {
+          "param": "iacOLStepVal",
+          "label": null
+        }
+      ],
+      "x_label": "Coolant Temperature",
+      "y_label": "Motor",
+      "x_axis": {
+        "min": -40.0,
+        "max": 315.0,
+        "steps": 6
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 850.0,
+        "steps": 4
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": null
+    },
+    {
+      "name": "iacStepCrank_curve",
+      "title": "IAC Stepper Motor Cranking",
+      "x_bins_param": "iacCrankBins",
+      "x_channel": "coolant",
+      "y_bins_list": [
+        {
+          "param": "iacCrankSteps",
+          "label": null
+        }
+      ],
+      "x_label": "Coolant Temperature",
+      "y_label": "Motor",
+      "x_axis": {
+        "min": -40.0,
+        "max": 120.0,
+        "steps": 6
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 850.0,
+        "steps": 4
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": null
+    },
+    {
+      "name": "iacClosedLoop_curve",
+      "title": "Idle RPM Targets",
+      "x_bins_param": "iacBins",
+      "x_channel": "coolant",
+      "y_bins_list": [
+        {
+          "param": "iacCLValues",
+          "label": null
+        }
+      ],
+      "x_label": "Coolant Temperature",
+      "y_label": "Motor",
+      "x_axis": {
+        "min": -40.0,
+        "max": 120.0,
+        "steps": 6
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 2000.0,
+        "steps": 4
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": [
+        450,
+        200
+      ]
+    },
+    {
+      "name": "rotaryTrailing_curve",
+      "title": "Rotary Trailing Split",
+      "x_bins_param": "rotarySplitBins",
+      "x_channel": "ignLoad",
+      "y_bins_list": [
+        {
+          "param": "rotarySplitValues",
+          "label": null
+        }
+      ],
+      "x_label": "Ignition load",
+      "y_label": "SplitDegrees",
+      "x_axis": null,
+      "y_axis": {
+        "min": 0.0,
+        "max": 40.0,
+        "steps": 4
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": null
+    },
+    {
+      "name": "warmup_curve",
+      "title": "Warmup Enrichment (WUE) Curve",
+      "x_bins_param": "wueBins",
+      "x_channel": "coolant",
+      "y_bins_list": [
+        {
+          "param": "wueRates",
+          "label": null
+        }
+      ],
+      "x_label": "Coolant",
+      "y_label": "WUE %",
+      "x_axis": {
+        "min": -40.0,
+        "max": 210.0,
+        "steps": 9
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 240.0,
+        "steps": 6
+      },
+      "topic_help": null,
+      "gauge": "cltGauge",
+      "size": null
+    },
+    {
+      "name": "cranking_enrich_curve",
+      "title": "Cranking Enrichment Curve",
+      "x_bins_param": "crankingEnrichBins",
+      "x_channel": "coolant",
+      "y_bins_list": [
+        {
+          "param": "crankingEnrichValues",
+          "label": null
+        }
+      ],
+      "x_label": "Coolant",
+      "y_label": "Fuel Modifier",
+      "x_axis": {
+        "min": -40.0,
+        "max": 110.0,
+        "steps": 9
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 400.0,
+        "steps": 6
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": null
+    },
+    {
+      "name": "priming_pw_curve",
+      "title": "Priming Pulsewidth",
+      "x_bins_param": "primeBins",
+      "x_channel": "coolant",
+      "y_bins_list": [
+        {
+          "param": "primePulse",
+          "label": null
+        }
+      ],
+      "x_label": "Coolant",
+      "y_label": "PW",
+      "x_axis": {
+        "min": -40.0,
+        "max": 110.0,
+        "steps": 4
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 10.0,
+        "steps": 4
+      },
+      "topic_help": null,
+      "gauge": "cltGauge",
+      "size": null
+    },
+    {
+      "name": "afterstart_enrichment_curve",
+      "title": "ASE - Enrichment %",
+      "x_bins_param": "aseBins",
+      "x_channel": "coolant",
+      "y_bins_list": [
+        {
+          "param": "asePct",
+          "label": null
+        }
+      ],
+      "x_label": "Coolant",
+      "y_label": "Enrichment",
+      "x_axis": {
+        "min": -40.0,
+        "max": 110.0,
+        "steps": 4
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 200.0,
+        "steps": 4
+      },
+      "topic_help": null,
+      "gauge": "cltGauge",
+      "size": null
+    },
+    {
+      "name": "afterstart_enrichment_time",
+      "title": "ASE - Duration",
+      "x_bins_param": "aseBins",
+      "x_channel": "coolant",
+      "y_bins_list": [
+        {
+          "param": "aseCount",
+          "label": null
+        }
+      ],
+      "x_label": "Coolant",
+      "y_label": "Time",
+      "x_axis": {
+        "min": -40.0,
+        "max": 110.0,
+        "steps": 4
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 20.0,
+        "steps": 4
+      },
+      "topic_help": null,
+      "gauge": "cltGauge",
+      "size": null
+    },
+    {
+      "name": "flex_fuel_curve",
+      "title": "Flex Fuel Adjustments",
+      "x_bins_param": "flexFuelBins",
+      "x_channel": "flex",
+      "y_bins_list": [
+        {
+          "param": "flexFuelAdj",
+          "label": null
+        }
+      ],
+      "x_label": "Ethanol",
+      "y_label": "Fuel",
+      "x_axis": {
+        "min": 0.0,
+        "max": 100.0,
+        "steps": 10
+      },
+      "y_axis": {
+        "min": 50.0,
+        "max": 250.0,
+        "steps": 5
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": [
+        400,
+        200
+      ]
+    },
+    {
+      "name": "flex_adv_curve",
+      "title": "Flex Timing Advance",
+      "x_bins_param": "flexAdvBins",
+      "x_channel": "flex",
+      "y_bins_list": [
+        {
+          "param": "flexAdvAdj",
+          "label": null
+        }
+      ],
+      "x_label": "Ethanol",
+      "y_label": "Advance",
+      "x_axis": {
+        "min": 0.0,
+        "max": 100.0,
+        "steps": 10
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 50.0,
+        "steps": 5
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": [
+        400,
+        200
+      ]
+    },
+    {
+      "name": "flex_boost_curve",
+      "title": "Flex Boost Adjustments",
+      "x_bins_param": "flexBoostBins",
+      "x_channel": "flex",
+      "y_bins_list": [
+        {
+          "param": "flexBoostAdj",
+          "label": null
+        }
+      ],
+      "x_label": "Ethanol",
+      "y_label": "Boost",
+      "x_axis": {
+        "min": 0.0,
+        "max": 100.0,
+        "steps": 10
+      },
+      "y_axis": {
+        "min": -100.0,
+        "max": 200.0,
+        "steps": 5
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": [
+        400,
+        200
+      ]
+    },
+    {
+      "name": "knock_window_angle_curve",
+      "title": "Knock Window",
+      "x_bins_param": "knock_window_rpms",
+      "x_channel": "rpm",
+      "y_bins_list": [
+        {
+          "param": "knock_window_angle",
+          "label": null
+        }
+      ],
+      "x_label": "RPM",
+      "y_label": "Window Start",
+      "x_axis": {
+        "min": 0.0,
+        "max": 8000.0,
+        "steps": 9
+      },
+      "y_axis": {
+        "min": -100.0,
+        "max": 100.0,
+        "steps": 11
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": [
+        400,
+        200
+      ]
+    },
+    {
+      "name": "knock_window_duration_curve",
+      "title": "Knock Window Duration",
+      "x_bins_param": "knock_window_rpms",
+      "x_channel": "rpm",
+      "y_bins_list": [
+        {
+          "param": "knock_window_dur",
+          "label": null
+        }
+      ],
+      "x_label": "RPM",
+      "y_label": "Window Duration",
+      "x_axis": {
+        "min": 0.0,
+        "max": 8000.0,
+        "steps": 9
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 100.0,
+        "steps": 10
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": [
+        400,
+        200
+      ]
+    },
+    {
+      "name": "oil_pressure_prot_curve",
+      "title": "Oil Pressure Protection",
+      "x_bins_param": "oilPressureProtRPM",
+      "x_channel": "rpm",
+      "y_bins_list": [
+        {
+          "param": "oilPressureProtMins",
+          "label": null
+        }
+      ],
+      "x_label": "RPM",
+      "y_label": "Minimum",
+      "x_axis": {
+        "min": 0.0,
+        "max": 8000.0,
+        "steps": 9
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 150.0,
+        "steps": 3
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": [
+        400,
+        200
+      ]
+    },
+    {
+      "name": "coolant_prot_curve",
+      "title": "Coolant Temperature Protection",
+      "x_bins_param": "coolantProtTemp",
+      "x_channel": "coolant",
+      "y_bins_list": [
+        {
+          "param": "coolantProtRPM",
+          "label": null
+        }
+      ],
+      "x_label": "Coolant",
+      "y_label": "Limit",
+      "x_axis": {
+        "min": -40.0,
+        "max": 315.0,
+        "steps": 5
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 8000.0,
+        "steps": 3
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": [
+        200,
+        200
+      ]
+    },
+    {
+      "name": "rolling_prot_curve",
+      "title": "Rolling Cut Percent",
+      "x_bins_param": "rollingProtRPMDelta",
+      "x_channel": null,
+      "y_bins_list": [
+        {
+          "param": "rollingProtCutPercent",
+          "label": null
+        }
+      ],
+      "x_label": "RPM Delta",
+      "y_label": "Event Cut",
+      "x_axis": {
+        "min": -300.0,
+        "max": 0.0,
+        "steps": 6
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 125.0,
+        "steps": 6
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": [
+        200,
+        200
+      ]
+    },
+    {
+      "name": "warmup_afr_curve",
+      "title": "Target Adjustment",
+      "x_bins_param": "wueBins",
+      "x_channel": "coolant",
+      "y_bins_list": [
+        {
+          "param": "wueAFR",
+          "label": null
+        }
+      ],
+      "x_label": "Coolant",
+      "y_label": "Offset",
+      "x_axis": {
+        "min": -40.0,
+        "max": 210.0,
+        "steps": 9
+      },
+      "y_axis": {
+        "min": -4.0,
+        "max": 1.0,
+        "steps": 5
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": null
+    },
+    {
+      "name": "warmup_analyzer_curve",
+      "title": "Warmup Enrichment",
+      "x_bins_param": "wueBins",
+      "x_channel": "coolant",
+      "y_bins_list": [
+        {
+          "param": "wueRates",
+          "label": "Current WUE"
+        },
+        {
+          "param": "wueRecommended",
+          "label": "Recommended WUE"
+        }
+      ],
+      "x_label": "Coolant",
+      "y_label": "Current WUE",
+      "x_axis": {
+        "min": -40.0,
+        "max": 210.0,
+        "steps": 9
+      },
+      "y_axis": {
+        "min": 100.0,
+        "max": 255.0,
+        "steps": 6
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": null
+    },
+    {
+      "name": "wmi_adv_curve",
+      "title": "WMI Timing Advance",
+      "x_bins_param": "wmiAdvBins",
+      "x_channel": "map",
+      "y_bins_list": [
+        {
+          "param": "wmiAdvAdj",
+          "label": null
+        }
+      ],
+      "x_label": "kPa",
+      "y_label": "Advance",
+      "x_axis": {
+        "min": 0.0,
+        "max": 511.0,
+        "steps": 20
+      },
+      "y_axis": {
+        "min": 0.0,
+        "max": 50.0,
+        "steps": 5
+      },
+      "topic_help": null,
+      "gauge": null,
+      "size": [
+        400,
+        200
+      ]
+    }
+  ],
   "tools": [],
   "reference_tables": [],
   "autotune_sections": []

@@ -749,11 +749,78 @@ std::string dump_definition_v2(const NativeEcuDefinition& def, int indent) {
         doc["dialogs"] = std::move(dialogs);
     }
 
-    // --- table_editors + curve_editors + tools + reference_tables ---
-    // Simplified: serialize key fields only (full struct serialization
-    // for these sections deferred — they're less critical for runtime).
-    doc["table_editors"] = json::array();
-    doc["curve_editors"] = json::array();
+    // --- table_editors ---
+    {
+        json editors = json::array();
+        for (const auto& e : def.table_editors.editors) {
+            json je;
+            je["table_id"] = e.table_id;
+            je["map_id"]   = e.map_id;
+            je["title"]    = e.title;
+            je["page"]     = opt_to_json(e.page);
+            put_optional_string(je, "x_bins", e.x_bins);
+            put_optional_string(je, "y_bins", e.y_bins);
+            put_optional_string(je, "z_bins", e.z_bins);
+            put_optional_string(je, "x_channel", e.x_channel);
+            put_optional_string(je, "y_channel", e.y_channel);
+            put_optional_string(je, "x_label", e.x_label);
+            put_optional_string(je, "y_label", e.y_label);
+            put_optional_string(je, "topic_help", e.topic_help);
+            put_optional_double(je, "grid_height", e.grid_height);
+            if (e.grid_orient.has_value()) {
+                je["grid_orient"] = json::array({
+                    (*e.grid_orient)[0], (*e.grid_orient)[1], (*e.grid_orient)[2]});
+            } else {
+                je["grid_orient"] = nullptr;
+            }
+            put_optional_string(je, "up_label", e.up_label);
+            put_optional_string(je, "down_label", e.down_label);
+            editors.push_back(std::move(je));
+        }
+        doc["table_editors"] = std::move(editors);
+    }
+
+    // --- curve_editors ---
+    {
+        json curves = json::array();
+        for (const auto& c : def.curve_editors.curves) {
+            json jc;
+            jc["name"] = c.name;
+            jc["title"] = c.title;
+            jc["x_bins_param"] = c.x_bins_param;
+            put_optional_string(jc, "x_channel", c.x_channel);
+            json yb = json::array();
+            for (const auto& y : c.y_bins_list) {
+                json jy;
+                jy["param"] = y.param;
+                put_optional_string(jy, "label", y.label);
+                yb.push_back(std::move(jy));
+            }
+            jc["y_bins_list"] = std::move(yb);
+            jc["x_label"] = c.x_label;
+            jc["y_label"] = c.y_label;
+            auto range_to_json = [](const CurveAxisRange& r) {
+                return json{{"min", r.min}, {"max", r.max}, {"steps", r.steps}};
+            };
+            if (c.x_axis.has_value()) jc["x_axis"] = range_to_json(*c.x_axis);
+            else                       jc["x_axis"] = nullptr;
+            if (c.y_axis.has_value()) jc["y_axis"] = range_to_json(*c.y_axis);
+            else                       jc["y_axis"] = nullptr;
+            put_optional_string(jc, "topic_help", c.topic_help);
+            put_optional_string(jc, "gauge", c.gauge);
+            if (c.size.has_value()) {
+                jc["size"] = json::array({(*c.size)[0], (*c.size)[1]});
+            } else {
+                jc["size"] = nullptr;
+            }
+            curves.push_back(std::move(jc));
+        }
+        doc["curve_editors"] = std::move(curves);
+    }
+
+    // Tools / reference_tables / autotune_sections stay minimal —
+    // they're runtime-optional catalog-ish sections the workspace
+    // doesn't need to route tree pages.
     doc["tools"] = json::array();
     doc["reference_tables"] = json::array();
     doc["autotune_sections"] = json::array();
@@ -1008,6 +1075,79 @@ NativeEcuDefinition load_definition_v2(std::string_view text) {
                 }
             }
             def.dialogs.dialogs.push_back(std::move(d));
+        }
+    }
+
+    // --- table_editors ---
+    if (data.contains("table_editors")) {
+        for (const auto& je : data["table_editors"]) {
+            IniTableEditor e;
+            e.table_id = je.value("table_id", "");
+            e.map_id   = je.value("map_id", "");
+            e.title    = je.value("title", "");
+            e.page     = json_to_opt<int>(je, "page");
+            e.x_bins   = get_optional_string(je, "x_bins");
+            e.y_bins   = get_optional_string(je, "y_bins");
+            e.z_bins   = get_optional_string(je, "z_bins");
+            e.x_channel = get_optional_string(je, "x_channel");
+            e.y_channel = get_optional_string(je, "y_channel");
+            e.x_label  = get_optional_string(je, "x_label");
+            e.y_label  = get_optional_string(je, "y_label");
+            e.topic_help = get_optional_string(je, "topic_help");
+            e.grid_height = get_optional_double(je, "grid_height");
+            if (je.contains("grid_orient") && je["grid_orient"].is_array()
+                && je["grid_orient"].size() == 3) {
+                std::array<double, 3> go{{
+                    je["grid_orient"][0].get<double>(),
+                    je["grid_orient"][1].get<double>(),
+                    je["grid_orient"][2].get<double>()}};
+                e.grid_orient = go;
+            }
+            e.up_label   = get_optional_string(je, "up_label");
+            e.down_label = get_optional_string(je, "down_label");
+            def.table_editors.editors.push_back(std::move(e));
+        }
+    }
+
+    // --- curve_editors ---
+    if (data.contains("curve_editors")) {
+        for (const auto& jc : data["curve_editors"]) {
+            IniCurveEditor c;
+            c.name = jc.value("name", "");
+            c.title = jc.value("title", "");
+            c.x_bins_param = jc.value("x_bins_param", "");
+            c.x_channel = get_optional_string(jc, "x_channel");
+            if (jc.contains("y_bins_list")) {
+                for (const auto& jy : jc["y_bins_list"]) {
+                    CurveYBins yb;
+                    yb.param = jy.value("param", "");
+                    yb.label = get_optional_string(jy, "label");
+                    c.y_bins_list.push_back(std::move(yb));
+                }
+            }
+            c.x_label = jc.value("x_label", "");
+            c.y_label = jc.value("y_label", "");
+            auto range_from_json = [](const json& jr) {
+                CurveAxisRange r;
+                r.min = jr.value("min", 0.0);
+                r.max = jr.value("max", 0.0);
+                r.steps = jr.value("steps", 0);
+                return r;
+            };
+            if (jc.contains("x_axis") && jc["x_axis"].is_object())
+                c.x_axis = range_from_json(jc["x_axis"]);
+            if (jc.contains("y_axis") && jc["y_axis"].is_object())
+                c.y_axis = range_from_json(jc["y_axis"]);
+            c.topic_help = get_optional_string(jc, "topic_help");
+            c.gauge = get_optional_string(jc, "gauge");
+            if (jc.contains("size") && jc["size"].is_array()
+                && jc["size"].size() == 2) {
+                std::array<int, 2> sz{{
+                    jc["size"][0].get<int>(),
+                    jc["size"][1].get<int>()}};
+                c.size = sz;
+            }
+            def.curve_editors.curves.push_back(std::move(c));
         }
     }
 
