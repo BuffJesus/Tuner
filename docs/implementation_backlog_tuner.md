@@ -5,7 +5,7 @@
 > app (`cpp/app/main.cpp`) and `tuner_core` services. The conceptual items
 > remain valid. See `docs/tuning-roadmap.md` for the current roadmap.
 
-- [ ] TN-001 Session connect rollback
+- [x] TN-001 Session connect rollback (closed sub-slice 155, 2026-04-14 — `EcuConnection::close()` now resets controller + info; connect-dialog catch block calls close() on failure)
   Summary: Make failed connect attempts leave a clean disconnected state.
   Deliverables:
   - rollback logic
@@ -24,7 +24,7 @@
   Dependencies:
   - none
 
-- [ ] TN-002 Release manifest reader
+- [x] TN-002 Release manifest reader (closed by `tuner_core::release_manifest` port, sub-slice ~66 — parses `release_manifest.json` with full fallback when absent)
   Summary: Read `release_manifest.json` and use it as the primary packaging source.
   Deliverables:
   - manifest model
@@ -42,7 +42,7 @@
   Dependencies:
   - `FW-001 preferred`
 
-- [ ] TN-003 Firmware catalog hardening
+- [x] TN-003 Firmware catalog hardening (closed by `tuner_core::firmware_catalog` port — `ScoringContext.include_diagnostic` gate + `preferred` bit drive selection; diagnostic artifacts hidden from production flow)
   Summary: Prevent normal users from being steered to diagnostic firmware.
   Deliverables:
   - artifact-kind aware selection
@@ -59,7 +59,7 @@
   Dependencies:
   - `TN-002`
 
-- [ ] TN-004 Flash preflight based on real compatibility
+- [x] TN-004 Flash preflight based on real compatibility (closed by `tuner_core::flash_preflight` port — signature family + manifest pairing checks, prod/experimental mismatch warnings)
   Summary: Validate flash compatibility using signatures and manifest pairings.
   Deliverables:
   - stronger board/signature/artifact checks
@@ -76,7 +76,7 @@
   Dependencies:
   - `TN-002`, `TN-003`
 
-- [ ] TN-005 Real Speeduino verify/sync
+- [x] TN-005 Real Speeduino verify/sync (closed sub-slice 158, 2026-04-14 — `speeduino_protocol::page_crc_request` + `parse_page_crc_response`, `SpeeduinoController::fetch_page_crc` + `verify_page(page, local_bytes)` returning `{matched, expected, actual}`. Uses existing `speeduino_framing::crc32` for local side. Matches legacy `'d'` command protocol from `comms_legacy.cpp:917..939`. 5 new doctest cases.)
   Summary: Replace stub verification with real page verification.
   Deliverables:
   - real `verify_crc()` behavior
@@ -94,7 +94,7 @@
   Dependencies:
   - `FW-005 preferred`
 
-- [ ] TN-006 Capability handshake consumption
+- [x] TN-006 Capability handshake consumption (closed sub-slice 157, 2026-04-14 — `ConnectionInfo::capabilities` now stores `Capabilities` struct populated at connect time: `source` = "serial+definition" when `'f'` query succeeds else "definition", `serial_protocol_version`, `blocking_factor`, `table_blocking_factor`, `experimental_u16p2` derived from signature suffix)
   Summary: Read and store firmware capability metadata at connect time.
   Deliverables:
   - capability model
@@ -112,7 +112,7 @@
   Dependencies:
   - `FW-003`, `FW-004`, `FW-006`, `FW-007`
 
-- [ ] TN-007 Endianness contract cleanup
+- [x] TN-007 Endianness contract cleanup (closed sub-slice 156, 2026-04-14 — `NativeEcuDefinition.byte_order` parsed from `[Constants]`, `is_little_endian()` helper added, 7 doctest cases cover default/explicit/case-insensitive/unknown/wrong-section/comment-strip)
   Summary: Either support configured endianness or explicitly narrow the contract.
   Deliverables:
   - implementation or documentation cleanup
@@ -128,7 +128,7 @@
   Dependencies:
   - none
 
-- [ ] TN-008 Runtime telemetry integration
+- [x] TN-008 Runtime telemetry integration (closed by `tuner_core::runtime_telemetry::decode()` + LIVE-tab runtime status card sub-slice 146 — `runtimeStatusA` bits named, board caps + SPI flash health exposed as colored chips)
   Summary: Use current firmware telemetry and capability bits in runtime UX.
   Deliverables:
   - named `runtimeStatusA` decoding

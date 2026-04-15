@@ -2,16 +2,73 @@
 #include "tuner_core/local_tune_edit.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <utility>
 
 namespace tuner_core::local_tune_edit {
+
+namespace {
+
+// Raw range implied by an INI/MSQ data type. Returns false if the
+// data_type isn't recognised — in that case no type-derived bound is
+// applied and the explicit min_value/max_value (if any) are the only
+// fences.
+bool type_range(std::string_view dt, double& lo, double& hi) {
+    if (dt == "U08") { lo = 0.0;       hi = 255.0;       return true; }
+    if (dt == "U16") { lo = 0.0;       hi = 65535.0;     return true; }
+    if (dt == "U32") { lo = 0.0;       hi = 4294967295.0; return true; }
+    if (dt == "S08") { lo = -128.0;    hi = 127.0;       return true; }
+    if (dt == "S16") { lo = -32768.0;  hi = 32767.0;     return true; }
+    if (dt == "S32") { lo = -2147483648.0; hi = 2147483647.0; return true; }
+    return false;
+}
+
+}  // namespace
 
 void EditService::set_tune_file(const TuneFile* tune_file) {
     base_ = tune_file;
     staged_.clear();
     history_.clear();
     history_index_.clear();
+}
+
+void EditService::set_limits_provider(LimitsProvider provider) {
+    limits_provider_ = std::move(provider);
+}
+
+double EditService::clamp_value(const std::string& name, double raw) const {
+    if (!limits_provider_) return raw;
+    auto limits = limits_provider_(name);
+    if (!limits) return raw;
+
+    double lo = 0.0, hi = 0.0;
+    bool has_lo = limits->min_value.has_value();
+    bool has_hi = limits->max_value.has_value();
+    if (has_lo) lo = *limits->min_value;
+    if (has_hi) hi = *limits->max_value;
+
+    // Fall back to data_type implied range for missing bounds, shifted
+    // into display units via scale + translate so the fence matches
+    // the value the operator actually types.
+    if (!has_lo || !has_hi) {
+        double type_lo = 0.0, type_hi = 0.0;
+        if (type_range(limits->data_type, type_lo, type_hi)) {
+            double scale = limits->scale.value_or(1.0);
+            double translate = limits->translate.value_or(0.0);
+            double disp_lo = type_lo * scale + translate;
+            double disp_hi = type_hi * scale + translate;
+            if (scale < 0.0) std::swap(disp_lo, disp_hi);
+            if (!has_lo) { lo = disp_lo; has_lo = true; }
+            if (!has_hi) { hi = disp_hi; has_hi = true; }
+        }
+    }
+
+    if (has_lo && raw < lo) return lo;
+    if (has_hi && raw > hi) return hi;
+    return raw;
 }
 
 const TuneValue* EditService::get_value(const std::string& name) const {
@@ -28,7 +85,8 @@ const TuneValue* EditService::get_base_value(const std::string& name) const {
     return nullptr;
 }
 
-void EditService::stage_scalar_value(const std::string& name, const std::string& raw_value) {
+void EditService::stage_scalar_value(const std::string& name, const std::string& raw_value,
+                                     bool* was_clamped) {
     auto* tv = const_cast<TuneValue*>(get_value(name));
     if (tv == nullptr) {
         throw std::runtime_error("Tune value not found: " + name);
@@ -37,15 +95,20 @@ void EditService::stage_scalar_value(const std::string& name, const std::string&
         throw std::runtime_error("Tune value is not a scalar: " + name);
     }
     auto& staged = ensure_staged_copy(name, *tv);
+    if (was_clamped) *was_clamped = false;
     if (std::holds_alternative<std::string>(tv->value)) {
         staged.value = raw_value;
     } else {
-        staged.value = std::stod(raw_value);
+        double parsed = std::stod(raw_value);
+        double clamped = clamp_value(name, parsed);
+        if (was_clamped && clamped != parsed) *was_clamped = true;
+        staged.value = clamped;
     }
     commit_history(name, staged.value);
 }
 
-void EditService::stage_list_cell(const std::string& name, int index, double value) {
+void EditService::stage_list_cell(const std::string& name, int index, double value,
+                                  bool* was_clamped) {
     auto* tv = const_cast<TuneValue*>(get_value(name));
     if (tv == nullptr || !std::holds_alternative<std::vector<double>>(tv->value)) {
         throw std::runtime_error("Tune value is not a list: " + name);
@@ -55,7 +118,9 @@ void EditService::stage_list_cell(const std::string& name, int index, double val
     if (index < 0 || index >= static_cast<int>(list.size())) {
         throw std::out_of_range("Cell index out of range for: " + name);
     }
-    list[index] = value;
+    double clamped = clamp_value(name, value);
+    if (was_clamped) *was_clamped = (clamped != value);
+    list[index] = clamped;
     commit_history(name, staged.value);
 }
 
@@ -65,7 +130,13 @@ void EditService::replace_list(const std::string& name, const std::vector<double
         throw std::runtime_error("Tune value is not a list: " + name);
     }
     auto& staged = ensure_staged_copy(name, *tv);
-    staged.value = values;
+    // Clamp every cell — proposal-generated lists (VE Analyze, table
+    // generators, smoothing transforms) all land here, and they can
+    // drift out-of-range after compounding floating-point math.
+    std::vector<double> clamped;
+    clamped.reserve(values.size());
+    for (double v : values) clamped.push_back(clamp_value(name, v));
+    staged.value = std::move(clamped);
     commit_history(name, staged.value);
 }
 

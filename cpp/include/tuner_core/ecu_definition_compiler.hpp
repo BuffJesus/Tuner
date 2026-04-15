@@ -67,6 +67,20 @@ struct NativeEcuDefinition {
     IniToolsSection tools;
     IniReferenceTablesSection reference_tables;
     IniAutotuneSectionsResult autotune_sections;
+
+    // Byte order declared by the INI `[Constants]` section
+    // (`endianness = little|big`). Defaults to "little" when absent or
+    // unrecognised — every production Speeduino INI uses little-endian
+    // and the value codec hardcodes that assumption (TN-007). The field
+    // is exposed so downstream code can *check* the contract explicitly
+    // rather than silently producing wrong bytes on a hypothetical
+    // big-endian definition.
+    std::string byte_order = "little";
+
+    // TN-007: helper so consumers can cleanly branch on byte order
+    // without string-matching. Case-insensitive; unknown values treated
+    // as little-endian to match Speeduino's established contract.
+    bool is_little_endian() const noexcept;
 };
 
 // Compile a NativeEcuDefinition from in-memory INI text. Runs the

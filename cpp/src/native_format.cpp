@@ -337,6 +337,14 @@ std::string dump_tune(const NativeTune& tune, int indent) {
     doc["schema_version"] = tune.schema_version;
     put_optional_string(doc, "definition_signature", tune.definition_signature);
 
+    // Slot metadata (v1.1+) — only emitted when present. Pre-v1.1
+    // readers ignore unknown keys, so the file stays backwards-
+    // compatible. A tune with no slot fields loads as slot 0.
+    if (tune.slot_index.has_value()) {
+        doc["slot_index"] = *tune.slot_index;
+    }
+    put_optional_string(doc, "slot_name", tune.slot_name);
+
     json values = json::object();
     for (const auto& [key, value] : tune.values) {
         values[key] = tune_value_to_json(value);
@@ -405,6 +413,13 @@ NativeTune load_tune(std::string_view text) {
     NativeTune tune;
     tune.schema_version = version;
     tune.definition_signature = get_optional_string(data, "definition_signature");
+
+    // Slot metadata (v1.1+). Absent fields stay nullopt; consumers
+    // treat that as "legacy tune, target slot 0".
+    if (data.contains("slot_index") && data["slot_index"].is_number_integer()) {
+        tune.slot_index = data["slot_index"].get<int>();
+    }
+    tune.slot_name = get_optional_string(data, "slot_name");
 
     if (data.contains("values") && data["values"].is_object()) {
         for (auto it = data["values"].begin(); it != data["values"].end(); ++it) {

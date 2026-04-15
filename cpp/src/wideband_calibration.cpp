@@ -74,6 +74,23 @@ std::vector<uint8_t> CalibrationResult::encode_payload() const {
     return result;
 }
 
+std::vector<uint8_t> CalibrationResult::encode_speeduino_o2_table() const {
+    // Speeduino firmware reads 1024 bytes and stores every 32nd as an
+    // 8-bit AFR*10 value in o2Calibration_values[i]. Any byte outside
+    // position i*32 is ignored by firmware; zero-fill keeps the wire
+    // shape stable.
+    std::vector<uint8_t> out(1024, 0);
+    const std::size_t slot_count =
+        afrs.size() < 32 ? afrs.size() : static_cast<std::size_t>(32);
+    for (std::size_t i = 0; i < slot_count; ++i) {
+        int val = static_cast<int>(std::round(afrs[i] * 10.0));
+        if (val < 0) val = 0;
+        if (val > 255) val = 255;
+        out[i * 32] = static_cast<uint8_t>(val);
+    }
+    return out;
+}
+
 double CalibrationResult::afr_at_voltage(double voltage) const {
     int adc = std::max(0, std::min(ADC_MAX, static_cast<int>(std::round(voltage * ADC_MAX / SUPPLY_V))));
     int index = std::min(ADC_COUNT - 1, adc / 33);

@@ -218,3 +218,168 @@ TEST_CASE("lte: staged_names enumerates pending edits") {
     svc.revert_all();
     CHECK(svc.staged_names().empty());
 }
+
+// -----------------------------------------------------------------------
+// 13. clamp_value honours explicit min/max (display units)
+// -----------------------------------------------------------------------
+TEST_CASE("lte: clamp_value honours explicit min/max") {
+    lte::EditService svc;
+    svc.set_limits_provider([](const std::string& name) -> std::optional<lte::ParameterLimits> {
+        if (name == "aseTaperTime") {
+            lte::ParameterLimits lim;
+            lim.min_value = 0.0;
+            lim.max_value = 25.5;
+            lim.data_type = "U08";
+            return lim;
+        }
+        return std::nullopt;
+    });
+    CHECK(svc.clamp_value("aseTaperTime", 10.0) == 10.0);
+    CHECK(svc.clamp_value("aseTaperTime", -5.0) == 0.0);
+    CHECK(svc.clamp_value("aseTaperTime", 99.0) == 25.5);
+    // Unknown param passes through untouched.
+    CHECK(svc.clamp_value("unknown", 9999.0) == 9999.0);
+}
+
+// -----------------------------------------------------------------------
+// 14. clamp_value falls back to data_type range with scale + translate
+// -----------------------------------------------------------------------
+TEST_CASE("lte: clamp_value falls back to data_type range") {
+    lte::EditService svc;
+    svc.set_limits_provider([](const std::string& name) -> std::optional<lte::ParameterLimits> {
+        if (name == "rawU08") {
+            lte::ParameterLimits lim;
+            lim.data_type = "U08";  // no explicit min/max
+            return lim;
+        }
+        if (name == "scaled") {
+            lte::ParameterLimits lim;
+            lim.data_type = "U08";
+            lim.scale = 0.1;           // display = raw * 0.1 → [0.0, 25.5]
+            lim.translate = 0.0;
+            return lim;
+        }
+        if (name == "signed16") {
+            lte::ParameterLimits lim;
+            lim.data_type = "S16";
+            return lim;
+        }
+        return std::nullopt;
+    });
+    CHECK(svc.clamp_value("rawU08", 500.0) == 255.0);
+    CHECK(svc.clamp_value("rawU08", -1.0)  == 0.0);
+    CHECK(svc.clamp_value("scaled", 50.0) == doctest::Approx(25.5));
+    CHECK(svc.clamp_value("scaled", -2.0) == 0.0);
+    CHECK(svc.clamp_value("signed16", 99999.0) == 32767.0);
+    CHECK(svc.clamp_value("signed16", -99999.0) == -32768.0);
+}
+
+// -----------------------------------------------------------------------
+// 15. stage_scalar_value clamps out-of-range input and reports the flag
+// -----------------------------------------------------------------------
+TEST_CASE("lte: stage_scalar_value clamps and flags") {
+    lte::TuneFile tf;
+    tf.signature = "test";
+    tf.constants = {{"boostPercent", 50.0, "%", 0, 0, 0}};
+    lte::EditService svc;
+    svc.set_tune_file(&tf);
+    svc.set_limits_provider([](const std::string& name) -> std::optional<lte::ParameterLimits> {
+        if (name == "boostPercent") {
+            lte::ParameterLimits lim;
+            lim.min_value = 0.0;
+            lim.max_value = 100.0;
+            lim.data_type = "U08";
+            return lim;
+        }
+        return std::nullopt;
+    });
+
+    bool clamped = false;
+    svc.stage_scalar_value("boostPercent", "75", &clamped);
+    CHECK_FALSE(clamped);
+    CHECK(std::get<double>(svc.get_value("boostPercent")->value) == 75.0);
+
+    svc.stage_scalar_value("boostPercent", "250", &clamped);
+    CHECK(clamped);
+    CHECK(std::get<double>(svc.get_value("boostPercent")->value) == 100.0);
+
+    svc.stage_scalar_value("boostPercent", "-10", &clamped);
+    CHECK(clamped);
+    CHECK(std::get<double>(svc.get_value("boostPercent")->value) == 0.0);
+}
+
+// -----------------------------------------------------------------------
+// 16. stage_list_cell clamps cell edits to the declared range
+// -----------------------------------------------------------------------
+TEST_CASE("lte: stage_list_cell clamps table cells") {
+    lte::TuneFile tf;
+    tf.signature = "test";
+    tf.constants = {{"veTable", std::vector<double>(16, 80.0), "%", 0, 4, 4}};
+    lte::EditService svc;
+    svc.set_tune_file(&tf);
+    svc.set_limits_provider([](const std::string& name) -> std::optional<lte::ParameterLimits> {
+        if (name == "veTable") {
+            lte::ParameterLimits lim;
+            lim.min_value = 0.0;
+            lim.max_value = 200.0;
+            lim.data_type = "U08";
+            return lim;
+        }
+        return std::nullopt;
+    });
+
+    bool clamped = false;
+    svc.stage_list_cell("veTable", 0, 150.0, &clamped);
+    CHECK_FALSE(clamped);
+    CHECK(std::get<std::vector<double>>(svc.get_value("veTable")->value)[0] == 150.0);
+
+    svc.stage_list_cell("veTable", 1, 999.0, &clamped);
+    CHECK(clamped);
+    CHECK(std::get<std::vector<double>>(svc.get_value("veTable")->value)[1] == 200.0);
+
+    svc.stage_list_cell("veTable", 2, -50.0, &clamped);
+    CHECK(clamped);
+    CHECK(std::get<std::vector<double>>(svc.get_value("veTable")->value)[2] == 0.0);
+}
+
+// -----------------------------------------------------------------------
+// 17. replace_list clamps every cell — covers proposals and smoothing
+// -----------------------------------------------------------------------
+TEST_CASE("lte: replace_list clamps generator output") {
+    lte::TuneFile tf;
+    tf.signature = "test";
+    tf.constants = {{"boostTable", std::vector<double>(4, 0.0), "%", 0, 2, 2}};
+    lte::EditService svc;
+    svc.set_tune_file(&tf);
+    svc.set_limits_provider([](const std::string& name) -> std::optional<lte::ParameterLimits> {
+        if (name == "boostTable") {
+            lte::ParameterLimits lim;
+            lim.min_value = 0.0;
+            lim.max_value = 100.0;
+            lim.data_type = "U08";
+            return lim;
+        }
+        return std::nullopt;
+    });
+
+    svc.replace_list("boostTable", {-5.0, 50.0, 200.0, 75.0});
+    const auto& v = std::get<std::vector<double>>(svc.get_value("boostTable")->value);
+    CHECK(v[0] == 0.0);
+    CHECK(v[1] == 50.0);
+    CHECK(v[2] == 100.0);
+    CHECK(v[3] == 75.0);
+}
+
+// -----------------------------------------------------------------------
+// 18. No provider installed → no clamping (backwards compatible)
+// -----------------------------------------------------------------------
+TEST_CASE("lte: no provider, no clamp") {
+    auto tune = make_tune();
+    lte::EditService svc;
+    svc.set_tune_file(&tune);
+    // Provider deliberately not set.
+    bool clamped = true;
+    svc.stage_scalar_value("reqFuel", "99999", &clamped);
+    CHECK_FALSE(clamped);
+    CHECK(std::get<double>(svc.get_value("reqFuel")->value) == 99999.0);
+}

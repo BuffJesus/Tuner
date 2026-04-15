@@ -86,10 +86,15 @@
 #include "tuner_core/firmware_flash_builder.hpp"
 #include "tuner_core/teensy_hex_image.hpp"
 #include "tuner_core/teensy_hid_flasher.hpp"
+#include "tuner_core/udp_discovery.hpp"
+#include "tuner_core/mdns_discovery.hpp"
+#include "tuner_core/airbear_api.hpp"
+#include "tuner_core/ts_dash_file.hpp"
 #include "tuner_core/live_analyze_session.hpp"
 #include "tuner_core/live_capture_session.hpp"
 #include "tuner_core/live_trigger_logger.hpp"
 #include "tuner_core/virtual_dyno.hpp"
+#include "tuner_core/compressor_map_modeling.hpp"
 #include "tuner_core/boost_table_generator.hpp"
 #include "tuner_core/mock_ecu_runtime.hpp"
 #include "tuner_core/math_expression_evaluator.hpp"
@@ -131,6 +136,7 @@ namespace tt = tuner_theme;
 #include <QDialog>
 #include <QFont>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPointer>
 #include <QPushButton>
 #include <QPaintEvent>
@@ -142,6 +148,7 @@ namespace tt = tuner_theme;
 #include <QLineEdit>
 #include <QTimer>
 #include <QList>
+#include <QInputDialog>
 #include <QListWidget>
 #include <QMainWindow>
 #include <QScrollArea>
@@ -550,12 +557,17 @@ struct EcuConnection {
         return (it != runtime.end()) ? it->second : 0.0;
     }
 
-    // Disconnect and clean up.
+    // Disconnect and clean up — leaves the EcuConnection in a clean
+    // disconnected state (controller destroyed, transport released,
+    // info cleared). Safe to call multiple times; safe to call after a
+    // failed connect attempt (TN-001).
     void close() {
         if (controller) {
             try { controller->disconnect(); } catch (...) {}
+            controller.reset();
         }
         connected = false;
+        info = {};
         runtime.clear();
         page_cache.clear();
         dirty_pages.clear();
@@ -566,10 +578,14 @@ struct EcuConnection {
 // LiveDataHttpServer — background HTTP server for external dashboard
 // consumers. Serves live ECU channel data as JSON on port 8080 so
 // browser-based dashboards (Airbear web UI, phones, tablets, Raspberry
-// Pi) can display gauges on the local network. Three endpoints:
-//   GET /api/channels       — all channel name:value pairs
-//   GET /api/channels/{name} — single channel with units
-//   GET /api/status         — connection state + signature
+// Pi) can display gauges on the local network. Endpoints (v1):
+//   GET /api/v1/channels       — all channel name:value pairs
+//   GET /api/v1/channels/{name} — single channel with units
+//   GET /api/v1/status         — connection state + signature
+//   GET /api/version           — self-describing API manifest
+// Legacy unversioned paths (/api/channels etc) still work as aliases
+// so existing dashboards don't break. A future /api/v2/ can land
+// breaking changes without stranding v1 clients.
 // CORS headers on every response for cross-origin browser access.
 // ---------------------------------------------------------------------------
 
@@ -679,17 +695,33 @@ private:
         std::string content_type = "application/json";
         int status = 200;
 
-        if (path == "/api/channels") {
+        // Normalise the path so /api/v1/X and /api/X route to the same
+        // handler. /api/v1/ is the forward-looking prefix; /api/ stays
+        // for backward compatibility with existing dashboards. A future
+        // /api/v2/ can break compat without stranding current clients.
+        std::string route = path;
+        const std::string versioned = "/api/v1/";
+        if (route.rfind(versioned, 0) == 0) {
+            route = "/api/" + route.substr(versioned.size());
+        }
+
+        if (route == "/api/channels") {
             body = build_channels_json();
-        } else if (path.find("/api/channels/") == 0) {
-            std::string name = path.substr(14);
+        } else if (route.find("/api/channels/") == 0) {
+            std::string name = route.substr(14);
             body = build_channel_json(name);
             if (body.empty()) { status = 404; body = "{\"error\":\"channel not found\"}"; }
-        } else if (path == "/api/status") {
+        } else if (route == "/api/status") {
             body = build_status_json();
+        } else if (route == "/api/version" || route == "/api" || route == "/api/") {
+            // Self-describing endpoint so clients can pin to a version.
+            body = "{\"api_version\":\"1\",\"supported\":[\"/api/v1/channels\","
+                   "\"/api/v1/channels/{name}\",\"/api/v1/status\"],"
+                   "\"aliases\":[\"/api/channels\",\"/api/channels/{name}\",\"/api/status\"]}";
         } else {
             status = 404;
-            body = "{\"error\":\"not found\",\"endpoints\":[\"/api/channels\",\"/api/status\"]}";
+            body = "{\"error\":\"not found\",\"endpoints\":[\"/api/v1/channels\","
+                   "\"/api/v1/channels/{name}\",\"/api/v1/status\",\"/api/version\"]}";
         }
 
         // Build HTTP response with CORS headers.
@@ -759,7 +791,6 @@ constexpr const char* kCurrentProjectDateKey = "projects/current/date";
 std::vector<QPointer<QWidget>> g_retired_windows;
 
 std::filesystem::path selected_ini_path();
-std::filesystem::path selected_tune_path();
 
 std::string debug_log_path() {
     return QDir(QDir::tempPath()).filePath("tuner_app_debug.log").toStdString();
@@ -788,6 +819,8 @@ std::filesystem::path find_native_definition() {
         "tests/fixtures/native/Ford300_TwinGT28_BaseStartup.tunerdef",
         "../tests/fixtures/native/Ford300_TwinGT28_BaseStartup.tunerdef",
         "../../tests/fixtures/native/Ford300_TwinGT28_BaseStartup.tunerdef",
+        "../../../tests/fixtures/native/Ford300_TwinGT28_BaseStartup.tunerdef",
+        "D:/Documents/JetBrains/Python/Tuner/tests/fixtures/native/Ford300_TwinGT28_BaseStartup.tunerdef",
     };
     for (const char* c : candidates)
         if (std::filesystem::exists(c)) return c;
@@ -795,8 +828,15 @@ std::filesystem::path find_native_definition() {
 }
 
 std::filesystem::path find_production_ini() {
+    // Only return the project-stored path if it's actually an .ini —
+    // legacy saves stashed .tunerdef paths into `projects/current/ini`
+    // which made the INI parser try to swallow JSON.
     auto selected = selected_ini_path();
-    if (!selected.empty()) return selected;
+    if (!selected.empty()) {
+        std::string ext = selected.extension().string();
+        for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (ext == ".ini") return selected;
+    }
     const char* candidates[] = {
         "tests/fixtures/speeduino-dropbear-v2.0.1.ini",
         "../tests/fixtures/speeduino-dropbear-v2.0.1.ini",
@@ -810,54 +850,170 @@ std::filesystem::path find_production_ini() {
     return {};
 }
 
-std::filesystem::path find_production_msq() {
-    auto selected = selected_tune_path();
-    if (!selected.empty()) {
-        std::string ext = selected.extension().string();
-        for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (ext == ".msq") return selected;
-    }
-    const char* candidates[] = {
-        "tests/fixtures/Ford300_TwinGT28_BaseStartup.msq",
-        "../tests/fixtures/Ford300_TwinGT28_BaseStartup.msq",
-        "../../tests/fixtures/Ford300_TwinGT28_BaseStartup.msq",
-        "../../../tests/fixtures/Ford300_TwinGT28_BaseStartup.msq",
-        "D:/Documents/JetBrains/Python/Tuner/tests/fixtures/Ford300_TwinGT28_BaseStartup.msq",
-    };
-    for (const char* c : candidates) {
-        if (std::filesystem::exists(c)) return c;
-    }
-    return {};
-}
-
-// Native format file finders — look for .tuner files in the native/ fixture
-// directory. These take priority over .msq when present.
-std::filesystem::path find_native_tune() {
-    auto selected = selected_tune_path();
-    if (!selected.empty()) {
-        std::string ext = selected.extension().string();
-        for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (ext == ".tuner") return selected;
-    }
-    const char* candidates[] = {
-        "tests/fixtures/native/Ford300_TwinGT28_BaseStartup.tuner",
-        "../tests/fixtures/native/Ford300_TwinGT28_BaseStartup.tuner",
-        "../../tests/fixtures/native/Ford300_TwinGT28_BaseStartup.tuner",
-        "../../../tests/fixtures/native/Ford300_TwinGT28_BaseStartup.tuner",
-        "D:/Documents/JetBrains/Python/Tuner/tests/fixtures/native/Ford300_TwinGT28_BaseStartup.tuner",
-    };
-    for (const char* c : candidates) {
-        if (std::filesystem::exists(c)) return c;
-    }
-    return {};
-}
-
 // Load the active ECU definition — prefers native .tunerdef v2,
 // falls back to legacy INI parsing. This is the ONE place in the
 // app that decides how to load a definition. All call sites should
 // use this instead of calling compile_ecu_definition_file directly.
+// Keyword → (group_id, group_title) lookup for v1 .tunerdef synthesis.
+// Given a legacy parameter / table / curve name, pick the right
+// workspace group. The same grammar used below for menus and dialogs,
+// so a table named `veTable` and a parameter named `veLoadMin` both
+// land in the Fuel group without the operator having to reorganise.
+inline std::pair<std::string, std::string>
+classify_native_name(const std::string& raw) {
+    std::string s = raw;
+    for (auto& c : s)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    auto has = [&](const char* kw) { return s.find(kw) != std::string::npos; };
+    if (has("spark") || has("ign") || has("dwell") || has("advance"))
+        return {"ignition", "Ignition"};
+    if (has("boost") || has("vvt") || has("turbo"))
+        return {"boost", "Boost / Airflow"};
+    if (has("idle") || has("iac"))
+        return {"idle", "Idle"};
+    if (has("warmup") || has("wue") || has("ase") || has("prime") || has("crank"))
+        return {"enrich", "Startup / Enrich"};
+    if (has("ae") || has("accel") || has("enrich"))
+        return {"enrich", "Startup / Enrich"};
+    if (has("knock"))
+        return {"protect", "Protection"};
+    if (has("rev") || has("launch") || has("nitrous") || has("wmi") || has("flex"))
+        return {"protect", "Protection"};
+    if (has("baro") || has("iat") || has("clt") || has("tps") || has("map") ||
+        has("sensor") || has("cal") || has("egotype"))
+        return {"sensors", "Sensors"};
+    if (has("fuel") || has("inject") || has("staged") || has("ve") || has("afr") ||
+        has("lambda") || has("stoich"))
+        return {"fuel", "Fuel"};
+    if (has("can") || has("serial") || has("logger") || has("comms"))
+        return {"comms", "Comms"};
+    return {"general", "General"};
+}
+
+// Convert a v1 semantic NativeDefinition into the legacy-style
+// NativeEcuDefinition layout (menus + dialogs + table_editors +
+// curve_editors + constants) that `compile_pages` can consume. This
+// is how the .tunerdef ecosystem becomes tree-navigable without
+// requiring an accompanying INI.
+tuner_core::NativeEcuDefinition
+synthesize_ecu_definition(const tuner_core::NativeDefinition& nd) {
+    tuner_core::NativeEcuDefinition def;
+
+    // ---- parameters → scalars + dialogs grouped by keyword ----
+    std::unordered_map<std::string, std::string> group_id_to_title;
+    std::unordered_map<std::string, std::vector<const tuner_core::NativeParameter*>> by_group;
+    for (const auto& p : nd.parameters) {
+        auto [gid, gtitle] = classify_native_name(p.legacy_name);
+        group_id_to_title[gid] = gtitle;
+        by_group[gid].push_back(&p);
+
+        tuner_core::IniScalar s;
+        s.name = p.legacy_name;
+        s.data_type = "U08";
+        if (p.units && !p.units->empty()) s.units = *p.units;
+        s.min_value = p.min_value;
+        s.max_value = p.max_value;
+        def.constants.scalars.push_back(std::move(s));
+    }
+
+    // One dialog per group with all its parameters as fields.
+    for (const auto& [gid, gtitle] : group_id_to_title) {
+        tuner_core::IniDialog dlg;
+        dlg.dialog_id = gid + "_params";
+        dlg.title = gtitle + " Parameters";
+        for (const auto* p : by_group[gid]) {
+            tuner_core::IniDialogField f;
+            f.label = p->label.value_or(p->legacy_name);
+            f.parameter_name = p->legacy_name;
+            dlg.fields.push_back(std::move(f));
+        }
+        def.dialogs.dialogs.push_back(std::move(dlg));
+    }
+
+    // ---- tables → arrays + table_editors, classified into groups ----
+    std::unordered_map<std::string, std::vector<std::string>> table_ids_by_group;
+    for (const auto& t : nd.tables) {
+        auto [gid, gtitle] = classify_native_name(t.legacy_name);
+        group_id_to_title[gid] = gtitle;
+        table_ids_by_group[gid].push_back(t.legacy_name);
+
+        tuner_core::IniArray a;
+        a.name = t.legacy_name;
+        a.data_type = "U08";
+        a.rows = t.rows;
+        a.columns = t.columns;
+        if (t.units && !t.units->empty()) a.units = *t.units;
+        def.constants.arrays.push_back(std::move(a));
+
+        tuner_core::IniTableEditor te;
+        te.table_id = t.legacy_name;
+        te.map_id = t.legacy_name;
+        te.title = t.label.value_or(t.legacy_name);
+        te.z_bins = t.legacy_name;
+        if (t.x_axis_id) te.x_bins = *t.x_axis_id;
+        if (t.y_axis_id) te.y_bins = *t.y_axis_id;
+        def.table_editors.editors.push_back(std::move(te));
+    }
+
+    // ---- curves → curve_editors, classified into groups ----
+    std::unordered_map<std::string, std::vector<std::string>> curve_ids_by_group;
+    for (const auto& c : nd.curves) {
+        auto [gid, gtitle] = classify_native_name(c.legacy_name);
+        group_id_to_title[gid] = gtitle;
+        curve_ids_by_group[gid].push_back(c.legacy_name);
+
+        tuner_core::IniCurveEditor ce;
+        ce.name = c.legacy_name;
+        ce.title = c.label.value_or(c.legacy_name);
+        ce.x_bins_param = c.x_axis_id.value_or("");
+        tuner_core::CurveYBins yb;
+        yb.param = c.legacy_name;
+        ce.y_bins_list.push_back(std::move(yb));
+        def.curve_editors.curves.push_back(std::move(ce));
+    }
+
+    // ---- menus: one per group, pointing at its dialog + tables ----
+    // Stable order — sort group ids alphabetically so the tree doesn't
+    // reshuffle between runs as unordered_map iteration order changes.
+    std::vector<std::string> group_ids;
+    group_ids.reserve(group_id_to_title.size());
+    for (const auto& [gid, _] : group_id_to_title) group_ids.push_back(gid);
+    std::sort(group_ids.begin(), group_ids.end());
+
+    for (const auto& gid : group_ids) {
+        tuner_core::IniMenu menu;
+        menu.title = group_id_to_title[gid];
+
+        // Dialog item first if the group has any scalar parameters.
+        if (by_group.count(gid)) {
+            tuner_core::IniMenuItem item;
+            item.target = gid + "_params";
+            item.label = group_id_to_title[gid] + " Parameters";
+            menu.items.push_back(std::move(item));
+        }
+        // Then one item per table in the group.
+        for (const auto& tid : table_ids_by_group[gid]) {
+            tuner_core::IniMenuItem item;
+            item.target = tid;
+            item.label = tid;
+            menu.items.push_back(std::move(item));
+        }
+        def.menus.menus.push_back(std::move(menu));
+    }
+
+    def.byte_order = "little";
+    return def;
+}
+
 std::optional<tuner_core::NativeEcuDefinition> load_active_definition() {
-    // Try native .tunerdef v2 first.
+    auto has_layout = [](const tuner_core::NativeEcuDefinition& def) {
+        return !def.menus.menus.empty()
+            || !def.dialogs.dialogs.empty()
+            || !def.table_editors.editors.empty();
+    };
+
+    // Try native .tunerdef v2 first (full layout sections).
+    std::optional<tuner_core::NativeEcuDefinition> native_def;
     auto native_path = find_native_definition();
     if (!native_path.empty()) {
         try {
@@ -865,14 +1021,46 @@ std::optional<tuner_core::NativeEcuDefinition> load_active_definition() {
             std::printf("[def] Loaded native .tunerdef v2: %s\n",
                 native_path.string().c_str());
             std::fflush(stdout);
-            return def;
+            debug_log("load_active_definition v2 loaded menus="
+                + std::to_string(def.menus.menus.size())
+                + " dialogs=" + std::to_string(def.dialogs.dialogs.size())
+                + " table_editors=" + std::to_string(def.table_editors.editors.size()));
+            if (has_layout(def)) return def;
+            native_def = std::move(def);
         } catch (const std::exception& e) {
-            std::printf("[def] v2 load failed (%s), falling back to INI\n",
+            std::printf("[def] v2 load failed (%s), trying v1 semantic\n",
                 e.what());
             std::fflush(stdout);
+            debug_log(std::string("load_active_definition v2 threw: ") + e.what());
+
+            // v2 gate rejected schema "1.0" — try the v1 semantic loader
+            // (parameters + tables + curves) and synthesize legacy layout
+            // sections so the tree + editors work without an INI.
+            try {
+                std::ifstream in(native_path, std::ios::binary);
+                std::ostringstream buf; buf << in.rdbuf();
+                auto semantic = tuner_core::load_definition(buf.str());
+                auto def = synthesize_ecu_definition(semantic);
+                debug_log("load_active_definition v1 synthesized menus="
+                    + std::to_string(def.menus.menus.size())
+                    + " dialogs=" + std::to_string(def.dialogs.dialogs.size())
+                    + " table_editors=" + std::to_string(def.table_editors.editors.size())
+                    + " curves=" + std::to_string(def.curve_editors.curves.size()));
+                std::printf("[def] Synthesized layout from v1 .tunerdef: "
+                    "%zu menus, %zu dialogs, %zu tables, %zu curves\n",
+                    def.menus.menus.size(), def.dialogs.dialogs.size(),
+                    def.table_editors.editors.size(),
+                    def.curve_editors.curves.size());
+                std::fflush(stdout);
+                if (has_layout(def)) return def;
+                native_def = std::move(def);
+            } catch (const std::exception& e2) {
+                debug_log(std::string("load_active_definition v1 threw: ") + e2.what());
+            }
         }
     }
-    // Fall back to legacy INI.
+    // Fall back to legacy INI. Production Speeduino INIs carry the
+    // [Menu] / [UserDefined] / [TableEditor] sections the tree needs.
     auto ini_path = find_production_ini();
     if (!ini_path.empty()) {
         try {
@@ -880,9 +1068,21 @@ std::optional<tuner_core::NativeEcuDefinition> load_active_definition() {
             std::printf("[def] Loaded legacy INI: %s\n",
                 ini_path.string().c_str());
             std::fflush(stdout);
+            debug_log("load_active_definition ini loaded menus="
+                + std::to_string(def.menus.menus.size())
+                + " dialogs=" + std::to_string(def.dialogs.dialogs.size())
+                + " table_editors=" + std::to_string(def.table_editors.editors.size()));
             return def;
-        } catch (...) {}
+        } catch (const std::exception& e) {
+            std::printf("[def] INI load failed: %s\n", e.what());
+            std::fflush(stdout);
+            debug_log(std::string("load_active_definition ini threw: ") + e.what());
+        }
     }
+    // INI unavailable. If we had a layout-less native def, return it
+    // anyway so downstream code has SOMETHING — better a half-empty
+    // editor than a completely blank workspace.
+    if (native_def) return native_def;
     return std::nullopt;
 }
 
@@ -1095,14 +1295,6 @@ std::filesystem::path selected_ini_path() {
     auto project = active_project();
     if (!project.ini_path.empty() && std::filesystem::exists(project.ini_path)) {
         return project.ini_path;
-    }
-    return {};
-}
-
-std::filesystem::path selected_tune_path() {
-    auto project = active_project();
-    if (!project.msq_path.empty() && std::filesystem::exists(project.msq_path)) {
-        return project.msq_path;
     }
     return {};
 }
@@ -1580,7 +1772,7 @@ bool open_connect_dialog(QWidget* parent,
                          QLabel* conn_label) {
     auto* dlg = new QDialog(parent);
     dlg->setWindowTitle("Connect to ECU");
-    dlg->setFixedSize(380, 260);
+    dlg->setFixedSize(380, 360);
     {
         char ds[768];
         std::snprintf(ds, sizeof(ds),
@@ -1698,104 +1890,87 @@ bool open_connect_dialog(QWidget* parent,
     scan_row->addWidget(scan_status, 1);
     tcp_layout->addLayout(scan_row);
 
+    // Discovered-device list. Hidden until a scan returns at least one
+    // device; click a row to auto-fill host + port.
+    auto* device_list = new QListWidget;
+    device_list->setMaximumHeight(80);
+    device_list->hide();
+    tcp_layout->addWidget(device_list);
+
+    QObject::connect(device_list, &QListWidget::itemClicked,
+                     [host_edit, tcp_port_edit](QListWidgetItem* item) {
+        auto ip   = item->data(Qt::UserRole).toString();
+        auto port = item->data(Qt::UserRole + 1).toInt();
+        host_edit->setText(ip);
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%d", port > 0 ? port : 2000);
+        tcp_port_edit->setText(QString::fromUtf8(buf));
+    });
+
     QObject::connect(scan_btn, &QPushButton::clicked,
-                     [host_edit, tcp_port_edit, scan_status, scan_btn]() {
+                     [host_edit, tcp_port_edit, scan_status, scan_btn, device_list]() {
         scan_status->setText(QString::fromUtf8("Scanning..."));
         scan_btn->setEnabled(false);
+        device_list->clear();
+        device_list->hide();
         QApplication::processEvents();
 
 #ifdef _WIN32
-        // Broadcast DISCOVER_SLAVE_SERVER on UDP port 21846.
-        SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (sock == INVALID_SOCKET) {
-            scan_status->setText(QString::fromUtf8("Socket error"));
-            scan_btn->setEnabled(true);
-            return;
+        namespace ud = tuner_core::udp_discovery;
+        namespace md = tuner_core::mdns_discovery;
+        auto devices = ud::discover(std::chrono::milliseconds(2000));
+        std::vector<md::ResolvedHost> mdns_hosts;
+        if (auto resolved = md::resolve("speeduino.local", 2000)) {
+            md::merge_result(mdns_hosts, std::move(*resolved));
         }
 
-        // Enable broadcast.
-        int bcast = 1;
-        setsockopt(sock, SOL_SOCKET, SO_BROADCAST,
-                   reinterpret_cast<const char*>(&bcast), sizeof(bcast));
-
-        // Set receive timeout to 2 seconds.
-        DWORD timeout_ms = 2000;
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
-                   reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
-
-        // Bind to any port.
-        sockaddr_in local{};
-        local.sin_family = AF_INET;
-        local.sin_port = 0;
-        local.sin_addr.s_addr = htonl(INADDR_ANY);
-        bind(sock, reinterpret_cast<sockaddr*>(&local), sizeof(local));
-
-        // Send discovery message.
-        const char* msg = "DISCOVER_SLAVE_SERVER";
-        sockaddr_in dest{};
-        dest.sin_family = AF_INET;
-        dest.sin_port = htons(21846);
-        dest.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-        sendto(sock, msg, static_cast<int>(std::strlen(msg)), 0,
-               reinterpret_cast<sockaddr*>(&dest), sizeof(dest));
-
-        // Collect responses (2-second window).
-        struct DiscoveredDevice {
-            std::string name;
-            std::string ip;
-            int port = 2000;
-        };
-        std::vector<DiscoveredDevice> devices;
-
-        char buf[2048];
-        sockaddr_in from{};
-        int from_len = sizeof(from);
-        while (true) {
-            int n = recvfrom(sock, buf, sizeof(buf) - 1, 0,
-                             reinterpret_cast<sockaddr*>(&from), &from_len);
-            if (n <= 0) break;
-            buf[n] = '\0';
-
-            // Parse response — key:value lines.
-            DiscoveredDevice dev;
-            char ip_buf[64];
-            inet_ntop(AF_INET, &from.sin_addr, ip_buf, sizeof(ip_buf));
-            dev.ip = ip_buf;
-
-            std::istringstream stream(buf);
-            std::string line;
-            while (std::getline(stream, line)) {
-                if (!line.empty() && line.back() == '\r') line.pop_back();
-                auto colon = line.find(':');
-                if (colon == std::string::npos) continue;
-                std::string key = line.substr(0, colon);
-                std::string val = line.substr(colon + 1);
-                while (!val.empty() && val.front() == ' ') val.erase(val.begin());
-                if (key == "name" || key == "slave") dev.name = val;
-                if (key == "port") {
-                    try { dev.port = std::stoi(val); } catch (...) {}
-                }
-            }
-            if (dev.name.empty()) dev.name = dev.ip;
-            devices.push_back(std::move(dev));
-        }
-        closesocket(sock);
-
-        if (devices.empty()) {
+        if (devices.empty() && mdns_hosts.empty()) {
             scan_status->setText(QString::fromUtf8(
-                "No devices found \xe2\x80\x94 check WiFi connection"));
+                "No devices found \xe2\x80\x94 check WiFi or mDNS"));
         } else {
-            // Use first device.
-            host_edit->setText(QString::fromUtf8(devices[0].ip.c_str()));
-            char port_buf[16];
-            std::snprintf(port_buf, sizeof(port_buf), "%d", devices[0].port);
-            tcp_port_edit->setText(QString::fromUtf8(port_buf));
+            for (const auto& d : devices) {
+                auto* item = new QListWidgetItem(
+                    QString::fromUtf8(d.display_label().c_str()));
+                item->setData(Qt::UserRole,     QString::fromUtf8(d.source_ip.c_str()));
+                item->setData(Qt::UserRole + 1, d.port);
+                device_list->addItem(item);
+            }
+            for (const auto& host : mdns_hosts) {
+                bool duplicate = false;
+                for (int i = 0; i < device_list->count(); ++i) {
+                    auto* existing = device_list->item(i);
+                    auto existing_ip = existing->data(Qt::UserRole).toString().toStdString();
+                    auto existing_port = existing->data(Qt::UserRole + 1).toInt();
+                    if (existing_ip == host.ip_address && existing_port == host.port) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (duplicate) continue;
+
+                auto* item = new QListWidgetItem(
+                    QString::fromUtf8(host.display_label().c_str()));
+                item->setData(Qt::UserRole, QString::fromUtf8(host.ip_address.c_str()));
+                item->setData(Qt::UserRole + 1, host.port);
+                device_list->addItem(item);
+            }
+            device_list->show();
+            // Auto-select the first discovered device.
+            device_list->setCurrentRow(0);
+            if (auto* first = device_list->item(0)) {
+                host_edit->setText(first->data(Qt::UserRole).toString());
+                char port_buf[16];
+                std::snprintf(port_buf, sizeof(port_buf), "%d",
+                              first->data(Qt::UserRole + 1).toInt() > 0
+                                  ? first->data(Qt::UserRole + 1).toInt()
+                                  : 2000);
+                tcp_port_edit->setText(QString::fromUtf8(port_buf));
+            }
 
             char found[128];
             std::snprintf(found, sizeof(found),
-                "\xe2\x9c\x85 Found: %s (%s:%d)",
-                devices[0].name.c_str(), devices[0].ip.c_str(),
-                devices[0].port);
+                "\xe2\x9c\x85 Found %d target%s",
+                device_list->count(), device_list->count() == 1 ? "" : "s");
             scan_status->setText(QString::fromUtf8(found));
         }
 #else
@@ -1889,6 +2064,30 @@ bool open_connect_dialog(QWidget* parent,
             ecu_conn->info = info;
             ecu_conn->connected = true;
 
+            // Airbear fw_variant cross-check. When connected via TCP
+            // (framed), fetch /api/realtime from the bridge's HTTP port
+            // and compare its fw_variant field to the ECU signature we
+            // just got over the framed `'Q'` exchange. A mismatch means
+            // the Teensy has been swapped between sessions; warn the
+            // operator but don't block the connection.
+            if (info.framed && transport_combo->currentIndex() == 1) {
+#ifdef _WIN32
+                std::string host = host_edit->text().toStdString();
+                namespace aa = tuner_core::airbear_api;
+                auto realtime = aa::fetch_realtime(
+                    host, 80, std::chrono::milliseconds(1500));
+                if (realtime && realtime->fw_variant) {
+                    auto result = aa::signatures_match(
+                        info.signature, *realtime->fw_variant);
+                    if (result.state == aa::SignatureMatch::Mismatch) {
+                        QMessageBox::warning(dlg,
+                            "Firmware mismatch",
+                            QString::fromUtf8(result.detail.c_str()));
+                    }
+                }
+#endif
+            }
+
             // Update sidebar connection indicator.
             if (conn_label) {
                 char ct[256];
@@ -1902,6 +2101,10 @@ bool open_connect_dialog(QWidget* parent,
             success = true;
             dlg->accept();
         } catch (const std::exception& e) {
+            // TN-001: roll back to a clean disconnected state — closes
+            // the half-open transport, destroys the partial controller,
+            // clears any signature the caller may have managed to read.
+            ecu_conn->close();
             char err[512];
             std::snprintf(err, sizeof(err),
                 "<span style='color: %s;'>%s</span>",
@@ -1977,21 +2180,49 @@ QWidget* build_tune_tab(
         + "\" sig=\"" + current_project->signature + "\"");
     auto* project_label = new QLabel;
     project_label->setTextFormat(Qt::RichText);
-    auto refresh_project_label = [project_label, current_project]() {
+    // Slot badge — populated from the loaded native tune (v1.1+ carries
+    // `slot_index` + optional `slot_name`). Empty for v1.0 / .msq loads,
+    // which surface as "slot 0 (unnamed)" only when the firmware-side
+    // `activeTuneSlot` byte eventually ships. For now the badge lives
+    // next to the signature in the project bar and stays hidden when
+    // there's nothing to say.
+    auto slot_badge_text = std::make_shared<std::string>();
+    auto refresh_project_label = [project_label, current_project, slot_badge_text]() {
         const std::string project_name =
             current_project->name.empty() ? "Speeduino Project" : current_project->name;
         const std::string signature =
             current_project->signature.empty() ? "signature unknown" : current_project->signature;
-        char text_buf[640];
-        std::snprintf(text_buf, sizeof(text_buf),
-            "<span style='font-size: %dpx; font-weight: bold; color: %s;'>"
-            "%s</span>"
-            "<span style='color: %s; font-size: %dpx;'>"
-            "  \xc2\xb7  %s  \xc2\xb7  Ctrl+K to search  \xc2\xb7  Ctrl+R to review</span>",
-            tt::font_label, tt::text_primary,
-            project_name.c_str(),
-            tt::text_dim, tt::font_small,
-            signature.c_str());
+        char text_buf[768];
+        const char* slot_suffix_fmt = slot_badge_text->empty() ? "" :
+            "  \xc2\xb7  <span style='color: %s; background-color: %s; "
+            "padding: 1px 6px; border-radius: 3px;'>%s</span>";
+        if (slot_badge_text->empty()) {
+            std::snprintf(text_buf, sizeof(text_buf),
+                "<span style='font-size: %dpx; font-weight: bold; color: %s;'>"
+                "%s</span>"
+                "<span style='color: %s; font-size: %dpx;'>"
+                "  \xc2\xb7  %s  \xc2\xb7  Ctrl+K to search  \xc2\xb7  Ctrl+R to review</span>",
+                tt::font_label, tt::text_primary,
+                project_name.c_str(),
+                tt::text_dim, tt::font_small,
+                signature.c_str());
+        } else {
+            std::snprintf(text_buf, sizeof(text_buf),
+                "<span style='font-size: %dpx; font-weight: bold; color: %s;'>"
+                "%s</span>"
+                "<span style='color: %s; font-size: %dpx;'>"
+                "  \xc2\xb7  %s  \xc2\xb7  "
+                "<span style='color: %s; background-color: %s; "
+                "padding: 1px 6px; border-radius: 3px;'>%s</span>"
+                "  \xc2\xb7  Ctrl+K to search  \xc2\xb7  Ctrl+R to review</span>",
+                tt::font_label, tt::text_primary,
+                project_name.c_str(),
+                tt::text_dim, tt::font_small,
+                signature.c_str(),
+                tt::text_primary, tt::fill_primary_mid,
+                slot_badge_text->c_str());
+        }
+        (void)slot_suffix_fmt;  // kept for future overlay reuse
         project_label->setText(QString::fromUtf8(text_buf));
     };
     refresh_project_label();
@@ -2226,6 +2457,12 @@ QWidget* build_tune_tab(
         }
     };
     auto crosshair = std::make_shared<CrosshairState>();
+
+    // Forward-declared refresher so the cell editor handler (connected
+    // before `refresh_visible_table` is defined) can call it by sharing
+    // the same indirection. Assigned below once the real lambda exists.
+    auto refresh_visible_table_ptr = std::make_shared<std::function<void()>>();
+
     // Shared cell editor overlay — created once, repositioned over the
     // target cell on double-click. Never deleted (hidden when not editing).
     auto* cell_editor_widget = new QLineEdit(container);
@@ -2272,16 +2509,50 @@ QWidget* build_tune_tab(
     auto tune_file = std::make_shared<lte::TuneFile>();
     auto edit_svc = shared_edit_svc;
     std::string tune_source;  // "native" or "msq" — for status display
+    // Only auto-load tune when current project has an explicit tune path.
+    // Skip fixture fallback: new projects / fresh launches should land on
+    // empty editors, not silently show the Ford 300 demo tune.
+    // Dispatch directly on the user's selected tune — no fixture fallback.
+    // Extension picks the loader: .tuner → native JSON, .msq → legacy XML.
+    // An empty / missing / unknown-extension path leaves the editor blank
+    // rather than silently hijacking the project with a demo fixture.
+    bool tune_loaded = false;
     {
-        bool loaded = false;
-        // Try native .tuner first.
-        auto native_tune_path = find_native_tune();
-        debug_log("build_tune_tab find_native_tune=\"" + native_tune_path.string() + "\"");
-        if (!native_tune_path.empty()) {
+        bool& loaded = tune_loaded;
+        std::filesystem::path user_tune = current_project->msq_path;
+        std::string ext;
+        bool exists_ok = !user_tune.empty() && std::filesystem::exists(user_tune);
+        if (exists_ok) {
+            ext = user_tune.extension().string();
+            for (auto& c : ext)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        debug_log("build_tune_tab user_tune=\"" + user_tune.string()
+            + "\" ext=\"" + ext + "\" exists=" + (exists_ok ? "1" : "0"));
+
+        if (exists_ok && ext == ".tuner") {
             try {
-                auto native_tune = tuner_core::load_tune_file(native_tune_path);
+                auto native_tune = tuner_core::load_tune_file(user_tune);
                 tune_file->signature = native_tune.definition_signature.value_or("");
                 if (out_signature) *out_signature = tune_file->signature;
+                // Slot metadata — surface in the project bar so the
+                // operator always sees which slot this tune targets.
+                if (native_tune.slot_index.has_value()) {
+                    char slot_buf[96];
+                    if (native_tune.slot_name.has_value()
+                        && !native_tune.slot_name->empty()) {
+                        std::snprintf(slot_buf, sizeof(slot_buf),
+                            "Slot %d \xc2\xb7 %s",
+                            *native_tune.slot_index,
+                            native_tune.slot_name->c_str());
+                    } else {
+                        std::snprintf(slot_buf, sizeof(slot_buf),
+                            "Slot %d", *native_tune.slot_index);
+                    }
+                    *slot_badge_text = slot_buf;
+                } else {
+                    slot_badge_text->clear();
+                }
                 for (const auto& [name, val] : native_tune.values) {
                     lte::TuneValue tv;
                     tv.name = name;
@@ -2300,86 +2571,87 @@ QWidget* build_tune_tab(
                 edit_svc->set_tune_file(tune_file.get());
                 tune_source = "native";
                 loaded = true;
-                std::printf("[tune] Loaded native .tuner: %s (%d values)\n",
-                    native_tune_path.string().c_str(),
-                    static_cast<int>(native_tune.values.size()));
-                std::fflush(stdout);
-                debug_log("build_tune_tab loaded native tune path=\"" + native_tune_path.string()
-                    + "\" values=" + std::to_string(native_tune.values.size()) + "");
-                // Save to recent projects.
-                RecentProject rp;
-                rp.name = humanize_msq_name(native_tune_path);
-                rp.msq_path = native_tune_path.string();
-                rp.signature = tune_file->signature;
-                rp.last_opened = today_iso();
-                auto def_p = find_native_definition();
-                if (!def_p.empty()) rp.ini_path = def_p.string();
-                else { auto ip = find_production_ini(); if (!ip.empty()) rp.ini_path = ip.string(); }
-                push_recent_project(rp);
-                save_current_project(rp);
-                *current_project = rp;
+                current_project->last_opened = today_iso();
+                if (!tune_file->signature.empty())
+                    current_project->signature = tune_file->signature;
+                push_recent_project(*current_project);
+                save_current_project(*current_project);
                 refresh_project_label();
+                debug_log("build_tune_tab loaded native values="
+                    + std::to_string(native_tune.values.size()));
             } catch (const std::exception& e) {
-                std::printf("[tune] Native .tuner load failed: %s\n", e.what());
-                std::fflush(stdout);
                 debug_log(std::string("build_tune_tab native load failed: ") + e.what());
             }
-        }
-        // Fall back to .msq if native wasn't found or failed.
-        if (!loaded) {
-            auto msq_path = find_production_msq();
-            debug_log("build_tune_tab find_production_msq=\"" + msq_path.string() + "\"");
-            if (!msq_path.empty()) {
-                try {
-                    auto msq = tuner_core::parse_msq(msq_path);
-                    tune_file->signature = msq.signature;
-                    if (out_signature) *out_signature = msq.signature;
-                    for (const auto& c : msq.constants) {
-                        lte::TuneValue tv;
-                        tv.name = c.name;
-                        tv.units = c.units;
-                        tv.digits = c.digits;
-                        tv.rows = c.rows;
-                        tv.cols = c.cols;
-                        if (c.rows > 0 || c.cols > 0) {
-                            std::vector<double> vals;
-                            std::istringstream iss(c.text);
-                            double d;
-                            while (iss >> d) vals.push_back(d);
-                            if (!vals.empty()) {
-                                tv.value = std::move(vals);
-                            } else {
-                                tv.value = c.text;
-                            }
-                        } else {
-                            try {
-                                tv.value = std::stod(c.text);
-                            } catch (...) {
-                                tv.value = c.text;
-                            }
-                        }
-                        tune_file->constants.push_back(std::move(tv));
+        } else if (exists_ok && ext == ".msq") {
+            try {
+                auto msq = tuner_core::parse_msq(user_tune);
+                tune_file->signature = msq.signature;
+                if (out_signature) *out_signature = msq.signature;
+                for (const auto& c : msq.constants) {
+                    lte::TuneValue tv;
+                    tv.name = c.name;
+                    tv.units = c.units;
+                    tv.digits = c.digits;
+                    tv.rows = c.rows;
+                    tv.cols = c.cols;
+                    if (c.rows > 0 || c.cols > 0) {
+                        std::vector<double> vals;
+                        std::istringstream iss(c.text);
+                        double d;
+                        while (iss >> d) vals.push_back(d);
+                        if (!vals.empty()) tv.value = std::move(vals);
+                        else               tv.value = c.text;
+                    } else {
+                        try { tv.value = std::stod(c.text); }
+                        catch (...) { tv.value = c.text; }
                     }
-                    edit_svc->set_tune_file(tune_file.get());
-                    tune_source = "msq";
-                    loaded = true;
-                    RecentProject rp;
-                    rp.name = humanize_msq_name(msq_path);
-                    rp.msq_path = msq_path.string();
-                    rp.signature = tune_file->signature;
-                    rp.last_opened = today_iso();
-                    auto ini_p = find_production_ini();
-                    if (!ini_p.empty()) rp.ini_path = ini_p.string();
-                    push_recent_project(rp);
-                    save_current_project(rp);
-                    *current_project = rp;
-                    refresh_project_label();
-                    debug_log("build_tune_tab loaded msq path=\"" + msq_path.string()
-                        + "\" constants=" + std::to_string(msq.constants.size()) + "");
-                } catch (...) {}
+                    tune_file->constants.push_back(std::move(tv));
+                }
+                edit_svc->set_tune_file(tune_file.get());
+                tune_source = "msq";
+                loaded = true;
+                current_project->last_opened = today_iso();
+                if (!tune_file->signature.empty())
+                    current_project->signature = tune_file->signature;
+                push_recent_project(*current_project);
+                save_current_project(*current_project);
+                refresh_project_label();
+                debug_log("build_tune_tab loaded msq constants="
+                    + std::to_string(msq.constants.size()));
+            } catch (const std::exception& e) {
+                debug_log(std::string("build_tune_tab msq load failed: ") + e.what());
             }
         }
     }
+
+    // Empty-state message: when no tune loaded, rewrite the detail card
+    // to tell the operator what to do next rather than the generic
+    // "Pick a page" welcome. Distinguishes first-launch (no project
+    // at all) from new-project (project set, no tune yet).
+    if (!tune_loaded) {
+        const bool has_project = !current_project->name.empty()
+            || !current_project->ini_path.empty();
+        char msg[640];
+        if (has_project) {
+            std::snprintf(msg, sizeof(msg),
+                "No tune loaded for this project.  "
+                "\xc2\xb7  Run the <b>Engine Setup Wizard</b> (Setup tab) "
+                "to generate a base tune from your engine specs.  "
+                "\xc2\xb7  Or use <b>File \xe2\x86\x92 Open Tune...</b> "
+                "to load an existing .tuner or .msq.");
+        } else {
+            std::snprintf(msg, sizeof(msg),
+                "Pick a page from the tree on the left to see its parameters, "
+                "table, or curve.  \xc2\xb7  Press Ctrl+K to search by name.  "
+                "\xc2\xb7  Press F1 for every keyboard shortcut.");
+        }
+        detail_label->setText(QString::fromUtf8(msg));
+        if (has_project) {
+            selected_label->setText(QString::fromUtf8(
+                "New project \xe2\x80\x94 no tune loaded yet"));
+        }
+    }
+
     int total_pages = 0, table_pages = 0, scalar_pages = 0;
 
     // Groups + rebuild lambda defined here so they're in scope for both
@@ -2459,6 +2731,39 @@ QWidget* build_tune_tab(
         try {
             auto& def = *def_opt;
             *ecu_def = def;  // Store for handler use.
+
+            // Install a clamp provider on the edit service so every
+            // staged value is fenced by the definition's min/max and
+            // data-type range. Keeps out-of-range values from silently
+            // corrupting bytes on write. The lambda captures `ecu_def`
+            // by value — a `shared_ptr<NativeEcuDefinition>` — so the
+            // provider survives every page switch and stays in sync
+            // with the currently-active def.
+            edit_svc->set_limits_provider(
+                [ecu_def](const std::string& name) -> std::optional<lte::ParameterLimits> {
+                    for (const auto& s : ecu_def->constants.scalars) {
+                        if (s.name != name) continue;
+                        lte::ParameterLimits lim;
+                        lim.min_value = s.min_value;
+                        lim.max_value = s.max_value;
+                        lim.data_type = s.data_type;
+                        lim.scale = s.scale;
+                        lim.translate = s.translate;
+                        return lim;
+                    }
+                    for (const auto& a : ecu_def->constants.arrays) {
+                        if (a.name != name) continue;
+                        lte::ParameterLimits lim;
+                        lim.min_value = a.min_value;
+                        lim.max_value = a.max_value;
+                        lim.data_type = a.data_type;
+                        lim.scale = a.scale;
+                        lim.translate = a.translate;
+                        return lim;
+                    }
+                    return std::nullopt;
+                });
+
             auto compiled = dlns::compile_pages(def.menus, def.dialogs, def.table_editors);
             // Add curve editor pages. Each CurveEditor in the INI becomes
             // a LayoutPage with curve_editor_id set to the curve name.
@@ -2614,13 +2919,33 @@ QWidget* build_tune_tab(
             workspace->set_pages(page_ids);
 
             rebuild_tree("");
+            debug_log("build_tune_tab compiled pages total=" + std::to_string(total_pages)
+                + " table=" + std::to_string(table_pages)
+                + " scalar=" + std::to_string(scalar_pages)
+                + " groups=" + std::to_string(all_groups->size()));
 
-            // Show compiled page count in the detail pane.
-            char info[256];
-            std::snprintf(info, sizeof(info),
-                "Compiled %d layout pages from INI (%d table, %d scalar).",
-                total_pages, table_pages, scalar_pages);
-            detail_label->setText(QString::fromUtf8(info));
+            if (total_pages == 0) {
+                // Definition loaded but produced no pages — happens when a
+                // minimal .tunerdef lacks menus/dialogs/table_editors.
+                auto* err = new QTreeWidgetItem(tree);
+                err->setText(0, "Definition has no pages");
+                err->setToolTip(0, QString::fromUtf8(
+                    "The definition parsed successfully but carries no "
+                    "menus, dialogs, or table editors for the tree to "
+                    "show. Pick a full definition via File \xe2\x86\x92 "
+                    "New Project."));
+                detail_label->setText(QString::fromUtf8(
+                    "Definition loaded but has no tuneable pages.  "
+                    "\xc2\xb7  Pick a fuller .tunerdef / .ini via "
+                    "File \xe2\x86\x92 <b>New Project</b>."));
+            } else {
+                // Show compiled page count in the detail pane.
+                char info[256];
+                std::snprintf(info, sizeof(info),
+                    "Compiled %d layout pages from INI (%d table, %d scalar).",
+                    total_pages, table_pages, scalar_pages);
+                detail_label->setText(QString::fromUtf8(info));
+            }
 
             // Restore tree expansion state and last-selected page from
             // the prior session.  Expansion is stored as a comma-separated
@@ -2694,10 +3019,36 @@ QWidget* build_tune_tab(
                              [save_expansion](QTreeWidgetItem*) { save_expansion(); });
             QObject::connect(tree, &QTreeWidget::itemCollapsed,
                              [save_expansion](QTreeWidgetItem*) { save_expansion(); });
-        } catch (const std::exception&) {
+        } catch (const std::exception& e) {
             auto* err = new QTreeWidgetItem(tree);
-            err->setText(0, "Failed to parse INI");
+            err->setText(0, "Failed to parse definition");
+            err->setToolTip(0, QString::fromUtf8(e.what()));
+            debug_log(std::string("build_tune_tab def parse failed: ") + e.what());
+            char msg[512];
+            std::snprintf(msg, sizeof(msg),
+                "Definition failed to parse: %s  "
+                "\xc2\xb7  File \xe2\x86\x92 New Project to pick a different "
+                "definition.", e.what());
+            detail_label->setText(QString::fromUtf8(msg));
         }
+    } else {
+        // No definition available. This is the "tree empty" case the
+        // operator sees when QSettings has no definition path, none of
+        // the fixture candidates resolve, or the selected file is gone.
+        auto* err = new QTreeWidgetItem(tree);
+        err->setText(0, "No ECU definition loaded");
+        err->setToolTip(0, QString::fromUtf8(
+            "File \xe2\x86\x92 New Project lets you pick a .tunerdef or "
+            ".ini. The tree populates from its menus + table editors."));
+        debug_log("build_tune_tab load_active_definition returned nullopt");
+        detail_label->setText(QString::fromUtf8(
+            "No ECU definition loaded.  "
+            "\xc2\xb7  File \xe2\x86\x92 <b>New Project</b> and pick a "
+            ".tunerdef or .ini to populate the tree.  "
+            "\xc2\xb7  The definition drives every parameter the editor "
+            "can see."));
+        selected_label->setText(QString::fromUtf8(
+            "No definition \xe2\x80\x94 tree has nothing to show yet"));
     }
 
     // ---- signals ----
@@ -2837,7 +3188,7 @@ QWidget* build_tune_tab(
     QObject::connect(cell_editor_widget, &QLineEdit::editingFinished,
         [crosshair, edit_svc, workspace, on_staged_changed,
          refresh_page_chip, refresh_review_button,
-         refresh_tree_state_indicators]() {
+         refresh_tree_state_indicators, refresh_visible_table_ptr]() {
         auto* editor = crosshair->cell_editor;
         if (!editor || !editor->isVisible()) return;
         int r = crosshair->edit_row;
@@ -2861,18 +3212,40 @@ QWidget* build_tune_tab(
         int flat = model_row * crosshair->cols + c;
 
         try {
-            edit_svc->stage_list_cell(crosshair->z_param, flat, new_val);
+            bool clamped = false;
+            edit_svc->stage_list_cell(crosshair->z_param, flat, new_val, &clamped);
             workspace->stage_edit(crosshair->page_target, crosshair->z_param);
-            // Update cell label text.
+            // Re-read the stored value so the cell text reflects any clamp.
+            double shown = new_val;
+            if (auto* tv = edit_svc->get_value(crosshair->z_param)) {
+                if (std::holds_alternative<std::vector<double>>(tv->value)) {
+                    const auto& vs = std::get<std::vector<double>>(tv->value);
+                    if (flat >= 0 && flat < static_cast<int>(vs.size()))
+                        shown = vs[flat];
+                }
+            }
             if (r < static_cast<int>(crosshair->cell_labels.size())
                 && c < static_cast<int>(crosshair->cell_labels[r].size())) {
                 char buf[16];
-                std::snprintf(buf, sizeof(buf), "%.4g", new_val);
+                std::snprintf(buf, sizeof(buf), "%.4g", shown);
                 crosshair->cell_labels[r][c]->setText(QString::fromUtf8(buf));
+            }
+            if (clamped) {
+                // Flash the editor amber so the operator knows the
+                // value they typed was clipped to the declared range.
+                char s[192];
+                std::snprintf(s, sizeof(s),
+                    "QLineEdit { background: %s; color: %s; "
+                    "border: 2px solid %s; }",
+                    tt::bg_panel, tt::text_primary, tt::accent_warning);
+                editor->setStyleSheet(QString::fromUtf8(s));
             }
             (*refresh_page_chip)(crosshair->page_target);
             (*refresh_review_button)();
             (*refresh_tree_state_indicators)();
+            // Re-run the full heatmap refresh so the staged-change diff
+            // overlay (amber left edge) appears on the just-edited cell.
+            if (*refresh_visible_table_ptr) (*refresh_visible_table_ptr)();
             if (on_staged_changed) on_staged_changed();
         } catch (...) {}
         editor->hide();
@@ -2889,6 +3262,17 @@ QWidget* build_tune_tab(
         auto* tv = edit_svc->get_value(crosshair->z_param);
         if (!tv || !std::holds_alternative<std::vector<double>>(tv->value)) return;
         const auto& vals = std::get<std::vector<double>>(tv->value);
+
+        // Base values for staged-change diff overlay. When the staged
+        // list differs from the base, the changed cells get a colored
+        // left edge so the operator can see at a glance which cells
+        // are part of the pending edit.
+        const std::vector<double>* base_vals = nullptr;
+        if (auto* base_tv = edit_svc->get_base_value(crosshair->z_param)) {
+            if (std::holds_alternative<std::vector<double>>(base_tv->value))
+                base_vals = &std::get<std::vector<double>>(base_tv->value);
+        }
+        const bool dirty = edit_svc->is_dirty(crosshair->z_param);
 
         // Recompute heatmap colors from current values.
         namespace tv_ns = tuner_core::table_view;
@@ -2917,16 +3301,52 @@ QWidget* build_tune_tab(
                 std::snprintf(buf, sizeof(buf), "%.4g", vals[flat]);
                 crosshair->cell_labels[r][c]->setText(QString::fromUtf8(buf));
 
-                // Update heatmap color.
+                // Per-cell diff flag — triggers the staged-change overlay
+                // when the stored value has drifted from the base. Only
+                // meaningful when the table is dirty; unchanged cells
+                // stay clean even if the base list is present.
+                bool changed = false;
+                if (dirty && base_vals != nullptr
+                    && flat < base_vals->size()) {
+                    double delta = vals[flat] - (*base_vals)[flat];
+                    if (delta < 0) delta = -delta;
+                    changed = delta > 1e-9;
+                }
+
+                // Update heatmap color + optional staged-change overlay.
                 if (render_opt.has_value()
                     && model_r < render_opt->rows
                     && static_cast<std::size_t>(c) < render_opt->columns) {
                     const auto& cell = render_opt->cells[model_r][c];
-                    char style_buf[256];
-                    std::snprintf(style_buf, sizeof(style_buf),
-                        "background-color: %s; color: %s; border: none; "
-                        "padding: 1px; font-size: %dpx; font-family: monospace;",
-                        cell.background_hex.c_str(), cell.foreground_hex.c_str(), cell_font);
+                    char style_buf[384];
+                    if (changed) {
+                        // Amber left edge + slightly heavier border —
+                        // same grammar as the "N staged" chip on the
+                        // sidebar, so diff markers read as the same
+                        // visual tier across the app.
+                        std::snprintf(style_buf, sizeof(style_buf),
+                            "background-color: %s; color: %s; "
+                            "border: 1px solid %s; border-left: 3px solid %s; "
+                            "padding: 1px; font-size: %dpx; font-family: monospace;",
+                            cell.background_hex.c_str(), cell.foreground_hex.c_str(),
+                            tt::accent_warning, tt::accent_warning, cell_font);
+                        // Tooltip on hover tells the operator what
+                        // changed — "was X, now Y (+Δ)".
+                        char tip[96];
+                        std::snprintf(tip, sizeof(tip),
+                            "was %.4g \xe2\x86\x92 %.4g (%+.4g)",
+                            (*base_vals)[flat], vals[flat],
+                            vals[flat] - (*base_vals)[flat]);
+                        crosshair->cell_labels[r][c]->setToolTip(
+                            QString::fromUtf8(tip));
+                    } else {
+                        std::snprintf(style_buf, sizeof(style_buf),
+                            "background-color: %s; color: %s; border: none; "
+                            "padding: 1px; font-size: %dpx; font-family: monospace;",
+                            cell.background_hex.c_str(), cell.foreground_hex.c_str(),
+                            cell_font);
+                        crosshair->cell_labels[r][c]->setToolTip(QString());
+                    }
                     crosshair->base_styles[r][c] = style_buf;
                     crosshair->cell_labels[r][c]->setStyleSheet(
                         QString::fromUtf8(style_buf));
@@ -2939,6 +3359,9 @@ QWidget* build_tune_tab(
                 crosshair->sel_bottom, crosshair->sel_right);
         }
     };
+    // Publish the refresher through the shared indirection so the
+    // cell-editor handler (connected earlier) can call it.
+    *refresh_visible_table_ptr = refresh_visible_table;
 
     // Helper: apply a table_edit transform to the current table and
     // re-render the affected cells. Takes a lambda that transforms
@@ -3233,7 +3656,7 @@ QWidget* build_tune_tab(
                       refresh_review_button, refresh_tree_state_indicators,
                       on_staged_changed, visible_editors,
                       detail_label, params_scroll, right_layout, heatmap_widget,
-                      page_map, item_info, edit_svc, tune_file, ecu_def, crosshair, workspace, splitter, right_layout, container](
+                      page_map, item_info, edit_svc, tune_file, ecu_def, crosshair, workspace, splitter, container](
                          QTreeWidgetItem* current, QTreeWidgetItem*) {
         if (current == nullptr) return;
 
@@ -3504,26 +3927,34 @@ QWidget* build_tune_tab(
                                       refresh_tree_state_indicators,
                                       sc_min, sc_max, has_range]() {
                         std::string new_val = edit->text().toStdString();
-                        // Range validation.
-                        if (has_range) {
-                            try {
-                                double nv = std::stod(new_val);
-                                if (nv < sc_min || nv > sc_max) {
-                                    char tip[128];
-                                    std::snprintf(tip, sizeof(tip),
-                                        "Out of range: %.4g \xe2\x80\x93 %.4g",
-                                        sc_min, sc_max);
-                                    edit->setToolTip(QString::fromUtf8(tip));
-                                    edit->setStyleSheet(QString::fromUtf8(
-                                        tt::scalar_editor_style(
-                                            tt::EditorState::Warning).c_str()));
-                                    // Still stage — warning only, not blocking.
-                                }
-                            } catch (...) {}
-                        }
                         try {
-                            edit_svc->stage_scalar_value(param_name, new_val);
+                            bool clamped = false;
+                            edit_svc->stage_scalar_value(param_name, new_val, &clamped);
                             workspace->stage_edit(page_target, param_name);
+                            // Repaint the editor with the stored value so
+                            // the operator sees the clamp immediately
+                            // rather than after a page round-trip.
+                            if (clamped) {
+                                auto* tv = edit_svc->get_value(param_name);
+                                if (tv && std::holds_alternative<double>(tv->value)) {
+                                    char buf[32];
+                                    std::snprintf(buf, sizeof(buf), "%.4g",
+                                        std::get<double>(tv->value));
+                                    edit->setText(QString::fromUtf8(buf));
+                                }
+                                char tip[160];
+                                if (has_range)
+                                    std::snprintf(tip, sizeof(tip),
+                                        "Clamped to range: %.4g \xe2\x80\x93 %.4g",
+                                        sc_min, sc_max);
+                                else
+                                    std::snprintf(tip, sizeof(tip),
+                                        "Clamped to declared limits");
+                                edit->setToolTip(QString::fromUtf8(tip));
+                                edit->setStyleSheet(QString::fromUtf8(
+                                    tt::scalar_editor_style(
+                                        tt::EditorState::Warning).c_str()));
+                            }
                             // Sub-slice 92: refresh the per-page staged
                             // chip immediately, then notify MainWindow
                             // so the sidebar "N staged" badge can
@@ -4875,30 +5306,54 @@ public:
     void set_widget_id(const std::string& id) { widget_id_ = id; }
 
 protected:
+    // Drag-vs-click disambiguation: left press records the anchor and
+    // arms a click. mouseMoveEvent starts a QDrag once the pointer
+    // crosses the threshold and marks the interaction as a drag so
+    // the release handler knows to skip the navigation callback.
+    // Without this split, operators couldn't drag at all because
+    // `mousePressEvent` fired the navigation callback immediately.
     void mousePressEvent(QMouseEvent* ev) override {
-        drag_start_ = ev->pos();
-        if (click_cb_) click_cb_(cfg_.title);
+        if (ev->button() == Qt::LeftButton) {
+            drag_start_ = ev->pos();
+            dragged_ = false;
+            click_armed_ = true;
+            ev->accept();
+        } else {
+            ev->ignore();  // let contextMenuEvent fire on right-click
+        }
     }
 
     void contextMenuEvent(QContextMenuEvent* ev) override {
         if (!config_cb_) return;
-        auto* menu = new QMenu(this);
-        auto* action = menu->addAction("Configure Gauge...");
+        QMenu menu(this);
+        auto* action = menu.addAction("Configure Gauge...");
         QObject::connect(action, &QAction::triggered,
                          [this]() { if (config_cb_) config_cb_(widget_id_); });
-        menu->popup(ev->globalPos());
+        menu.exec(ev->globalPos());
+        ev->accept();
     }
 
     void mouseMoveEvent(QMouseEvent* ev) override {
         if (!(ev->buttons() & Qt::LeftButton)) return;
         if (widget_id_.empty()) return;
         if ((ev->pos() - drag_start_).manhattanLength() < 12) return;
+        // Past the drag threshold — this is a drag, not a click.
+        dragged_ = true;
+        click_armed_ = false;
         auto* drag = new QDrag(this);
         auto* mime = new QMimeData;
         mime->setData("application/x-gauge-widget-id",
             QByteArray::fromStdString(widget_id_));
         drag->setMimeData(mime);
         drag->exec(Qt::MoveAction);
+    }
+
+    void mouseReleaseEvent(QMouseEvent* ev) override {
+        if (ev->button() == Qt::LeftButton && click_armed_ && !dragged_) {
+            if (click_cb_) click_cb_(cfg_.title);
+        }
+        click_armed_ = false;
+        dragged_ = false;
     }
 
     void dragEnterEvent(QDragEnterEvent* ev) override {
@@ -5104,6 +5559,495 @@ private:
     double value_ = 0;
     bool has_value_ = false;
     ClickCallback click_cb_;
+    ConfigCallback config_cb_;
+    SwapCallback swap_cb_;
+    std::string widget_id_;
+    QPoint drag_start_;
+    bool click_armed_ = false;
+    bool dragged_ = false;
+};
+
+// ---------------------------------------------------------------------------
+// DraggableCardLabel — QLabel subclass that mirrors DialGaugeWidget's
+// drag-swap + right-click-config pattern so number-card dashboard
+// widgets are first-class citizens alongside the dial gauges. Uses the
+// same `application/x-gauge-widget-id` MIME type, so cards and dials
+// can swap positions interchangeably.
+// ---------------------------------------------------------------------------
+
+class DraggableCardLabel : public QLabel {
+public:
+    using ConfigCallback = std::function<void(const std::string& widget_id)>;
+    using SwapCallback = std::function<void(const std::string& from, const std::string& to)>;
+
+    explicit DraggableCardLabel(QWidget* parent = nullptr) : QLabel(parent) {
+        setAcceptDrops(true);
+        setCursor(Qt::PointingHandCursor);
+    }
+
+    void set_widget_id(const std::string& id) { widget_id_ = id; }
+    void set_config_callback(ConfigCallback cb) { config_cb_ = std::move(cb); }
+    void set_swap_callback(SwapCallback cb) { swap_cb_ = std::move(cb); }
+
+protected:
+    void mousePressEvent(QMouseEvent* ev) override {
+        if (ev->button() == Qt::LeftButton) {
+            drag_start_ = ev->pos();
+            ev->accept();
+        } else {
+            QLabel::mousePressEvent(ev);  // lets contextMenuEvent fire
+        }
+    }
+
+    void mouseMoveEvent(QMouseEvent* ev) override {
+        if (!(ev->buttons() & Qt::LeftButton)) { QLabel::mouseMoveEvent(ev); return; }
+        if (widget_id_.empty()) return;
+        if ((ev->pos() - drag_start_).manhattanLength() < 12) return;
+        auto* drag = new QDrag(this);
+        auto* mime = new QMimeData;
+        mime->setData("application/x-gauge-widget-id",
+            QByteArray::fromStdString(widget_id_));
+        drag->setMimeData(mime);
+        drag->exec(Qt::MoveAction);
+    }
+
+    void contextMenuEvent(QContextMenuEvent* ev) override {
+        if (!config_cb_) return;
+        QMenu menu(this);
+        auto* action = menu.addAction("Configure Gauge...");
+        QObject::connect(action, &QAction::triggered,
+                         [this]() { if (config_cb_) config_cb_(widget_id_); });
+        menu.exec(ev->globalPos());
+        ev->accept();
+    }
+
+    void dragEnterEvent(QDragEnterEvent* ev) override {
+        if (ev->mimeData()->hasFormat("application/x-gauge-widget-id")) {
+            auto from_id = ev->mimeData()->data("application/x-gauge-widget-id").toStdString();
+            if (from_id != widget_id_) ev->acceptProposedAction();
+        }
+    }
+
+    void dropEvent(QDropEvent* ev) override {
+        auto from_id = ev->mimeData()->data("application/x-gauge-widget-id").toStdString();
+        if (swap_cb_ && from_id != widget_id_) swap_cb_(from_id, widget_id_);
+        ev->acceptProposedAction();
+    }
+
+private:
+    ConfigCallback config_cb_;
+    SwapCallback swap_cb_;
+    std::string widget_id_;
+    QPoint drag_start_;
+};
+
+// ---------------------------------------------------------------------------
+// BarGaugeWidget — horizontal bar gauge. Renders a filled track with
+// zone coloring, the current value + units overlaid. Shares the
+// DialGaugeWidget drag/drop/config pattern so bars can swap positions
+// with cards and dials interchangeably (same MIME type).
+// ---------------------------------------------------------------------------
+
+class BarGaugeWidget : public QWidget {
+public:
+    struct Config {
+        std::string title;
+        std::string units;
+        double min_value = 0;
+        double max_value = 100;
+        struct Zone { double lo; double hi; std::string color; };
+        std::vector<Zone> zones;
+    };
+
+    using ConfigCallback = std::function<void(const std::string& widget_id)>;
+    using SwapCallback = std::function<void(const std::string& from, const std::string& to)>;
+
+    explicit BarGaugeWidget(const Config& cfg, QWidget* parent = nullptr)
+        : QWidget(parent), cfg_(cfg) {
+        setMinimumHeight(60);
+        setAcceptDrops(true);
+        setCursor(Qt::PointingHandCursor);
+    }
+
+    void set_value(double v) { value_ = v; has_value_ = true; update(); }
+    void clear_value() { has_value_ = false; update(); }
+    void set_widget_id(const std::string& id) { widget_id_ = id; }
+    void set_config_callback(ConfigCallback cb) { config_cb_ = std::move(cb); }
+    void set_swap_callback(SwapCallback cb) { swap_cb_ = std::move(cb); }
+
+protected:
+    void mousePressEvent(QMouseEvent* ev) override {
+        if (ev->button() == Qt::LeftButton) {
+            drag_start_ = ev->pos();
+            ev->accept();
+        } else {
+            // Pass through so contextMenuEvent fires for right-click.
+            ev->ignore();
+        }
+    }
+
+    void mouseMoveEvent(QMouseEvent* ev) override {
+        if (!(ev->buttons() & Qt::LeftButton)) return;
+        if (widget_id_.empty()) return;
+        if ((ev->pos() - drag_start_).manhattanLength() < 12) return;
+        auto* drag = new QDrag(this);
+        auto* mime = new QMimeData;
+        mime->setData("application/x-gauge-widget-id",
+            QByteArray::fromStdString(widget_id_));
+        drag->setMimeData(mime);
+        drag->exec(Qt::MoveAction);
+    }
+
+    void contextMenuEvent(QContextMenuEvent* ev) override {
+        if (!config_cb_) return;
+        QMenu menu(this);
+        auto* action = menu.addAction("Configure Gauge...");
+        QObject::connect(action, &QAction::triggered,
+                         [this]() { if (config_cb_) config_cb_(widget_id_); });
+        // exec() blocks until the operator picks or dismisses. popup()
+        // returned immediately and was dismissed by the release event
+        // that follows the right-click, so the menu flashed and vanished.
+        menu.exec(ev->globalPos());
+        ev->accept();
+    }
+
+    void dragEnterEvent(QDragEnterEvent* ev) override {
+        if (ev->mimeData()->hasFormat("application/x-gauge-widget-id")) {
+            auto from_id = ev->mimeData()->data("application/x-gauge-widget-id").toStdString();
+            if (from_id != widget_id_) ev->acceptProposedAction();
+        }
+    }
+
+    void dropEvent(QDropEvent* ev) override {
+        auto from_id = ev->mimeData()->data("application/x-gauge-widget-id").toStdString();
+        if (swap_cb_ && from_id != widget_id_) swap_cb_(from_id, widget_id_);
+        ev->acceptProposedAction();
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+
+        const double w = width(), h = height();
+        const double pad = 10.0;
+        const double head_h = 22.0;
+        const double foot_h = 12.0;
+        const double bar_h = std::max(10.0, h - head_h - foot_h - 2 * pad);
+        const double bar_y = pad + head_h;
+        QRectF track(pad, bar_y, w - 2 * pad, bar_h);
+
+        // Theme colors — pulled from tt:: tokens so the widget reads as
+        // the same visual tier as number cards and dial gauges.
+        const QColor bg_card(QString::fromUtf8(tt::bg_panel));
+        const QColor bg_track(QString::fromUtf8(tt::bg_inset));
+        const QColor col_border(QString::fromUtf8(tt::border));
+        const QColor col_title(QString::fromUtf8(tt::text_muted));
+        const QColor col_value(QString::fromUtf8(tt::text_primary));
+        const QColor col_tick(QString::fromUtf8(tt::text_dim));
+
+        auto zone_color = [](const std::string& c) -> QColor {
+            if (c == "ok")      return QColor(QString::fromUtf8(tt::accent_ok));
+            if (c == "warning") return QColor(QString::fromUtf8(tt::accent_warning));
+            if (c == "danger")  return QColor(QString::fromUtf8(tt::accent_danger));
+            return QColor(QString::fromUtf8(tt::accent_primary));
+        };
+
+        // Current value zone + fill color.
+        QColor fill = QColor(QString::fromUtf8(tt::accent_primary));
+        for (const auto& z : cfg_.zones) {
+            if (has_value_ && value_ >= z.lo && value_ <= z.hi) {
+                fill = zone_color(z.color);
+                break;
+            }
+        }
+
+        // Background card with a subtle border, matching the number-card
+        // tier so bars and cards don't read as different generations of UI.
+        {
+            QRectF card(1, 1, w - 2, h - 2);
+            p.setPen(QPen(col_border, 1));
+            p.setBrush(bg_card);
+            p.drawRoundedRect(card, tt::radius_md, tt::radius_md);
+        }
+
+        // Top accent strip — matches the number-card `border-top: Npx
+        // solid accent` so bars, number cards, and the sidebar-item
+        // "active" rail all read as the same visual grammar.
+        {
+            const double accent_h = 2.5;
+            QPainterPath top_clip;
+            top_clip.addRoundedRect(QRectF(1, 1, w - 2, h - 2),
+                                    tt::radius_md, tt::radius_md);
+            p.save();
+            p.setClipPath(top_clip);
+            p.setPen(Qt::NoPen);
+            p.setBrush(fill);
+            p.drawRect(QRectF(1, 1, w - 2, accent_h));
+            p.restore();
+        }
+
+        // Header row — title left, value right. Value outside the bar
+        // is always readable regardless of fill position.
+        QFont title_font = font();
+        title_font.setPixelSize(tt::font_small);
+        p.setFont(title_font);
+        p.setPen(col_title);
+        p.drawText(QRectF(pad, pad, w - 2 * pad, head_h),
+                   Qt::AlignLeft | Qt::AlignVCenter,
+                   QString::fromUtf8(cfg_.title.c_str()));
+
+        {
+            QFont vf = font();
+            vf.setPixelSize(tt::font_label);
+            vf.setBold(true);
+            p.setFont(vf);
+            p.setPen(col_value);
+            char buf[64];
+            if (!has_value_) std::snprintf(buf, sizeof(buf), "\xe2\x80\x94");
+            else if (cfg_.units.empty())
+                std::snprintf(buf, sizeof(buf),
+                              (value_ == static_cast<int>(value_)) ? "%.0f" : "%.1f",
+                              value_);
+            else
+                std::snprintf(buf, sizeof(buf),
+                              (value_ == static_cast<int>(value_)) ? "%.0f %s" : "%.1f %s",
+                              value_, cfg_.units.c_str());
+            p.drawText(QRectF(pad, pad, w - 2 * pad, head_h),
+                       Qt::AlignRight | Qt::AlignVCenter,
+                       QString::fromUtf8(buf));
+        }
+
+        // Bar track.
+        p.setPen(Qt::NoPen);
+        p.setBrush(bg_track);
+        p.drawRoundedRect(track, bar_h / 2.0, bar_h / 2.0);
+
+        const double span = cfg_.max_value - cfg_.min_value;
+        if (span > 0 && has_value_) {
+            double frac = std::clamp((value_ - cfg_.min_value) / span, 0.0, 1.0);
+            if (frac > 0.001) {
+                double fw = std::max(bar_h, track.width() * frac);
+                QRectF filled(track.left(), track.top(), fw, track.height());
+                // Clip the fill to the track so rounded corners on the
+                // right edge stay inside the track instead of spilling out.
+                QPainterPath clip;
+                clip.addRoundedRect(track, bar_h / 2.0, bar_h / 2.0);
+                p.save();
+                p.setClipPath(clip);
+                p.setBrush(fill);
+                p.drawRoundedRect(filled, bar_h / 2.0, bar_h / 2.0);
+                p.restore();
+            }
+        }
+
+        // Footer ticks — min, mid, max labels keep the scale discoverable
+        // without adding gridlines that would clash with the rounded bar.
+        {
+            QFont ff = font();
+            ff.setPixelSize(tt::font_micro);
+            p.setFont(ff);
+            p.setPen(col_tick);
+            char lo[24], md[24], hi[24];
+            auto fmt = [&](char* b, std::size_t n, double v) {
+                if (v == static_cast<int>(v))
+                    std::snprintf(b, n, "%.0f", v);
+                else
+                    std::snprintf(b, n, "%.1f", v);
+            };
+            fmt(lo, sizeof(lo), cfg_.min_value);
+            fmt(md, sizeof(md), (cfg_.min_value + cfg_.max_value) / 2.0);
+            fmt(hi, sizeof(hi), cfg_.max_value);
+            QRectF foot(pad, bar_y + bar_h + 1.0, w - 2 * pad, foot_h);
+            p.drawText(foot, Qt::AlignLeft | Qt::AlignVCenter,
+                       QString::fromUtf8(lo));
+            p.drawText(foot, Qt::AlignHCenter | Qt::AlignVCenter,
+                       QString::fromUtf8(md));
+            p.drawText(foot, Qt::AlignRight | Qt::AlignVCenter,
+                       QString::fromUtf8(hi));
+        }
+    }
+
+private:
+    Config cfg_;
+    double value_ = 0;
+    bool has_value_ = false;
+    ConfigCallback config_cb_;
+    SwapCallback swap_cb_;
+    std::string widget_id_;
+    QPoint drag_start_;
+};
+
+// ---------------------------------------------------------------------------
+// LedGaugeWidget — round glowing indicator colored by the active zone.
+// Use case: boolean / status channels (sync / learn / fuel pump / warn
+// flags) where the exact numeric value isn't interesting but the
+// on/off / ok/warn/danger state is. Same drag/drop/config hooks as
+// the other painter widgets.
+// ---------------------------------------------------------------------------
+
+class LedGaugeWidget : public QWidget {
+public:
+    struct Config {
+        std::string title;
+        std::string units;
+        double min_value = 0;
+        double max_value = 1;
+        struct Zone { double lo; double hi; std::string color; };
+        std::vector<Zone> zones;
+    };
+
+    using ConfigCallback = std::function<void(const std::string& widget_id)>;
+    using SwapCallback = std::function<void(const std::string& from, const std::string& to)>;
+
+    explicit LedGaugeWidget(const Config& cfg, QWidget* parent = nullptr)
+        : QWidget(parent), cfg_(cfg) {
+        setMinimumSize(80, 80);
+        setAcceptDrops(true);
+        setCursor(Qt::PointingHandCursor);
+    }
+
+    void set_value(double v) { value_ = v; has_value_ = true; update(); }
+    void clear_value() { has_value_ = false; update(); }
+    void set_widget_id(const std::string& id) { widget_id_ = id; }
+    void set_config_callback(ConfigCallback cb) { config_cb_ = std::move(cb); }
+    void set_swap_callback(SwapCallback cb) { swap_cb_ = std::move(cb); }
+
+protected:
+    void mousePressEvent(QMouseEvent* ev) override {
+        if (ev->button() == Qt::LeftButton) {
+            drag_start_ = ev->pos();
+            ev->accept();
+        } else {
+            ev->ignore();
+        }
+    }
+
+    void mouseMoveEvent(QMouseEvent* ev) override {
+        if (!(ev->buttons() & Qt::LeftButton)) return;
+        if (widget_id_.empty()) return;
+        if ((ev->pos() - drag_start_).manhattanLength() < 12) return;
+        auto* drag = new QDrag(this);
+        auto* mime = new QMimeData;
+        mime->setData("application/x-gauge-widget-id",
+            QByteArray::fromStdString(widget_id_));
+        drag->setMimeData(mime);
+        drag->exec(Qt::MoveAction);
+    }
+
+    void contextMenuEvent(QContextMenuEvent* ev) override {
+        if (!config_cb_) return;
+        QMenu menu(this);
+        auto* action = menu.addAction("Configure Gauge...");
+        QObject::connect(action, &QAction::triggered,
+                         [this]() { if (config_cb_) config_cb_(widget_id_); });
+        menu.exec(ev->globalPos());
+        ev->accept();
+    }
+
+    void dragEnterEvent(QDragEnterEvent* ev) override {
+        if (ev->mimeData()->hasFormat("application/x-gauge-widget-id")) {
+            auto from_id = ev->mimeData()->data("application/x-gauge-widget-id").toStdString();
+            if (from_id != widget_id_) ev->acceptProposedAction();
+        }
+    }
+
+    void dropEvent(QDropEvent* ev) override {
+        auto from_id = ev->mimeData()->data("application/x-gauge-widget-id").toStdString();
+        if (swap_cb_ && from_id != widget_id_) swap_cb_(from_id, widget_id_);
+        ev->acceptProposedAction();
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+
+        const double w = width(), h = height();
+        const double title_h = 16.0;
+        const double value_h = 16.0;
+        const double led_area_h = std::max(20.0, h - title_h - value_h - 8.0);
+        const double led_r = std::min(w * 0.35, led_area_h * 0.4);
+        const double cx = w / 2.0;
+        const double cy = title_h + 4.0 + led_area_h / 2.0;
+
+        // Background card.
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(24, 27, 34));
+        p.drawRoundedRect(QRectF(2, 2, w - 4, h - 4), 4, 4);
+
+        // Title (top).
+        {
+            QFont f = font();
+            f.setPixelSize(11);
+            p.setFont(f);
+            p.setPen(QColor(150, 154, 165));
+            p.drawText(QRectF(4, 2, w - 8, title_h),
+                       Qt::AlignHCenter | Qt::AlignVCenter,
+                       QString::fromUtf8(cfg_.title.c_str()));
+        }
+
+        auto zone_color = [](const std::string& c) -> QColor {
+            if (c == "ok")      return QColor(90, 214, 135);
+            if (c == "warning") return QColor(214, 165, 90);
+            if (c == "danger")  return QColor(214, 90, 90);
+            return QColor(90, 154, 214);
+        };
+
+        // LED — dim when no value, lit zone color otherwise.
+        QColor led = QColor(60, 64, 74);  // dim/off default
+        if (has_value_) {
+            led = QColor(90, 154, 214);  // primary fallback
+            for (const auto& z : cfg_.zones) {
+                if (value_ >= z.lo && value_ <= z.hi) {
+                    led = zone_color(z.color);
+                    break;
+                }
+            }
+        }
+
+        // Outer glow.
+        QRadialGradient glow(cx, cy, led_r * 1.8);
+        QColor glow_col = led; glow_col.setAlpha(70);
+        glow.setColorAt(0.0, glow_col);
+        glow.setColorAt(1.0, QColor(0, 0, 0, 0));
+        p.setBrush(glow);
+        p.drawEllipse(QPointF(cx, cy), led_r * 1.8, led_r * 1.8);
+
+        // LED body.
+        p.setBrush(led);
+        p.drawEllipse(QPointF(cx, cy), led_r, led_r);
+
+        // Highlight shine.
+        QRadialGradient shine(cx - led_r * 0.3, cy - led_r * 0.3, led_r * 0.6);
+        shine.setColorAt(0.0, QColor(255, 255, 255, 120));
+        shine.setColorAt(1.0, QColor(255, 255, 255, 0));
+        p.setBrush(shine);
+        p.drawEllipse(QPointF(cx - led_r * 0.3, cy - led_r * 0.3),
+                      led_r * 0.6, led_r * 0.6);
+
+        // Value readout (bottom).
+        {
+            QFont f = font();
+            f.setPixelSize(11);
+            p.setFont(f);
+            p.setPen(QColor(200, 204, 215));
+            char buf[48];
+            if (!has_value_) std::snprintf(buf, sizeof(buf), "%s", "\xe2\x80\x94");
+            else if (value_ == static_cast<int>(value_))
+                std::snprintf(buf, sizeof(buf), "%d %s",
+                              static_cast<int>(value_), cfg_.units.c_str());
+            else
+                std::snprintf(buf, sizeof(buf), "%.1f %s",
+                              value_, cfg_.units.c_str());
+            p.drawText(QRectF(4, h - value_h - 2, w - 8, value_h),
+                       Qt::AlignHCenter | Qt::AlignVCenter,
+                       QString::fromUtf8(buf));
+        }
+    }
+
+private:
+    Config cfg_;
+    double value_ = 0;
+    bool has_value_ = false;
     ConfigCallback config_cb_;
     SwapCallback swap_cb_;
     std::string widget_id_;
@@ -5364,7 +6308,11 @@ bool open_gauge_config_dialog(
     kind_combo->addItem("Analog Dial");
     kind_combo->addItem("Number Card");
     kind_combo->addItem("Bar");
-    int kind_idx = (widget.kind == "dial") ? 0 : (widget.kind == "bar") ? 2 : 1;
+    kind_combo->addItem("LED");
+    int kind_idx =
+        (widget.kind == "dial") ? 0 :
+        (widget.kind == "bar")  ? 2 :
+        (widget.kind == "led")  ? 3 : 1;
     kind_combo->setCurrentIndex(kind_idx);
 
     // Min / Max.
@@ -5411,8 +6359,8 @@ bool open_gauge_config_dialog(
             widget.title = g.title;
             widget.units = g.units;
         }
-        const char* kinds[] = {"dial", "number", "bar"};
-        widget.kind = kinds[std::clamp(kind_combo->currentIndex(), 0, 2)];
+        const char* kinds[] = {"dial", "number", "bar", "led"};
+        widget.kind = kinds[std::clamp(kind_combo->currentIndex(), 0, 3)];
         widget.min_value = min_spin->value();
         widget.max_value = max_spin->value();
 
@@ -5608,6 +6556,85 @@ QWidget* build_live_tab(
     rh_layout->addWidget(rh_divider);
 
     layout->addWidget(runtime_header);
+
+    // ---- Zone-entry toast strip -------------------------------------------
+    // When any gauge transitions INTO danger or warning, drop a small
+    // card at the top of the LIVE tab with the channel + value + zone.
+    // Auto-fades after ~4 seconds. Up to 3 toasts stack; a 4th evicts
+    // the oldest. Silent on danger → warning → normal transitions so
+    // the operator isn't flooded during recovery.
+    auto* toast_host = new QWidget;
+    auto* toast_layout = new QVBoxLayout(toast_host);
+    toast_layout->setContentsMargins(0, 0, 0, 0);
+    toast_layout->setSpacing(tt::space_xs);
+    toast_host->setStyleSheet("background: transparent;");
+    layout->addWidget(toast_host);
+
+    auto spawn_toast = std::make_shared<std::function<void(const std::string&,
+                                                           const std::string&,
+                                                           double,
+                                                           const std::string&,
+                                                           const std::string&)>>();
+    *spawn_toast = [toast_host, toast_layout](const std::string& title,
+                                              const std::string& units,
+                                              double value,
+                                              const std::string& zone,
+                                              const std::string& prev_zone) {
+        (void)prev_zone;
+        const char* accent = tt::zone_accent(zone);
+        const char* icon   = (zone == "danger") ? "\xe2\x9a\xa0"
+                           : (zone == "warning") ? "\xe2\x97\x8b"
+                                                 : "\xe2\x97\x8f";
+        const char* verb   = (zone == "danger") ? "entered DANGER"
+                           : (zone == "warning") ? "entered WARNING"
+                                                 : "recovered";
+        auto* toast = new QLabel(toast_host);
+        toast->setTextFormat(Qt::RichText);
+        {
+            char s[384];
+            std::snprintf(s, sizeof(s),
+                "background-color: %s; border: 1px solid %s; "
+                "border-left: 4px solid %s; border-radius: %dpx; "
+                "padding: %dpx %dpx; color: %s; font-size: %dpx;",
+                tt::bg_panel, tt::border, accent, tt::radius_sm,
+                tt::space_xs + 1, tt::space_md,
+                tt::text_primary, tt::font_small);
+            toast->setStyleSheet(QString::fromUtf8(s));
+        }
+        char html[384];
+        std::snprintf(html, sizeof(html),
+            "<span style='color: %s;'>%s</span>  "
+            "<b>%s</b> %s "
+            "<span style='color: %s;'>\xc2\xb7 %.1f%s%s</span>",
+            accent, icon,
+            title.c_str(), verb,
+            tt::text_muted, value,
+            units.empty() ? "" : " ", units.c_str());
+        toast->setText(QString::fromUtf8(html));
+        toast_layout->addWidget(toast);
+
+        // Evict oldest beyond 3 — hide (never delete in a timer handler).
+        while (toast_layout->count() > 3) {
+            if (auto* item = toast_layout->takeAt(0)) {
+                if (item->widget()) item->widget()->hide();
+                delete item;
+            }
+        }
+
+        // Auto-hide after 4s. Use hide (not delete) — safe under the
+        // "never delete widgets in handlers" rule from CLAUDE.md.
+        QPointer<QLabel> t_ptr(toast);
+        QTimer::singleShot(4000, toast_host, [t_ptr, toast_layout]() {
+            if (t_ptr.isNull()) return;
+            t_ptr->hide();
+            // Drop from layout so the stack repacks.
+            int idx = toast_layout->indexOf(t_ptr.data());
+            if (idx >= 0) {
+                if (auto* item = toast_layout->takeAt(idx))
+                    delete item;
+            }
+        });
+    };
 
     // ---- Sub-slice 87: load formula output channels from the production INI.
     // These are evaluated on every timer tick against the mock runtime
@@ -5843,6 +6870,8 @@ QWidget* build_live_tab(
         int font_size;
         DialGaugeWidget* dial = nullptr;
         QLabel* card = nullptr;
+        BarGaugeWidget* bar = nullptr;
+        LedGaugeWidget* led = nullptr;
         std::string prev_zone;  // track zone transitions for alerts
     };
     auto bindings = std::make_shared<std::vector<GaugeBinding>>();
@@ -5934,13 +6963,121 @@ QWidget* build_live_tab(
                 });
                 dash_grid->addWidget(gauge, gy, gx, gh, gw);
                 binding.dial = gauge;
+            } else if (w.kind == "led") {
+                LedGaugeWidget::Config cfg;
+                cfg.title = w.title; cfg.units = w.units;
+                cfg.min_value = w.min_value; cfg.max_value = w.max_value;
+                for (const auto& z : w.color_zones)
+                    cfg.zones.push_back({z.lo, z.hi, z.color});
+                auto* led = new LedGaugeWidget(cfg);
+                led->set_widget_id(w.widget_id);
+                led->set_swap_callback(
+                    [shared_dash, rebuild_dashboard](
+                        const std::string& from_id, const std::string& to_id) {
+                    dln::Widget* wa = nullptr;
+                    dln::Widget* wb = nullptr;
+                    for (auto& w : shared_dash->widgets) {
+                        if (w.widget_id == from_id) wa = &w;
+                        if (w.widget_id == to_id) wb = &w;
+                    }
+                    if (wa && wb) {
+                        std::swap(wa->x, wb->x);
+                        std::swap(wa->y, wb->y);
+                        std::swap(wa->width, wb->width);
+                        std::swap(wa->height, wb->height);
+                        (*rebuild_dashboard)();
+                    }
+                });
+                led->set_config_callback(
+                    [shared_dash, gauge_catalog, rebuild_dashboard](
+                        const std::string& wid) {
+                    for (auto& w : shared_dash->widgets) {
+                        if (w.widget_id == wid) {
+                            if (open_gauge_config_dialog(nullptr, w, *gauge_catalog))
+                                (*rebuild_dashboard)();
+                            break;
+                        }
+                    }
+                });
+                dash_grid->addWidget(led, gy, gx, gh, gw);
+                binding.led = led;
+            } else if (w.kind == "bar") {
+                BarGaugeWidget::Config cfg;
+                cfg.title = w.title; cfg.units = w.units;
+                cfg.min_value = w.min_value; cfg.max_value = w.max_value;
+                for (const auto& z : w.color_zones)
+                    cfg.zones.push_back({z.lo, z.hi, z.color});
+                auto* bar = new BarGaugeWidget(cfg);
+                bar->setMinimumHeight(gh > 1 ? 80 : 50);
+                bar->set_widget_id(w.widget_id);
+                bar->set_swap_callback(
+                    [shared_dash, rebuild_dashboard](
+                        const std::string& from_id, const std::string& to_id) {
+                    dln::Widget* wa = nullptr;
+                    dln::Widget* wb = nullptr;
+                    for (auto& w : shared_dash->widgets) {
+                        if (w.widget_id == from_id) wa = &w;
+                        if (w.widget_id == to_id) wb = &w;
+                    }
+                    if (wa && wb) {
+                        std::swap(wa->x, wb->x);
+                        std::swap(wa->y, wb->y);
+                        std::swap(wa->width, wb->width);
+                        std::swap(wa->height, wb->height);
+                        (*rebuild_dashboard)();
+                    }
+                });
+                bar->set_config_callback(
+                    [shared_dash, gauge_catalog, rebuild_dashboard](
+                        const std::string& wid) {
+                    for (auto& w : shared_dash->widgets) {
+                        if (w.widget_id == wid) {
+                            if (open_gauge_config_dialog(nullptr, w, *gauge_catalog))
+                                (*rebuild_dashboard)();
+                            break;
+                        }
+                    }
+                });
+                dash_grid->addWidget(bar, gy, gx, gh, gw);
+                binding.bar = bar;
             } else {
-                auto* cell = new QLabel;
+                auto* cell = new DraggableCardLabel;
                 cell->setTextFormat(Qt::RichText);
                 cell->setAlignment(Qt::AlignCenter);
                 cell->setMinimumHeight(gh > 1 ? 100 : 50);
                 cell->setStyleSheet(QString::fromUtf8(
                     tt::number_card_style(tt::accent_primary).c_str()));
+                cell->set_widget_id(w.widget_id);
+                // Shared drag-drop swap (same MIME type as dial gauges,
+                // so cards and dials can swap positions interchangeably).
+                cell->set_swap_callback(
+                    [shared_dash, rebuild_dashboard](
+                        const std::string& from_id, const std::string& to_id) {
+                    dln::Widget* wa = nullptr;
+                    dln::Widget* wb = nullptr;
+                    for (auto& w : shared_dash->widgets) {
+                        if (w.widget_id == from_id) wa = &w;
+                        if (w.widget_id == to_id) wb = &w;
+                    }
+                    if (wa && wb) {
+                        std::swap(wa->x, wb->x);
+                        std::swap(wa->y, wb->y);
+                        std::swap(wa->width, wb->width);
+                        std::swap(wa->height, wb->height);
+                        (*rebuild_dashboard)();
+                    }
+                });
+                cell->set_config_callback(
+                    [shared_dash, gauge_catalog, rebuild_dashboard](
+                        const std::string& wid) {
+                    for (auto& w : shared_dash->widgets) {
+                        if (w.widget_id == wid) {
+                            if (open_gauge_config_dialog(nullptr, w, *gauge_catalog))
+                                (*rebuild_dashboard)();
+                            break;
+                        }
+                    }
+                });
                 dash_grid->addWidget(cell, gy, gx, gh, gw);
                 binding.card = cell;
             }
@@ -6000,6 +7137,26 @@ QWidget* build_live_tab(
                 gauge->setMinimumSize(200, 200);
                 grid->addWidget(gauge, gy, gx, gh, gw);
                 binding.dial = gauge;
+            } else if (w.kind == "led") {
+                LedGaugeWidget::Config cfg;
+                cfg.title = w.title; cfg.units = w.units;
+                cfg.min_value = w.min_value; cfg.max_value = w.max_value;
+                for (const auto& z : w.color_zones)
+                    cfg.zones.push_back({z.lo, z.hi, z.color});
+                auto* led = new LedGaugeWidget(cfg);
+                led->setMinimumSize(160, 160);
+                grid->addWidget(led, gy, gx, gh, gw);
+                binding.led = led;
+            } else if (w.kind == "bar") {
+                BarGaugeWidget::Config cfg;
+                cfg.title = w.title; cfg.units = w.units;
+                cfg.min_value = w.min_value; cfg.max_value = w.max_value;
+                for (const auto& z : w.color_zones)
+                    cfg.zones.push_back({z.lo, z.hi, z.color});
+                auto* bar = new BarGaugeWidget(cfg);
+                bar->setMinimumHeight(gh > 1 ? 120 : 70);
+                grid->addWidget(bar, gy, gx, gh, gw);
+                binding.bar = bar;
             } else {
                 auto* cell = new QLabel;
                 cell->setTextFormat(Qt::RichText);
@@ -6043,6 +7200,10 @@ QWidget* build_live_tab(
                 double v = snap.get(b.source);
                 if (b.dial) {
                     b.dial->set_value(v);
+                } else if (b.bar) {
+                    b.bar->set_value(v);
+                } else if (b.led) {
+                    b.led->set_value(v);
                 } else if (b.card) {
                     // Simplified number card update.
                     char html[256];
@@ -6109,7 +7270,8 @@ QWidget* build_live_tab(
     auto* timer = new QTimer(container);
     QObject::connect(timer, &QTimer::timeout,
                      [bindings, mock_ecu, ecu_conn, phase_label, formula_strip,
-                      formula_channels, formula_arrays, http_server]() {
+                      formula_channels, formula_arrays, http_server,
+                      spawn_toast]() {
         // Attempt real ECU poll first.
         bool using_real = false;
         if (ecu_conn && ecu_conn->connected) {
@@ -6227,26 +7389,46 @@ QWidget* build_live_tab(
 
         for (auto& b : *bindings) {
             double val = snap.get(b.source);
+
+            // Zone detection runs for ALL gauge kinds so dial/bar/led/card
+            // all trigger toasts on danger/warning entry. Previously the
+            // zone tracking was buried in the card branch and dials never
+            // got an alert even when they flashed red.
+            std::string zone_name = "normal";
+            for (const auto& z : b.zones) {
+                if (val >= z.lo && val <= z.hi) zone_name = z.color;
+            }
+            // Spawn a toast on first-entry into danger or warning. No
+            // toast on danger → warning → normal transitions so the
+            // operator isn't flooded during recovery.
+            if ((zone_name == "danger" || zone_name == "warning")
+                && b.prev_zone != zone_name
+                && b.prev_zone != "danger" /* don't re-toast during flicker */) {
+                if (*spawn_toast)
+                    (*spawn_toast)(b.title, b.units, val, zone_name, b.prev_zone);
+            }
+            b.prev_zone = zone_name;
+
             if (b.dial) {
                 b.dial->set_value(val);
                 continue;
             }
-            if (!b.card) continue;
-            // Determine zone — `zone_accent` maps the name string to
-            // the right theme accent (ok/warning/danger/default).
-            std::string zone_name = "normal";
-            for (const auto& z : b.zones) {
-                if (val >= z.lo && val <= z.hi) {
-                    zone_name = z.color;
-                }
+            if (b.bar) {
+                b.bar->set_value(val);
+                continue;
             }
+            if (b.led) {
+                b.led->set_value(val);
+                continue;
+            }
+            if (!b.card) continue;
+            // zone_name was already resolved above for the shared
+            // zone-entry toast path; just consume it here.
             const char* accent = tt::zone_accent(zone_name);
 
-            // Zone-based alert: pulse border width on danger entry (Phase C).
+            // Zone-based alert: pulse border width on danger state.
             int border_width = 2;
-            if (zone_name == "danger" && b.prev_zone != "danger")
-                border_width = 4;  // flash thicker on entry
-            b.prev_zone = zone_name;
+            if (zone_name == "danger") border_width = 4;
 
             // Alert indicator for danger zone.
             const char* alert_icon = (zone_name == "danger") ? " \xe2\x9a\xa0" :
@@ -7295,7 +8477,8 @@ QWidget* build_assist_tab(
         apply_btn->setStyleSheet(QString::fromUtf8(bs));
     }
 
-    auto* source_label = new QLabel(QString::fromUtf8("Showing demo data"));
+    auto* source_label = new QLabel(QString::fromUtf8(
+        "Preview \xe2\x80\x94 import a datalog CSV to analyze your real tune"));
     {
         char sl[128];
         std::snprintf(sl, sizeof(sl),
@@ -7329,6 +8512,99 @@ QWidget* build_assist_tab(
 
         auto layer = vps::smooth(snapshot.proposals, {});
         auto report = rcd::diagnose(snapshot.proposals);
+
+        // -----------------------------------------------------------------
+        // Plain-language summary card — translates the numeric tables
+        // below into something an operator can act on without deriving
+        // intent from raw correction factors. Roadmap item 7 (summary)
+        // + item 8 (next-steps guidance) live together because the
+        // "what to do next" sentence reads worst without the "what's
+        // going on" sentence in front of it.
+        // -----------------------------------------------------------------
+        {
+            // Aggregate the proposals into a single plain-English view.
+            // CF > 1 means the live AFR was leaner than target → more
+            // fuel needed → richer VE. CF < 1 means the opposite.
+            int n = 0;
+            double sum_cf = 0.0;
+            double max_abs_delta = 0.0;
+            int worst_r = -1, worst_c = -1;
+            double worst_cf = 1.0;
+            for (const auto& p : snapshot.proposals) {
+                n++;
+                sum_cf += p.correction_factor;
+                double d = p.correction_factor - 1.0;
+                if (d < 0) d = -d;
+                if (d > max_abs_delta) {
+                    max_abs_delta = d;
+                    worst_r = p.row_index;
+                    worst_c = p.col_index;
+                    worst_cf = p.correction_factor;
+                }
+            }
+            double mean_cf = (n > 0) ? (sum_cf / n) : 1.0;
+            double mean_pct = (mean_cf - 1.0) * 100.0;
+
+            // Direction wording — small deltas get a "close enough"
+            // phrasing so the operator doesn't chase noise.
+            const char* direction;
+            if (mean_pct > 3.0)       direction = "running lean overall";
+            else if (mean_pct > 1.0)  direction = "slightly lean";
+            else if (mean_pct < -3.0) direction = "running rich overall";
+            else if (mean_pct < -1.0) direction = "slightly rich";
+            else                       direction = "close to target";
+
+            double cov = snapshot.coverage.coverage_ratio() * 100.0;
+            const char* cov_note;
+            if (cov < 25.0)      cov_note = "Coverage is thin \xe2\x80\x94 drive more before applying.";
+            else if (cov < 60.0) cov_note = "Coverage is partial \xe2\x80\x94 expect more refinement later.";
+            else                  cov_note = "Coverage is solid.";
+
+            char summary[1024];
+            int off = std::snprintf(summary, sizeof(summary),
+                "Your tune is <b>%s</b> "
+                "(average VE correction %+.1f%% across %d cells).<br>"
+                "%s<br>",
+                direction, mean_pct, n, cov_note);
+            if (worst_r >= 0 && max_abs_delta > 0.02 &&
+                off < static_cast<int>(sizeof(summary))) {
+                off += std::snprintf(summary + off,
+                    sizeof(summary) - static_cast<std::size_t>(off),
+                    "Largest single-cell change: "
+                    "<b>cell (%d, %d)</b> by %+.1f%%.<br>",
+                    worst_r, worst_c, (worst_cf - 1.0) * 100.0);
+            }
+
+            // Next-steps — actionable sentence based on the above
+            // signals rather than a fixed boilerplate.
+            const char* next_step;
+            if (report.has_findings()) {
+                next_step = "Resolve the diagnostic findings below before applying.";
+            } else if (cov < 25.0) {
+                next_step = "Next: add more driving data and re-import.";
+            } else if (max_abs_delta > 0.15) {
+                next_step = "Next: sanity-check the worst cell, then click Apply.";
+            } else if (max_abs_delta < 0.02 && n > 0) {
+                next_step = "Next: nothing urgent \xe2\x80\x94 the tune is within noise of target.";
+            } else {
+                next_step = "Next: review the proposals below, then click Apply.";
+            }
+            if (off < static_cast<int>(sizeof(summary))) {
+                std::snprintf(summary + off,
+                    sizeof(summary) - static_cast<std::size_t>(off),
+                    "<span style='color: %s;'><b>%s</b></span>",
+                    tt::accent_primary, next_step);
+            }
+            auto* summary_card = make_info_card(
+                "Summary", summary, tt::accent_primary);
+            // make_info_card renders plain text; swap to rich text so
+            // the <b> / <br> / colored next-step land properly.
+            if (auto* lbl = summary_card->findChild<QLabel*>()) {
+                lbl->setTextFormat(Qt::RichText);
+                lbl->setText(QString::fromUtf8(summary));
+            }
+            results_layout->addWidget(summary_card);
+        }
 
         // Accumulator summary.
         char acc_buf[512];
@@ -7410,6 +8686,97 @@ QWidget* build_assist_tab(
             gl->addWidget(row_lbl);
         }
         results_layout->addWidget(grid_card);
+
+        // -----------------------------------------------------------------
+        // Coverage heatmap — one card per cell colored by sample count.
+        // Same 16x16 display cap as the correction grid. Gives the
+        // operator an at-a-glance read of "where did I drive enough to
+        // trust these corrections" vs "where do I need more laps".
+        // Confidence tiers mirror the categorical labels exposed by the
+        // accumulator (insufficient / low / medium / high).
+        // -----------------------------------------------------------------
+        if (!snapshot.coverage.cells.empty()) {
+            auto* cov_card = new QWidget;
+            auto* cl = new QVBoxLayout(cov_card);
+            cl->setContentsMargins(tt::space_md + 2, tt::space_md,
+                                   tt::space_md + 2, tt::space_md);
+            cov_card->setStyleSheet(QString::fromUtf8(
+                tt::card_style(tt::accent_special).c_str()));
+
+            auto* header = new QLabel(
+                "Coverage heatmap \xe2\x80\x94 sample count per cell");
+            QFont hf = header->font(); hf.setBold(true);
+            header->setFont(hf);
+            {
+                char s[96];
+                std::snprintf(s, sizeof(s), "color: %s; border: none;",
+                              tt::text_secondary);
+                header->setStyleSheet(QString::fromUtf8(s));
+            }
+            cl->addWidget(header);
+
+            int cov_rows = std::min<int>(snapshot.coverage.rows, 16);
+            int cov_cols = std::min<int>(snapshot.coverage.columns, 16);
+            for (int r = 0; r < cov_rows; ++r) {
+                char row_buf[1536];
+                int off = 0;
+                for (int c = 0; c < cov_cols; ++c) {
+                    int n = 0;
+                    if (r < static_cast<int>(snapshot.coverage.cells.size())
+                        && c < static_cast<int>(snapshot.coverage.cells[r].size())) {
+                        n = snapshot.coverage.cells[r][c].sample_count;
+                    }
+                    const char* bg;
+                    if (n <= 0)       bg = tt::bg_inset;
+                    else if (n < 3)   bg = tt::accent_danger;
+                    else if (n < 10)  bg = tt::accent_warning;
+                    else if (n < 30)  bg = tt::accent_ok;
+                    else              bg = tt::accent_ok;  // saturate
+                    const char* fg = (n <= 0) ? tt::text_dim
+                                              : tt::text_inverse;
+                    off += std::snprintf(row_buf + off,
+                        sizeof(row_buf) - off,
+                        "<span style='background-color: %s; color: %s; "
+                        "padding: 2px 6px; margin-right: 2px; "
+                        "font-family: monospace; font-size: %dpx;'>"
+                        "%s</span>",
+                        bg, fg, tt::font_small,
+                        n > 0 ? (std::string{} + std::to_string(n)).c_str() : "\xc2\xb7");
+                    if (off >= (int)sizeof(row_buf) - 1) break;
+                }
+                auto* row_lbl = new QLabel;
+                row_lbl->setTextFormat(Qt::RichText);
+                row_lbl->setText(QString::fromUtf8(row_buf));
+                row_lbl->setStyleSheet("border: none;");
+                cl->addWidget(row_lbl);
+            }
+
+            // Legend under the grid so the tier colors are clear.
+            char legend[512];
+            std::snprintf(legend, sizeof(legend),
+                "<span style='color: %s; font-size: %dpx;'>"
+                "<span style='background-color: %s; color: %s; padding: 1px 6px;'>"
+                "\xc2\xb7</span> unvisited \xc2\xb7 "
+                "<span style='background-color: %s; color: %s; padding: 1px 6px;'>"
+                "1-2</span> insufficient \xc2\xb7 "
+                "<span style='background-color: %s; color: %s; padding: 1px 6px;'>"
+                "3-9</span> low \xc2\xb7 "
+                "<span style='background-color: %s; color: %s; padding: 1px 6px;'>"
+                "10+</span> medium/high"
+                "</span>",
+                tt::text_dim, tt::font_small,
+                tt::bg_inset, tt::text_dim,
+                tt::accent_danger, tt::text_inverse,
+                tt::accent_warning, tt::text_inverse,
+                tt::accent_ok, tt::text_inverse);
+            auto* legend_lbl = new QLabel;
+            legend_lbl->setTextFormat(Qt::RichText);
+            legend_lbl->setText(QString::fromUtf8(legend));
+            legend_lbl->setStyleSheet("border: none;");
+            cl->addWidget(legend_lbl);
+
+            results_layout->addWidget(cov_card);
+        }
 
         // Review.
         auto review = var::build(snapshot, {}, &layer, &report);
@@ -7499,14 +8866,32 @@ QWidget* build_assist_tab(
             return;
         }
 
-        // Standard Speeduino 16x16 VE table bins (default).
-        // TODO: read actual bins from the loaded tune definition.
+        // Prefer axis bins from the loaded tune; fall back to the
+        // standard Speeduino 16x16 defaults when no tune is present.
         std::vector<double> rpm_bins = {
             500, 700, 1000, 1500, 2000, 2500, 3000, 3500,
             4000, 4500, 5000, 5500, 6000, 6500, 7000, 8000};
         std::vector<double> map_bins = {
             10, 20, 30, 40, 50, 60, 70, 80,
             100, 120, 140, 160, 180, 200, 220, 240};
+        if (shared_edit_svc) {
+            auto read_bins = [&](const char* name) -> std::vector<double> {
+                auto* tv = shared_edit_svc->get_value(name);
+                if (tv && std::holds_alternative<std::vector<double>>(tv->value)) {
+                    auto v = std::get<std::vector<double>>(tv->value);
+                    if (!v.empty()) return v;
+                }
+                return {};
+            };
+            for (const char* n : {"rpmBins", "rpmBinsVE", "rpmBinsVe", "xBinsFuel"}) {
+                auto v = read_bins(n);
+                if (!v.empty()) { rpm_bins = std::move(v); break; }
+            }
+            for (const char* n : {"fuelLoadBins", "mapBinsVE", "mapBins", "yBinsFuel"}) {
+                auto v = read_bins(n);
+                if (!v.empty()) { map_bins = std::move(v); break; }
+            }
+        }
         int nrows = static_cast<int>(map_bins.size());
         int ncols = static_cast<int>(rpm_bins.size());
 
@@ -7726,13 +9111,31 @@ QWidget* build_assist_tab(
         auto live_rejected = std::make_shared<int>(0);
         auto live_ts = std::make_shared<double>(0.0);
 
-        // Standard 16x16 bins (same as import path).
+        // Prefer loaded-tune bins; fall back to Speeduino 16x16 defaults.
         auto rpm_bins = std::make_shared<std::vector<double>>(std::vector<double>{
             500, 700, 1000, 1500, 2000, 2500, 3000, 3500,
             4000, 4500, 5000, 5500, 6000, 6500, 7000, 8000});
         auto map_bins = std::make_shared<std::vector<double>>(std::vector<double>{
             10, 20, 30, 40, 50, 60, 70, 80,
             100, 120, 140, 160, 180, 200, 220, 240});
+        if (shared_edit_svc) {
+            auto read_bins = [&](const char* name) -> std::vector<double> {
+                auto* tv = shared_edit_svc->get_value(name);
+                if (tv && std::holds_alternative<std::vector<double>>(tv->value)) {
+                    auto v = std::get<std::vector<double>>(tv->value);
+                    if (!v.empty()) return v;
+                }
+                return {};
+            };
+            for (const char* n : {"rpmBins", "rpmBinsVE", "rpmBinsVe", "xBinsFuel"}) {
+                auto v = read_bins(n);
+                if (!v.empty()) { *rpm_bins = std::move(v); break; }
+            }
+            for (const char* n : {"fuelLoadBins", "mapBinsVE", "mapBins", "yBinsFuel"}) {
+                auto v = read_bins(n);
+                if (!v.empty()) { *map_bins = std::move(v); break; }
+            }
+        }
 
         auto nearest = [](const std::vector<double>& bins, double val) -> int {
             int best = 0;
@@ -7991,7 +9394,8 @@ QWidget* build_assist_tab(
         }
 
         QObject::connect(dyno_import_btn, &QPushButton::clicked,
-                         [container, dyno_result_label, dyno_curve_label]() {
+                         [container, dyno_result_label, dyno_curve_label,
+                          shared_edit_svc]() {
             auto path = QFileDialog::getOpenFileName(container,
                 QString::fromUtf8("Import WOT Pull CSV"),
                 QDir::homePath(),
@@ -8078,10 +9482,21 @@ QWidget* build_assist_tab(
                 return;
             }
 
-            // Run calculation.
+            // Run calculation. Read engine spec from the loaded tune
+            // when available, otherwise fall back to the demo defaults.
             vd::EngineSpec spec;
-            spec.displacement_cc = 2000;  // TODO: read from tune
+            spec.displacement_cc = 2000;
             spec.cylinders = 6;
+            if (shared_edit_svc) {
+                auto read_num = [&](const char* name, double fb) -> double {
+                    auto* tv = shared_edit_svc->get_value(name);
+                    if (tv && std::holds_alternative<double>(tv->value))
+                        return std::get<double>(tv->value);
+                    return fb;
+                };
+                spec.displacement_cc = read_num("displacement", 2000.0);
+                spec.cylinders = static_cast<int>(read_num("nCylinders", 6));
+            }
             auto result = vd::calculate(data, spec);
 
             dyno_result_label->setText(QString::fromUtf8(
@@ -9213,7 +10628,8 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
 // ---------------------------------------------------------------------------
 
 QWidget* build_setup_tab(
-    std::shared_ptr<tuner_core::local_tune_edit::EditService> edit_svc = nullptr) {
+    std::shared_ptr<tuner_core::local_tune_edit::EditService> edit_svc = nullptr,
+    std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
     auto* scroll = new QScrollArea;
     scroll->setWidgetResizable(true);
     scroll->setStyleSheet("QScrollArea { border: none; }");
@@ -9548,7 +10964,7 @@ QWidget* build_setup_tab(
     double boost_kpa = read_scalar("boostTarget", 200.0);
     double dwell = read_scalar("dwellRun", 3.5);
     bool has_tune = (edit_svc != nullptr && edit_svc->get_value("reqFuel") != nullptr);
-    const char* data_source = has_tune ? "loaded tune" : "demo defaults";
+    const char* data_source = has_tune ? "loaded tune" : "no tune loaded";
 
     namespace vg = tuner_core::ve_table_generator;
     namespace ag = tuner_core::afr_target_generator;
@@ -9556,6 +10972,23 @@ QWidget* build_setup_tab(
     namespace irg = tuner_core::idle_rpm_generator;
     namespace seg = tuner_core::startup_enrichment_generator;
     namespace tc = tuner_core::thermistor_calibration;
+
+    // Confidence legend — one-line key so the traffic-light badges on
+    // every generator card below are self-explanatory. The badges
+    // surface the provenance of each assumption: is it something the
+    // operator provided (green, trusted), something we derived from
+    // those inputs (amber, verify), or a conservative fallback (red,
+    // tighten before driving).
+    {
+        char legend[512];
+        std::snprintf(legend, sizeof(legend),
+            "\xf0\x9f\x9f\xa2  from your inputs  "
+            "\xc2\xb7  \xf0\x9f\x9f\xa1  computed from inputs  "
+            "\xc2\xb7  \xf0\x9f\x94\xb4  conservative fallback \xe2\x80\x94 "
+            "verify before driving");
+        layout->addWidget(make_info_card("Generator Confidence",
+                                         legend, tt::accent_primary));
+    }
 
     // VE table
     vg::VeGeneratorContext ve_ctx;
@@ -9576,22 +11009,30 @@ QWidget* build_setup_tab(
         layout->addWidget(render_heatmap(ve_result.values, 16, 16, ve_title));
     }
 
-    // Confidence badges for VE assumptions (Phase B).
-    if (!ve_result.assumptions.empty()) {
-        char badge_buf[512]; int boff = 0;
-        for (const auto& a : ve_result.assumptions) {
+    // Confidence badges — shared helper applied to every generator
+    // below. Each assumption carries a provenance source that maps to
+    // a traffic-light badge: green = from operator context, yellow =
+    // computed from inputs, red = conservative fallback (the operator
+    // should verify).
+    auto render_assumption_card = [layout](const char* card_title,
+                                           const auto& assumptions) {
+        namespace gt = tuner_core::generator_types;
+        if (assumptions.empty()) return;
+        char badge_buf[768]; int boff = 0;
+        for (const auto& a : assumptions) {
             const char* badge =
-                (a.source == vg::AssumptionSource::FROM_CONTEXT)
-                    ? "\xf0\x9f\x9f\xa2" :  // green circle
-                (a.source == vg::AssumptionSource::COMPUTED)
-                    ? "\xf0\x9f\x9f\xa1" :  // yellow circle
-                    "\xf0\x9f\x94\xb4";     // red circle
-            boff += std::snprintf(badge_buf + boff, sizeof(badge_buf) - boff,
-                "%s %s: %s\n", badge, a.label.c_str(), a.value_str.c_str());
+                (a.source == gt::AssumptionSource::FROM_CONTEXT) ? "\xf0\x9f\x9f\xa2" :
+                (a.source == gt::AssumptionSource::COMPUTED)     ? "\xf0\x9f\x9f\xa1" :
+                                                                    "\xf0\x9f\x94\xb4";
+            boff += std::snprintf(badge_buf + boff,
+                sizeof(badge_buf) - boff,
+                "%s %s: %s\n",
+                badge, a.label.c_str(), a.value_str.c_str());
             if (boff >= static_cast<int>(sizeof(badge_buf) - 1)) break;
         }
-        layout->addWidget(make_info_card("VE Assumptions", badge_buf, tt::text_muted));
-    }
+        layout->addWidget(make_info_card(card_title, badge_buf, tt::text_muted));
+    };
+    render_assumption_card("VE Assumptions", ve_result.assumptions);
 
     // AFR target table
     ag::AfrGeneratorContext afr_ctx;
@@ -9601,6 +11042,7 @@ QWidget* build_setup_tab(
     auto afr_result = ag::generate(afr_ctx, ag::CalibrationIntent::FIRST_START);
     layout->addWidget(render_heatmap(afr_result.values, 16, 16,
         "AFR Target (Single Turbo, 200 kPa, intercooled, first-start)"));
+    render_assumption_card("AFR Assumptions", afr_result.assumptions);
 
     // Spark advance table
     sg::SparkGeneratorContext spark_ctx;
@@ -9613,6 +11055,7 @@ QWidget* build_setup_tab(
     auto spark_result = sg::generate(spark_ctx, sg::CalibrationIntent::FIRST_START);
     layout->addWidget(render_heatmap(spark_result.values, 16, 16,
         "Spark Advance (Single Turbo, 10.5:1 CR, first-start)"));
+    render_assumption_card("Spark Assumptions", spark_result.assumptions);
 
     // Idle RPM curve
     irg::GeneratorContext idle_ctx;
@@ -9625,6 +11068,7 @@ QWidget* build_setup_tab(
         idle_result.clt_bins, idle_result.rpm_targets,
         "Idle RPM Targets (turbo, 280\xc2\xb0 cam, race-ported, short-runner)",
         "RPM", tt::accent_ok));
+    render_assumption_card("Idle RPM Assumptions", idle_result.assumptions);
 
     // WUE curve
     seg::StartupContext wue_ctx;
@@ -9634,6 +11078,7 @@ QWidget* build_setup_tab(
         wue_result.clt_bins, wue_result.enrichment_pct,
         "Warmup Enrichment (petrol, first-start)",
         "%", tt::accent_warning));
+    render_assumption_card("WUE Assumptions", wue_result.assumptions);
 
     // Cranking enrichment
     seg::StartupContext crank_ctx;
@@ -9643,6 +11088,225 @@ QWidget* build_setup_tab(
         crank_result.clt_bins, crank_result.enrichment_pct,
         "Cranking Enrichment (10.5:1 CR, first-start)",
         "%", tt::accent_danger));
+    render_assumption_card("Cranking Assumptions", crank_result.assumptions);
+
+    // ---- Compressor-map modeling (Phase 15 #10) ----
+    // Projects the engine's airflow demand across the RPM sweep onto
+    // the compressor-map coordinate system (mass flow × pressure
+    // ratio) and flags surge / choke / off-map risk against the
+    // supplied envelope. The envelope defaults below correspond to a
+    // generic mid-frame turbo (think GT30-class) — a later slice can
+    // wire this to per-turbo presets or operator-supplied datasheet
+    // numbers.
+    {
+        namespace cmm = tuner_core::compressor_map_modeling;
+        cmm::Context cm_ctx;
+        cm_ctx.displacement_cc = disp;
+        cm_ctx.cylinder_count = ncyl;
+        cm_ctx.baro_kpa = 101.3;
+        cm_ctx.intake_temp_c = 30.0;
+        cm_ctx.surge_flow_lbmin  = 10.0;
+        cm_ctx.choke_flow_lbmin  = 50.0;
+        cm_ctx.max_pressure_ratio = 3.2;
+        cm_ctx.surge_margin_pct = 10.0;
+
+        // Sweep: 1500 → 7500 RPM at the wizard's target boost + 30 C IAT.
+        double map_abs = cm_ctx.baro_kpa + boost_kpa;
+        auto pts = cmm::sweep_rpm(1500.0, 7500.0, 25, map_abs,
+                                   cm_ctx.intake_temp_c, 90.0, cm_ctx);
+        auto summary = cmm::summarise(pts, cm_ctx);
+
+        // Pick accent color by worst risk so the card itself reads
+        // "ok / warning / danger" at a glance — same grammar as the
+        // number cards on the LIVE tab.
+        const char* accent;
+        switch (summary.worst_risk) {
+            case cmm::RiskRegion::SAFE:        accent = tt::accent_ok;      break;
+            case cmm::RiskRegion::NEAR_SURGE:
+            case cmm::RiskRegion::NEAR_CHOKE:  accent = tt::accent_warning; break;
+            case cmm::RiskRegion::SURGE:
+            case cmm::RiskRegion::CHOKE:
+            case cmm::RiskRegion::OFF_MAP:     accent = tt::accent_danger;  break;
+        }
+
+        char body[1024];
+        std::snprintf(body, sizeof(body),
+            "Target boost: %.0f kPa (PR %.2f).  "
+            "Peak flow: <b>%.1f lb/min</b>.  "
+            "Safe points: %d of %d.<br>"
+            "Envelope (edit in turbo datasheet): "
+            "surge %.0f lb/min \xc2\xb7 choke %.0f lb/min \xc2\xb7 max PR %.2f.<br>"
+            "<span style='color: %s;'><b>%s</b></span>",
+            boost_kpa, map_abs / cm_ctx.baro_kpa,
+            summary.peak_flow_lbmin,
+            summary.safe_count, summary.total_count,
+            cm_ctx.surge_flow_lbmin, cm_ctx.choke_flow_lbmin,
+            cm_ctx.max_pressure_ratio,
+            accent, summary.plain_language.c_str());
+
+        auto* card = make_info_card("Compressor Map Modeling", body, accent);
+        if (auto* lbl = card->findChild<QLabel*>()) {
+            lbl->setTextFormat(Qt::RichText);
+            lbl->setText(QString::fromUtf8(body));
+        }
+        layout->addWidget(card);
+    }
+
+    // ---- Sensor Calibration: Write to ECU ----
+    // Pairs with SpeeduinoController::write_calibration_table(). Both
+    // CLT and IAT use the 64-byte `'t'` command shape (32 × int16 BE
+    // °F×10). Operator picks a preset per sensor and clicks Write.
+    {
+        auto* cal_card = new QWidget;
+        auto* cl = new QVBoxLayout(cal_card);
+        cl->setContentsMargins(tt::space_md, tt::space_sm + 2,
+                               tt::space_md, tt::space_sm + 2);
+        cl->setSpacing(tt::space_xs);
+        {
+            char cstyle[192];
+            std::snprintf(cstyle, sizeof(cstyle),
+                "%s padding: 0;",
+                tt::card_style(tt::accent_primary).c_str());
+            cal_card->setStyleSheet(QString::fromUtf8(cstyle));
+        }
+
+        auto* hdr = new QLabel("Sensor Calibration \xe2\x80\x94 Write to ECU");
+        QFont hf = hdr->font(); hf.setBold(true); hf.setPixelSize(tt::font_label);
+        hdr->setFont(hf);
+        {
+            char hs[96];
+            std::snprintf(hs, sizeof(hs), "color: %s; border: none;", tt::text_secondary);
+            hdr->setStyleSheet(QString::fromUtf8(hs));
+        }
+        cl->addWidget(hdr);
+
+        auto make_preset_row = [&](const char* label_text, tc::Sensor sensor) -> QComboBox* {
+            auto* row = new QHBoxLayout;
+            auto* lbl = new QLabel(label_text);
+            lbl->setFixedWidth(100);
+            lbl->setStyleSheet("border: none;");
+            row->addWidget(lbl);
+            auto* combo = new QComboBox;
+            for (const auto& p : tc::presets_for_sensor(sensor))
+                combo->addItem(QString::fromUtf8(p.name.c_str()));
+            row->addWidget(combo, 1);
+            cl->addLayout(row);
+            return combo;
+        };
+        auto* clt_sel = make_preset_row("CLT sensor:", tc::Sensor::CLT);
+        auto* iat_sel = make_preset_row("IAT sensor:", tc::Sensor::IAT);
+
+        // O2 wideband preset row. Writes the 1024-byte Speeduino-native
+        // O2 calibration page (page 2) via the same `'t'` command.
+        namespace wbc = tuner_core::wideband_calibration;
+        auto* wb_row = new QHBoxLayout;
+        auto* wb_lbl = new QLabel("Wideband O2:");
+        wb_lbl->setFixedWidth(100);
+        wb_lbl->setStyleSheet("border: none;");
+        wb_row->addWidget(wb_lbl);
+        auto* wb_sel = new QComboBox;
+        for (const auto& p : wbc::presets())
+            wb_sel->addItem(QString::fromUtf8(p.name.c_str()));
+        wb_row->addWidget(wb_sel, 1);
+        cl->addLayout(wb_row);
+
+        auto* btn_row = new QHBoxLayout;
+        auto* write_btn = new QPushButton("Write CLT + IAT + O2 to ECU");
+        write_btn->setCursor(Qt::PointingHandCursor);
+        auto* cal_status = new QLabel;
+        {
+            char ss[128];
+            std::snprintf(ss, sizeof(ss), "color: %s; font-size: %dpx; border: none;",
+                          tt::text_muted, tt::font_small);
+            cal_status->setStyleSheet(QString::fromUtf8(ss));
+        }
+        btn_row->addWidget(write_btn);
+        btn_row->addWidget(cal_status, 1);
+        cl->addLayout(btn_row);
+
+        auto update_enabled = [write_btn, cal_status, ecu_conn]() {
+            bool connected = (ecu_conn && ecu_conn->connected && ecu_conn->controller);
+            write_btn->setEnabled(connected);
+            if (!connected) {
+                cal_status->setText(QString::fromUtf8(
+                    "Connect to ECU to enable writing calibration."));
+            } else if (cal_status->text().isEmpty()) {
+                cal_status->setText(QString::fromUtf8("Ready."));
+            }
+        };
+        update_enabled();
+
+        QObject::connect(write_btn, &QPushButton::clicked,
+                         [clt_sel, iat_sel, wb_sel, cal_status, ecu_conn]() {
+            namespace wbc = tuner_core::wideband_calibration;
+            if (!ecu_conn || !ecu_conn->connected || !ecu_conn->controller) {
+                cal_status->setText(QString::fromUtf8("Not connected."));
+                return;
+            }
+            auto write_one = [&](tc::Sensor sensor, QComboBox* combo,
+                                 std::uint8_t page, const char* label) -> bool {
+                auto name = combo->currentText().toStdString();
+                auto* preset = tc::preset_by_name(name);
+                if (!preset) {
+                    char buf[128];
+                    std::snprintf(buf, sizeof(buf), "%s preset not found: %s",
+                                  label, name.c_str());
+                    cal_status->setText(QString::fromUtf8(buf));
+                    return false;
+                }
+                auto cal = tc::generate(*preset, sensor);
+                auto payload = cal.encode_payload();
+                try {
+                    ecu_conn->controller->write_calibration_table(
+                        page, payload.data(), payload.size());
+                } catch (const std::exception& e) {
+                    char buf[256];
+                    std::snprintf(buf, sizeof(buf), "%s write failed: %s",
+                                  label, e.what());
+                    cal_status->setText(QString::fromUtf8(buf));
+                    return false;
+                }
+                return true;
+            };
+            cal_status->setText(QString::fromUtf8("Writing CLT..."));
+            QApplication::processEvents();
+            if (!write_one(tc::Sensor::CLT, clt_sel, 0, "CLT")) return;
+            cal_status->setText(QString::fromUtf8("Writing IAT..."));
+            QApplication::processEvents();
+            if (!write_one(tc::Sensor::IAT, iat_sel, 1, "IAT")) return;
+
+            // O2 wideband: 1024-byte Speeduino-native payload on page 2.
+            {
+                cal_status->setText(QString::fromUtf8("Writing O2 (wideband)..."));
+                QApplication::processEvents();
+                auto name = wb_sel->currentText().toStdString();
+                auto* preset = wbc::preset_by_name(name);
+                if (!preset) {
+                    char buf[128];
+                    std::snprintf(buf, sizeof(buf),
+                                  "Wideband preset not found: %s", name.c_str());
+                    cal_status->setText(QString::fromUtf8(buf));
+                    return;
+                }
+                auto cal = wbc::generate(*preset);
+                auto payload = cal.encode_speeduino_o2_table();
+                try {
+                    ecu_conn->controller->write_calibration_table(
+                        2, payload.data(), payload.size());
+                } catch (const std::exception& e) {
+                    char buf[256];
+                    std::snprintf(buf, sizeof(buf),
+                                  "O2 write failed: %s", e.what());
+                    cal_status->setText(QString::fromUtf8(buf));
+                    return;
+                }
+            }
+            cal_status->setText(QString::fromUtf8(
+                "\xe2\x9c\x85 CLT + IAT + O2 calibration written."));
+        });
+
+        layout->addWidget(cal_card);
+    }
 
     // Thermistor calibration preview
     auto* gm_preset = tc::preset_by_name("GM");
@@ -9980,7 +11644,8 @@ QWidget* build_triggers_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
             tt::fill_primary_mid);
         import_btn->setStyleSheet(QString::fromUtf8(bs));
     }
-    auto* source_label = new QLabel(QString::fromUtf8("Showing demo 36-1 data"));
+    auto* source_label = new QLabel(QString::fromUtf8(
+        "Preview \xe2\x80\x94 capture or import a trigger log to analyze"));
     {
         char sl[128];
         std::snprintf(sl, sizeof(sl),
@@ -11280,10 +12945,20 @@ public:
         auto rebuild_dashboard = std::make_shared<std::function<void()>>();
 
         // HTTP Live-Data API — serves channel data to browser dashboards.
+        // Opt-in via QSettings; default on for continuity with the
+        // previous auto-start behavior. Toggle lives in View menu.
         auto http_server = std::make_shared<LiveDataHttpServer>();
-        http_server->start(8080);
-        std::printf("[ctor] HTTP Live-Data API started on port 8080\n");
-        std::fflush(stdout);
+        {
+            QSettings settings;
+            bool enabled = settings.value("http/enabled", true).toBool();
+            if (enabled) {
+                http_server->start(8080);
+                std::printf("[ctor] HTTP Live-Data API started on port 8080\n");
+            } else {
+                std::printf("[ctor] HTTP Live-Data API disabled (QSettings http/enabled=false)\n");
+            }
+            std::fflush(stdout);
+        }
 
         // Connection indicator label — created early so the File menu
         // connect/disconnect lambdas can capture the pointer. Added to
@@ -11405,7 +13080,7 @@ public:
         std::printf("[ctor] live ok\n"); std::fflush(stdout);
         stack->addWidget(build_flash_tab(ecu_conn));
         std::printf("[ctor] flash ok\n"); std::fflush(stdout);
-        stack->addWidget(build_setup_tab(shared_edit_svc));
+        stack->addWidget(build_setup_tab(shared_edit_svc, ecu_conn));
         std::printf("[ctor] setup ok\n"); std::fflush(stdout);
         stack->addWidget(build_assist_tab(shared_edit_svc, ecu_conn));
         std::printf("[ctor] assist ok\n"); std::fflush(stdout);
@@ -12074,11 +13749,93 @@ public:
         {
             // File menu ------------------------------------------------
             auto* file_menu = menu_bar->addMenu("&File");
-            auto* save_action = file_menu->addAction("&Save as Native...");
+            auto* save_action = file_menu->addAction("&Save Tune...");
             save_action->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_S));
             save_action->setShortcutContext(Qt::ApplicationShortcut);
             QObject::connect(save_action, &QAction::triggered, save_as_native_handler);
             this->addAction(save_action);
+
+            // File → Save Project... writes a `.tunerproj` sidecar that
+            // bundles the definition path, tune path, active settings,
+            // and signature into one file the operator can share or
+            // reopen as a single entry point. Built on top of the same
+            // `tuner_core::project_file::export_json` used by the
+            // importer, so round-trip stays consistent.
+            auto* save_proj_action = file_menu->addAction("Save &Project...");
+            save_proj_action->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_S));
+            save_proj_action->setShortcutContext(Qt::ApplicationShortcut);
+            QObject::connect(save_proj_action, &QAction::triggered,
+                             [this, shared_edit_svc]() {
+                namespace pf = tuner_core::project_file;
+                auto proj = active_project();
+
+                // Pick a destination. Default to `<projectname>.tunerproj`
+                // next to the tune file if we have one; else ask.
+                QString default_path;
+                if (!proj.msq_path.empty()) {
+                    auto p = std::filesystem::path(proj.msq_path);
+                    auto dir = p.parent_path();
+                    std::string name = proj.name.empty()
+                        ? std::string("project") : proj.name;
+                    // Sanitize name for filesystem.
+                    for (auto& c : name)
+                        if (c == '/' || c == '\\' || c == ':' || c == '*' ||
+                            c == '?' || c == '"' || c == '<' || c == '>' ||
+                            c == '|') c = '_';
+                    default_path = QString::fromUtf8(
+                        (dir / (name + ".tunerproj")).string().c_str());
+                }
+                QString qpath = QFileDialog::getSaveFileName(
+                    this, "Save Project",
+                    default_path,
+                    "Tuner Project (*.tunerproj);;All Files (*)");
+                if (qpath.isEmpty()) return;
+
+                pf::Project out;
+                out.name = proj.name.empty() ? "Speeduino Project" : proj.name;
+                out.definition_path = proj.ini_path;
+                out.tune_path = proj.msq_path;
+                out.firmware_signature = proj.signature;
+                out.last_opened_iso = today_iso();
+
+                // Pull active_settings from QSettings (same key the
+                // Definition Settings dialog + .ini loader use).
+                QSettings qs;
+                auto settings_csv = qs.value(
+                    "projects/current/activeSettings", "").toString().toStdString();
+                if (!settings_csv.empty()) {
+                    std::string cur;
+                    for (char c : settings_csv) {
+                        if (c == ',') {
+                            if (!cur.empty()) out.active_settings.push_back(cur);
+                            cur.clear();
+                        } else if (c != ' ') {
+                            cur += c;
+                        }
+                    }
+                    if (!cur.empty()) out.active_settings.push_back(cur);
+                }
+
+                std::string json = pf::export_json(out);
+                std::ofstream o(qpath.toStdString(), std::ios::binary);
+                if (!o) {
+                    QMessageBox::warning(this, "Save Project",
+                        QString::fromUtf8(
+                            ("Could not write: " + qpath.toStdString()).c_str()));
+                    return;
+                }
+                o.write(json.data(),
+                        static_cast<std::streamsize>(json.size()));
+                o.close();
+
+                auto fname = std::filesystem::path(
+                    qpath.toStdString()).filename().string();
+                statusBar()->showMessage(
+                    QString::fromUtf8(("\xe2\x9c\x85 Saved project: " + fname).c_str()),
+                    5000);
+                (void)shared_edit_svc;
+            });
+            this->addAction(save_proj_action);
             // File → Open... opens a file dialog for .msq tune files.
             // Hot-reload is not yet supported — the selected file is
             // saved to recents and the operator is prompted to restart.
@@ -12275,12 +14032,21 @@ public:
                         if (ext == ".tunerdef") {
                             settings.setValue("projects/current/tunerdef",
                                 QString::fromUtf8(def_path.c_str()));
-                            // Clear legacy INI key.
                             settings.setValue(kCurrentProjectIniKey, QString());
                         } else {
                             settings.setValue(kCurrentProjectIniKey,
                                 QString::fromUtf8(def_path.c_str()));
+                            // Clear tunerdef key — otherwise a prior project's
+                            // .tunerdef path survives and overrides the INI
+                            // the operator just picked.
+                            settings.setValue("projects/current/tunerdef", QString());
                         }
+                    } else {
+                        // Definition left blank / "(create empty)" — clear
+                        // both keys so the new project doesn't inherit a
+                        // prior project's definition silently.
+                        settings.setValue(kCurrentProjectIniKey, QString());
+                        settings.setValue("projects/current/tunerdef", QString());
                     }
                     // Set tune path if user selected one, clear if empty.
                     if (!tune.empty() && tune != "(create empty)")
@@ -12457,6 +14223,82 @@ public:
                 (*rebuild_dashboard)();
                 settings.setValue("dashboard/lastDir",
                     QFileInfo(path).absolutePath());
+            });
+
+            // TSDash .dash XML import/export — lets operators round-trip
+            // layouts with TunerStudio's TSDash tool.
+            auto* import_dash_action = file_menu->addAction(
+                "Import TSD&ash (.dash)...");
+            QObject::connect(import_dash_action, &QAction::triggered,
+                             [this, shared_dash, rebuild_dashboard]() {
+                QSettings settings;
+                QString last_dir = settings.value("dashboard/lastDir",
+                    QDir::homePath()).toString();
+                auto path = QFileDialog::getOpenFileName(this,
+                    QString::fromUtf8("Import TSDash Layout"),
+                    last_dir,
+                    QString::fromUtf8("TSDash (*.dash);;All Files (*)"));
+                if (path.isEmpty()) return;
+                std::ifstream in(path.toStdString(), std::ios::in | std::ios::binary);
+                if (!in) {
+                    QMessageBox::warning(this, "Import failed",
+                        QString::fromUtf8("Could not open file."));
+                    return;
+                }
+                std::string text((std::istreambuf_iterator<char>(in)),
+                                 std::istreambuf_iterator<char>());
+                in.close();
+                try {
+                    auto loaded = tuner_core::ts_dash_file::parse_text(text);
+                    if (loaded.widgets.empty()) {
+                        QMessageBox::warning(this, "Import failed",
+                            QString::fromUtf8(
+                                ".dash parsed OK but contained no widgets."));
+                        return;
+                    }
+                    *shared_dash = std::move(loaded);
+                    (*rebuild_dashboard)();
+                    settings.setValue("dashboard/lastDir",
+                        QFileInfo(path).absolutePath());
+                    statusBar()->showMessage(
+                        QString::fromUtf8("Imported TSDash layout."), 5000);
+                } catch (const std::exception& e) {
+                    QMessageBox::warning(this, "Import failed",
+                        QString::fromUtf8(e.what()));
+                }
+            });
+
+            auto* export_dash_action = file_menu->addAction(
+                "Export TSDash (.dash)...");
+            QObject::connect(export_dash_action, &QAction::triggered,
+                             [this, shared_dash]() {
+                if (!shared_dash || shared_dash->widgets.empty()) {
+                    QMessageBox::information(this, "Nothing to export",
+                        QString::fromUtf8(
+                            "No dashboard layout loaded."));
+                    return;
+                }
+                QSettings settings;
+                QString last_dir = settings.value("dashboard/lastDir",
+                    QDir::homePath()).toString();
+                auto path = QFileDialog::getSaveFileName(this,
+                    QString::fromUtf8("Export TSDash Layout"),
+                    last_dir,
+                    QString::fromUtf8("TSDash (*.dash)"));
+                if (path.isEmpty()) return;
+                auto xml = tuner_core::ts_dash_file::export_text(*shared_dash);
+                std::ofstream out(path.toStdString(), std::ios::out | std::ios::binary);
+                if (!out) {
+                    QMessageBox::warning(this, "Export failed",
+                        QString::fromUtf8("Could not write to file."));
+                    return;
+                }
+                out.write(xml.data(), static_cast<std::streamsize>(xml.size()));
+                out.close();
+                settings.setValue("dashboard/lastDir",
+                    QFileInfo(path).absolutePath());
+                statusBar()->showMessage(
+                    QString::fromUtf8("Exported TSDash layout."), 5000);
             });
 
             file_menu->addSeparator();
@@ -12665,6 +14507,78 @@ public:
 
             file_menu->addSeparator();
 
+            // Airbear OTA — uploads a .bin firmware to the bridge's
+            // /updateFWUpload endpoint over HTTP multipart.
+            auto* ota_action = file_menu->addAction("&Update Airbear Firmware...");
+            QObject::connect(ota_action, &QAction::triggered,
+                             [this]() {
+                bool ok = false;
+                QString host = QInputDialog::getText(this,
+                    QString::fromUtf8("Airbear Host"),
+                    QString::fromUtf8("Host (mDNS / IP):"),
+                    QLineEdit::Normal, "speeduino.local", &ok);
+                if (!ok || host.isEmpty()) return;
+
+                auto path = QFileDialog::getOpenFileName(this,
+                    QString::fromUtf8("Select Airbear Firmware (.bin)"),
+                    QString(),
+                    QString::fromUtf8("Firmware (*.bin);;All Files (*)"));
+                if (path.isEmpty()) return;
+
+                std::ifstream in(path.toStdString(), std::ios::binary);
+                if (!in) {
+                    QMessageBox::warning(this, "Upload failed",
+                        QString::fromUtf8("Could not open firmware file."));
+                    return;
+                }
+                std::string bytes((std::istreambuf_iterator<char>(in)),
+                                  std::istreambuf_iterator<char>());
+                in.close();
+                if (bytes.empty()) {
+                    QMessageBox::warning(this, "Upload failed",
+                        QString::fromUtf8("Firmware file is empty."));
+                    return;
+                }
+
+                auto filename = QFileInfo(path).fileName().toStdString();
+                statusBar()->showMessage(
+                    QString::fromUtf8("Uploading Airbear firmware... "
+                        "(this may take ~30 seconds)"), 0);
+                QApplication::processEvents();
+
+#ifdef _WIN32
+                auto result = tuner_core::airbear_api::post_firmware(
+                    host.toStdString(), 80, "/updateFWUpload",
+                    filename, bytes, std::chrono::minutes(2));
+                if (result) {
+                    auto body = tuner_core::airbear_api::parse_http_body(*result);
+                    QString msg;
+                    if (body) {
+                        msg = QString::fromUtf8(
+                            ("Upload complete. Response: " + *body).c_str());
+                    } else {
+                        msg = QString::fromUtf8(
+                            "Upload sent. Response was non-2xx or malformed.");
+                    }
+                    statusBar()->showMessage(msg, 10000);
+                    QMessageBox::information(this, "Airbear OTA", msg);
+                } else {
+                    statusBar()->clearMessage();
+                    QMessageBox::warning(this, "Upload failed",
+                        QString::fromUtf8(
+                            "Could not reach Airbear at the given host. "
+                            "Check WiFi connectivity and hostname."));
+                }
+#else
+                statusBar()->clearMessage();
+                QMessageBox::warning(this, "Unsupported",
+                    QString::fromUtf8(
+                        "Airbear OTA upload is only wired on Windows."));
+#endif
+            });
+
+            file_menu->addSeparator();
+
             // Connect / Disconnect ECU actions.
             auto* connect_action = file_menu->addAction("&Connect to ECU...");
             auto* disconnect_action = file_menu->addAction("&Disconnect");
@@ -12747,6 +14661,30 @@ public:
             palette_action->setShortcutContext(Qt::ApplicationShortcut);
             QObject::connect(palette_action, &QAction::triggered, open_command_palette);
             this->addAction(palette_action);
+
+            view_menu->addSeparator();
+            // HTTP Live-Data API toggle — persists across sessions.
+            auto* http_toggle = view_menu->addAction("HTTP Live-Data &API (port 8080)");
+            http_toggle->setCheckable(true);
+            {
+                QSettings settings;
+                http_toggle->setChecked(settings.value("http/enabled", true).toBool());
+            }
+            QObject::connect(http_toggle, &QAction::triggered,
+                             [this, http_server, http_toggle](bool checked) {
+                QSettings settings;
+                settings.setValue("http/enabled", checked);
+                if (checked) {
+                    http_server->start(8080);
+                    statusBar()->showMessage(
+                        QString::fromUtf8("HTTP Live-Data API started on port 8080."), 5000);
+                } else {
+                    http_server->stop();
+                    statusBar()->showMessage(
+                        QString::fromUtf8("HTTP Live-Data API stopped."), 5000);
+                }
+                (void)http_toggle;
+            });
 
             // Tune menu ------------------------------------------------
             //
@@ -13120,7 +15058,7 @@ public:
                 std::snprintf(msg, sizeof(msg),
                     "Offline  \xc2\xb7  "
                     "RPM %.0f  \xc2\xb7  MAP %.0f  \xc2\xb7  AFR %.2f  \xc2\xb7  "
-                    "CLT %.1f\xc2\xb0""C  (demo)",
+                    "CLT %.1f\xc2\xb0""C  (simulated)",
                     snap.get("rpm"), snap.get("map"), snap.get("afr"), snap.get("clt"));
             }
             sb->showMessage(QString::fromUtf8(msg));

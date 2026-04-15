@@ -58,6 +58,55 @@ TEST_CASE("wb: encode 14.7") {
     CHECK(val == 147);
 }
 
+TEST_CASE("wb: Speeduino O2 table encoder — 1024 bytes, every 32nd is AFR*10") {
+    wc::CalibrationResult r;
+    r.afrs = std::vector<double>(32, 0.0);
+    r.afrs[0]  = 10.0;   // byte 0    = 100
+    r.afrs[1]  = 14.7;   // byte 32   = 147
+    r.afrs[15] = 20.0;   // byte 480  = 200
+    r.afrs[31] = 30.0;   // byte 992  = 255 (clamped from 300)
+    auto p = r.encode_speeduino_o2_table();
+    REQUIRE(p.size() == 1024);
+    CHECK(p[0]   == 100);
+    CHECK(p[32]  == 147);
+    CHECK(p[480] == 200);
+    CHECK(p[992] == 255);
+    // Every other position stays zero.
+    CHECK(p[1]   == 0);
+    CHECK(p[31]  == 0);
+    CHECK(p[33]  == 0);
+    CHECK(p[1023] == 0);
+}
+
+TEST_CASE("wb: Speeduino O2 table clamps negative AFR to 0") {
+    wc::CalibrationResult r;
+    r.afrs = std::vector<double>(32, 0.0);
+    r.afrs[5] = -1.0;
+    auto p = r.encode_speeduino_o2_table();
+    CHECK(p[5 * 32] == 0);
+}
+
+TEST_CASE("wb: Speeduino O2 table with fewer than 32 AFRs pads with zero") {
+    wc::CalibrationResult r;
+    r.afrs = {12.0, 13.0, 14.0};  // only 3 values
+    auto p = r.encode_speeduino_o2_table();
+    REQUIRE(p.size() == 1024);
+    CHECK(p[0]   == 120);
+    CHECK(p[32]  == 130);
+    CHECK(p[64]  == 140);
+    CHECK(p[96]  == 0);  // slot 3 not provided
+    CHECK(p[992] == 0);  // slot 31 not provided
+}
+
+TEST_CASE("wb: real preset round-trip produces valid bytes") {
+    auto r = wc::generate(*wc::preset_by_name("AEM 30-0300 / 30-4110 / X-Series"));
+    auto p = r.encode_speeduino_o2_table();
+    REQUIRE(p.size() == 1024);
+    // AEM AFR ranges 10..20 → byte range 100..200.
+    CHECK(p[0]   >= 100);
+    CHECK(p[992] <= 200);
+}
+
 TEST_CASE("wb: voltage lookup") {
     auto* p = wc::preset_by_name("AEM 30-0300 / 30-4110 / X-Series");
     auto r = wc::generate(*p);

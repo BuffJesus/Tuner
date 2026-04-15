@@ -141,3 +141,54 @@ TEST_CASE("empty INI yields empty catalogs without crashing") {
     CHECK(def.controller_commands.commands.empty());
     CHECK(def.setting_groups.groups.empty());
 }
+
+TEST_CASE("TN-007: endianness defaults to little when absent") {
+    auto def = tuner_core::compile_ecu_definition_text("");
+    CHECK(def.byte_order == "little");
+    CHECK(def.is_little_endian() == true);
+}
+
+TEST_CASE("TN-007: endianness = little parsed and reported") {
+    auto def = tuner_core::compile_ecu_definition_text(
+        "[Constants]\nendianness = little\n");
+    CHECK(def.byte_order == "little");
+    CHECK(def.is_little_endian() == true);
+}
+
+TEST_CASE("TN-007: endianness = big parsed and reported") {
+    auto def = tuner_core::compile_ecu_definition_text(
+        "[Constants]\nendianness = big\n");
+    CHECK(def.byte_order == "big");
+    CHECK(def.is_little_endian() == false);
+}
+
+TEST_CASE("TN-007: endianness is case-insensitive") {
+    auto def = tuner_core::compile_ecu_definition_text(
+        "[Constants]\nEndianness = LITTLE\n");
+    CHECK(def.byte_order == "little");
+    CHECK(def.is_little_endian() == true);
+
+    auto def2 = tuner_core::compile_ecu_definition_text(
+        "[Constants]\nendianness = Big\n");
+    CHECK(def2.byte_order == "big");
+    CHECK(def2.is_little_endian() == false);
+}
+
+TEST_CASE("TN-007: unknown endianness value falls back to little") {
+    auto def = tuner_core::compile_ecu_definition_text(
+        "[Constants]\nendianness = middle\n");
+    CHECK(def.byte_order == "little");
+    CHECK(def.is_little_endian() == true);
+}
+
+TEST_CASE("TN-007: endianness key in other sections ignored") {
+    auto def = tuner_core::compile_ecu_definition_text(
+        "[MegaTune]\nendianness = big\n");
+    CHECK(def.byte_order == "little");
+}
+
+TEST_CASE("TN-007: endianness line with trailing comment is stripped") {
+    auto def = tuner_core::compile_ecu_definition_text(
+        "[Constants]\nendianness = big  ; firmware switched in Phase 12\n");
+    CHECK(def.byte_order == "big");
+}

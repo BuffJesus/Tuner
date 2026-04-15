@@ -13,6 +13,7 @@
 #include "tuner_core/transport.hpp"
 #include "tuner_core/speeduino_protocol.hpp"
 #include "tuner_core/speeduino_framing.hpp"
+#include "tuner_core/firmware_capabilities.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -29,6 +30,14 @@ struct ConnectionInfo {
     int blocking_factor = 128;
     int table_blocking_factor = 128;
     bool framed = false;  // true for TCP (Airbear) connections
+    // TN-006: firmware capability facts derived at connect time. When
+    // the `'f'` query succeeds, `source = "serial+definition"` and the
+    // blocking-factor fields are authoritative; if the query fails the
+    // source stays `"definition"` and downstream code should fall back
+    // to INI-declared defaults. `experimental_u16p2` mirrors the
+    // signature-string suffix so consumers can gate U16-aware code
+    // paths without re-parsing the signature.
+    firmware_capabilities::Capabilities capabilities;
 };
 
 // Status callback — called during connect to report progress.
@@ -69,6 +78,38 @@ public:
 
     // Burn current RAM contents to flash.
     void burn(std::uint8_t page, char cmd = 'b');
+
+    // TN-005: fetch the firmware-computed CRC32 of a given page's
+    // current RAM contents via the `'d'` command. Returns the 32-bit
+    // CRC as a native unsigned integer. Throws on transport error or
+    // malformed response.
+    std::uint32_t fetch_page_crc(std::uint8_t page, char cmd = 'd');
+
+    // TN-005 helper: compare the firmware CRC of `page` against the
+    // CRC32 of `local_bytes`. `matched == true` when both agree. The
+    // polynomial used is the standard Ethernet/PNG CRC-32 (0xEDB88320)
+    // which matches Speeduino's FastCRC32.
+    struct PageVerifyResult {
+        bool matched = false;
+        std::uint32_t expected = 0;  // locally computed CRC
+        std::uint32_t actual = 0;    // firmware-reported CRC
+    };
+    PageVerifyResult verify_page(
+        std::uint8_t page,
+        std::span<const std::uint8_t> local_bytes,
+        char cmd = 'd');
+
+    // Write a sensor calibration table to the ECU using the legacy
+    // `'t'` command. Wire format on framed transport:
+    //   [t][0x00][page][offset_hi][offset_lo][len_hi][len_lo][data...]
+    // `page` is the tableID: 0=CLT, 1=IAT, 2=O2. Payload shape depends
+    // on the page — 64 bytes (32 × int16 BE temperature ×10) for
+    // CLT/IAT; 256+ bytes (O2 chunked) for page 2. The caller is
+    // responsible for building the correct shape.
+    void write_calibration_table(
+        std::uint8_t page,
+        const std::uint8_t* data, std::size_t size,
+        char cmd = 't');
 
     // Poll runtime data (output channels).
     std::vector<std::uint8_t> read_runtime(

@@ -91,6 +91,16 @@ struct NativeTune {
     std::string schema_version = kNativeSchemaVersion;
     std::optional<std::string> definition_signature;
     std::map<std::string, NativeTuneValue> values;  // ordered for stable JSON output
+
+    // Multi-tune slot metadata — firmware-14G-aware clients fill these
+    // in; legacy consumers treat a missing slot_index as slot 0. The
+    // slot_name is pure desktop metadata (the firmware only knows
+    // indices), so the operator can label slots "Pump Gas" / "Race"
+    // / "Valet" in the tuner and carry those labels across shares.
+    // Both fields are optional on disk (absent in v1.0 tunes); a
+    // reader that sees them on a v1.1+ tune surfaces them in the UI.
+    std::optional<int> slot_index;
+    std::optional<std::string> slot_name;
 };
 
 // Thrown when a native file's schema_version is missing, malformed,

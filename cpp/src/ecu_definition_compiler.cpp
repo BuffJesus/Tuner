@@ -9,11 +9,68 @@
 #include "tuner_core/ini_defines_parser.hpp"
 #include "tuner_core/ini_preprocessor.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 
 namespace tuner_core {
+
+namespace {
+
+// Scan preprocessed lines for `endianness = <value>` inside the
+// `[Constants]` section. Returns "little" (default) when absent or
+// unrecognised. TN-007.
+std::string extract_byte_order(const std::vector<std::string>& lines) {
+    bool in_constants = false;
+    for (const auto& raw : lines) {
+        std::string_view line{raw};
+        while (!line.empty() && std::isspace(static_cast<unsigned char>(line.front())))
+            line.remove_prefix(1);
+        if (line.empty() || line[0] == ';') continue;
+        if (line.front() == '[') {
+            auto end = line.find(']');
+            if (end == std::string_view::npos) continue;
+            auto section = line.substr(1, end - 1);
+            std::string lower(section);
+            for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            in_constants = (lower == "constants");
+            continue;
+        }
+        if (!in_constants) continue;
+        auto eq = line.find('=');
+        if (eq == std::string_view::npos) continue;
+        auto key = line.substr(0, eq);
+        while (!key.empty() && std::isspace(static_cast<unsigned char>(key.back())))
+            key.remove_suffix(1);
+        std::string key_lower(key);
+        for (auto& c : key_lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (key_lower != "endianness") continue;
+        auto val = line.substr(eq + 1);
+        while (!val.empty() && std::isspace(static_cast<unsigned char>(val.front())))
+            val.remove_prefix(1);
+        // Strip trailing whitespace / comment.
+        auto semi = val.find(';');
+        if (semi != std::string_view::npos) val = val.substr(0, semi);
+        while (!val.empty() && std::isspace(static_cast<unsigned char>(val.back())))
+            val.remove_suffix(1);
+        std::string out(val);
+        for (auto& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (out == "little" || out == "big") return out;
+        return "little";  // unrecognised -> default
+    }
+    return "little";
+}
+
+}  // namespace
+
+bool NativeEcuDefinition::is_little_endian() const noexcept {
+    std::string lower = byte_order;
+    for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return lower != "big";  // unknown values fall back to little
+}
 
 NativeEcuDefinition compile_ecu_definition_text(
     std::string_view text,
@@ -65,6 +122,7 @@ NativeEcuDefinition compile_ecu_definition_text(
         parse_reference_tables_lines(lines, defines);
     definition.autotune_sections =
         parse_autotune_sections_lines(lines, defines);
+    definition.byte_order = extract_byte_order(lines);
     return definition;
 }
 

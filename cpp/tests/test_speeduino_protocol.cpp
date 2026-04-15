@@ -92,3 +92,32 @@ TEST_CASE("page_request encodes 16-bit offsets and lengths little-endian") {
     CHECK(req[5] == 0x98);
     CHECK(req[6] == 0xBA);
 }
+
+TEST_CASE("TN-005: page_crc_request is 3 bytes [d, 0, page]") {
+    auto req = page_crc_request(7);
+    REQUIRE(req.size() == 3);
+    CHECK(req[0] == 'd');
+    CHECK(req[1] == 0x00);
+    CHECK(req[2] == 7);
+}
+
+TEST_CASE("TN-005: page_crc_request honors a custom command char") {
+    auto req = page_crc_request(0, 'D');
+    CHECK(req[0] == 'D');
+}
+
+TEST_CASE("TN-005: parse_page_crc_response decodes big-endian u32") {
+    std::uint8_t buf[] = {0xDE, 0xAD, 0xBE, 0xEF};
+    auto crc = parse_page_crc_response(std::span{buf});
+    CHECK(crc == 0xDEADBEEFu);
+}
+
+TEST_CASE("TN-005: parse_page_crc_response zero") {
+    std::uint8_t buf[] = {0x00, 0x00, 0x00, 0x00};
+    CHECK(parse_page_crc_response(std::span{buf}) == 0u);
+}
+
+TEST_CASE("TN-005: parse_page_crc_response throws on short input") {
+    std::uint8_t buf[] = {0x01, 0x02, 0x03};
+    CHECK_THROWS(parse_page_crc_response(std::span{buf}));
+}

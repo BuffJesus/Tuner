@@ -74,6 +74,18 @@ std::vector<std::uint8_t> burn_request(
     std::uint8_t page,
     char command = kDefaultBurnChar);
 
+// TN-005: build the 3-byte page-CRC request: [cmd, tsCanId=0, page].
+// Firmware replies with 4 big-endian bytes of the computed CRC32 of
+// the current RAM contents of the page. Default command is `'d'`
+// (legacy `comms_legacy.cpp:917..939`).
+inline constexpr char kDefaultPageCrcChar = 'd';
+std::vector<std::uint8_t> page_crc_request(
+    std::uint8_t page,
+    char command = kDefaultPageCrcChar);
+
+// Parse the 4-byte big-endian CRC32 response. Throws on short input.
+std::uint32_t parse_page_crc_response(std::span<const std::uint8_t> response);
+
 // Pick the active command character: returns the first character of
 // `raw` if it's non-empty, otherwise `fallback`. Mirrors
 // `SpeeduinoControllerClient._command_char`.

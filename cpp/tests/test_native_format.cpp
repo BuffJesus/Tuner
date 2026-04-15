@@ -124,6 +124,57 @@ TEST_CASE("invalid JSON raises runtime error not version error") {
         std::runtime_error);
 }
 
+// -----------------------------------------------------------------------
+// Multi-tune slot metadata (v1.1 — forward-compatible)
+// -----------------------------------------------------------------------
+
+TEST_CASE("tune round trip preserves slot_index and slot_name") {
+    tuner_core::NativeTune tune;
+    tune.definition_signature = "speeduino 202501-T41";
+    tune.slot_index = 2;
+    tune.slot_name = "Race Gas";
+    tune.values["reqFuel"] = 8.5;
+
+    auto text = tuner_core::dump_tune(tune);
+    auto reloaded = tuner_core::load_tune(text);
+
+    REQUIRE(reloaded.slot_index.has_value());
+    CHECK(*reloaded.slot_index == 2);
+    REQUIRE(reloaded.slot_name.has_value());
+    CHECK(*reloaded.slot_name == "Race Gas");
+}
+
+TEST_CASE("tune without slot fields loads as nullopt (legacy v1.0)") {
+    auto reloaded = tuner_core::load_tune(
+        "{\"schema_version\": \"1.0\", \"values\": {}}");
+    CHECK_FALSE(reloaded.slot_index.has_value());
+    CHECK_FALSE(reloaded.slot_name.has_value());
+}
+
+TEST_CASE("tune slot_index only (no name) round-trips") {
+    tuner_core::NativeTune tune;
+    tune.slot_index = 0;
+    auto text = tuner_core::dump_tune(tune);
+    auto reloaded = tuner_core::load_tune(text);
+    REQUIRE(reloaded.slot_index.has_value());
+    CHECK(*reloaded.slot_index == 0);
+    CHECK_FALSE(reloaded.slot_name.has_value());
+}
+
+TEST_CASE("tune slot_name serialised as null when nullopt") {
+    tuner_core::NativeTune tune;
+    tune.slot_index = 1;
+    // Deliberately leave slot_name empty.
+    auto text = tuner_core::dump_tune(tune);
+    CHECK(text.find("\"slot_name\": null") != std::string::npos);
+    CHECK(text.find("\"slot_index\": 1") != std::string::npos);
+    // And it round-trips as nullopt.
+    auto reloaded = tuner_core::load_tune(text);
+    CHECK_FALSE(reloaded.slot_name.has_value());
+    REQUIRE(reloaded.slot_index.has_value());
+    CHECK(*reloaded.slot_index == 1);
+}
+
 TEST_CASE("non-object root raises") {
     CHECK_THROWS_AS(
         tuner_core::load_definition("[]"),

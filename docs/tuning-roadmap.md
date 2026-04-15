@@ -308,9 +308,9 @@ The Trigger Logs surface accepts CSV imports and does analysis, but it doesn't s
 | 8: Dashboard, workspace, and UX modernization | **Complete** — INI-driven gauge catalog seeded into default layout; FrontPage indicator strip wired; LED indicator widget kind landed; static-text `label` widget kind (TSDash DashLabel parity) added with offscreen Qt tests + JSON layout round trip |
 | 9: Board, firmware, and bench workflow integration | **Complete** — reconnect signature warning UI, `uncertain_channel_groups()` runtime table flags, `TcpTransport` WiFi connect, mDNS resolution, HTTP live-data API (port 8080), and `LiveTriggerLoggerService` all wired; LoggerDefinition live tooth/composite stream (start/poll/read/stop firmware commands) wired through `SpeeduinoControllerClient.fetch_logger_data()` and exercised end-to-end by `TriggerCaptureWorker` from the Trigger Logs surface |
 | 10: Hardening and release prep | Ongoing |
-| 14: Native C++ Qt 6 desktop port | **In progress** — Slice 4 at sub-slice 146. C++ doctest suite: **1395 tests / 10899 assertions / 0 failures**. Python suite: **3011 tests**. Qt 6.7.3 built from source at `C:/Qt/6.7.3-custom`. 98 services ported + all INI leaf parsers + full beautification arc + 20 UX slices + **14-feature functional wiring pass** (sub-slice 146): real ECU write/burn, page visibility, flash subprocess, live capture, trigger capture, VE analyze import + live session, replay viewer, FrontPage indicators, INI-driven gauges. **8 of 9 tabs at full parity.** See parity tracker below. |
+| 14: Native C++ Qt 6 desktop port | **In progress** — Slice 4 at sub-slice 159. C++ doctest suite: **1457 tests / 11063 assertions / 0 failures**. Python suite: **3011 tests**. Qt 6.7.3 built from source at `C:/Qt/6.7.3-custom`. 98 services ported + all INI leaf parsers + full beautification arc + 20 UX slices + **14-feature functional wiring pass** (sub-slice 146) + **13-slice comms/ecosystem alignment pass** (sub-slices 147–159): embedded Teensy HID flasher (no external exe), EcuHub UDP discovery + device picker, Airbear REST client with `fw_variant` mismatch warning, `write_calibration_table` for CLT/IAT/O2 (with 1024-byte Speeduino-native encoder), TSDash `.dash` import/export, opt-in HTTP live-data API, session connect rollback (TN-001), endianness contract cleanup (TN-007), capability handshake consumption (TN-006), real page-CRC verify (TN-005), Airbear OTA firmware upload. **All 8 TN-series backlog items closed.** See parity tracker below. |
 
-## C++ App Feature Parity Tracker (as of sub-slice 146)
+## C++ App Feature Parity Tracker (as of sub-slice 159)
 
 Status key: **Done** = fully functional | **Partial** = framework in place, not fully wired | **Missing** = not started
 
@@ -361,7 +361,7 @@ Status key: **Done** = fully functional | **Partial** = framework in place, not 
 | Preflight checklist | **Done** | Reads real project/connection/port state |
 | Board detection (serial ports) | **Done** | Windows registry enumeration |
 | Firmware file selection | **Done** (sub-slice 146) | QFileDialog for .hex/.bin files |
-| Flash upload execution | **Done** (sub-slice 146) | QProcess subprocess, board-aware tool detection (AVRDUDE/Teensy CLI/dfu-util), auto-disconnect ECU |
+| Flash upload execution | **Done** (sub-slices 146 + 147) | Teensy 3.5/3.6/4.1 use embedded Win32 HID flasher (no external exe). Mega2560 (AVRDUDE) + STM32 (dfu-util) use QProcess subprocess with board-aware tool detection. Auto-disconnects ECU before flash. |
 | Flash progress bar | **Done** (sub-slice 146) | 4px indeterminate QProgressBar during flash |
 
 ### SETUP tab (15/15 — Complete)
@@ -445,18 +445,18 @@ Status key: **Done** = fully functional | **Partial** = framework in place, not 
 
 ### Not started — Python has, C++ doesn't
 
-| Feature | Python Location | Priority |
-|---|---|---|
-| Acceleration enrichment wizard | `hardware_setup_wizard.py` step within injector page | Medium |
-| Dashboard drag-and-drop gauge rearrangement | `dashboard_panel.py` | Medium |
-| Gauge config dialog (channel/zone/kind per gauge) | `gauge_config_dialog.py` | Medium |
-| LED/bar/label gauge painter kinds | `dashboard_panel.py` | Low |
-| Wideband calibration write to ECU | `main_window.py` → `write_calibration_table()` | Medium |
-| HTTP live-data API (port 8080) | `live_data_http_server.py` | Low |
-| mDNS `speeduino.local` resolution | `tcp_transport.py` | Low |
-| TSDash file import/export | `ts_dash_file_service.py` | Low |
-| Definition Settings dialog | `main_window.py` → `_open_definition_settings_dialog()` | Medium |
-| EcuHub UDP discovery | `udp_transport.py` | Low |
+| Feature | Python Location | Priority | Status |
+|---|---|---|---|
+| Acceleration enrichment wizard | `hardware_setup_wizard.py` step within injector page | Medium | ✅ Done (sub-slice 146 — Setup wizard Step 3) |
+| Dashboard drag-and-drop gauge rearrangement | `dashboard_panel.py` | Medium | ✅ Done (sub-slice 161 — `DraggableCardLabel` mirrors `DialGaugeWidget`'s drag/drop, same MIME type so cards and dials swap interchangeably) |
+| Gauge config dialog (channel/zone/kind per gauge) | `gauge_config_dialog.py` | Medium | ✅ Done (sub-slice 161 — number-card right-click → Configure Gauge fires the same `open_gauge_config_dialog` the dial gauges use) |
+| LED/bar/label gauge painter kinds | `dashboard_panel.py` | Low | ✅ Done (sub-slices 162 + 163 — `BarGaugeWidget` and `LedGaugeWidget` both wired. LED is a zone-coloured glowing circle with outer glow, value readout, and full drag/drop/config parity with dial/card/bar. All 4 gauge kinds — dial/number/bar/led — can swap positions interchangeably via the same MIME type.) |
+| Wideband calibration write to ECU | `main_window.py` → `write_calibration_table()` | Medium | ✅ Done (sub-slices 150–152 — CLT/IAT/O2 all wired on SETUP tab) |
+| HTTP live-data API (port 8080) | `live_data_http_server.py` | Low | ✅ Done (sub-slice 154 — opt-in View menu toggle) |
+| mDNS `speeduino.local` resolution | `tcp_transport.py` | Low | Not needed — Windows 10+ resolves `.local` natively via built-in mDNS responder, so `getaddrinfo("speeduino.local")` already works at connect time |
+| TSDash file import/export | `ts_dash_file_service.py` | Low | ✅ Done (sub-slice 153 — File → Import/Export TSDash menu) |
+| Definition Settings dialog | `main_window.py` → `_open_definition_settings_dialog()` | Medium | ✅ Done (File → Definition Settings) |
+| EcuHub UDP discovery | `udp_transport.py` | Low | ✅ Done (sub-slice 148 — `udp_discovery` service + Scan Network button) |
 
 ### Not started — TunerStudio has, nobody has yet
 
@@ -4240,12 +4240,12 @@ A cross-repo audit of `C:/Users/Cornelio/Desktop/Airbear-main` (firmware v0.2.0)
 1. **Central `BoardCapabilities` reader on the desktop.** One service that decodes all eight capability bits from `OCH_OFFSET_BOARD_CAPABILITY_FLAGS` into a typed struct (`has_wifi`, `has_rtc`, `has_sd`, `has_native_can`, `has_spi_flash`, `has_12bit_adc`, `has_high_res_tables`, `has_unrestricted_interrupts`). Every feature-gating call site consumes this struct, never a raw bit. Adding a new cap bit on the firmware side is then a one-line change on the desktop side.
 2. **Mirror `OCH_OFFSET_*` constants into `ChannelContract`.** The `LiveDataMapParser` already extracts these from `live_data_map.h`; make every consumer reference them by name. No more `byte 147 bit 7` magic in C++ code — read `contract.OCH_OFFSET_RUNTIME_STATUS_A`.
 3. **`TcpTransport` recognises Airbear error codes.** The read path must treat `RC_TIMEOUT (0x80)` and `RC_BUSY_ERR (0x85)` as first-class recoverable errors. `RC_BUSY_ERR` → short backoff + retry (≤ 3 attempts, 20 ms between). `RC_TIMEOUT` → surface "ECU not responding" to the operator, no silent retry.
-4. **Unified discovery.** Desktop speaks both mDNS `speeduino.local` and EcuHub UDP :21846 and picks whichever answers first, populating a device picker. Matches the TSDash pattern and lets the operator plug in a DropBear on an unfamiliar network without typing a hostname.
+4. **Unified discovery.** Desktop speaks both mDNS `speeduino.local` and EcuHub UDP :21846 and populates a single device picker. Matches the TSDash pattern and lets the operator plug in a DropBear on an unfamiliar network without typing a hostname. ✅ **Done (sub-slice 160).** `tuner_core::udp_discovery` ports the EcuHub `DISCOVER_SLAVE_SERVER` / `key:value\n` announcement protocol from `Airbear-main/src/discovery.cpp`, and `tuner_core::mdns_discovery` adds a lightweight `.local` resolver for `speeduino.local` using the OS IPv4 resolver. Connection dialog `Scan Network` now merges UDP announcements and mDNS resolution into one picker, deduping on IP:port so a host discovered by both paths only appears once. Doctest coverage now includes the UDP parser plus 6 focused mDNS normalization / label / merge cases.
 5. **Phase 12 readiness check is definition-driven, not signature-driven.** When the desktop generator decides U08 vs U16 for a table, it reads `NativeTable.data_type` from the active definition — *not* the signature string, *not* `BOARD_CAP_HIGH_RES_TABLES` alone. Signature + cap bit are sanity checks; the definition is the authority. Already the locked Phase 14 plan — this is a reminder not to drift.
-6. **`fw_variant` cross-check.** When the desktop connects via Airbear, it compares the `'Q'` signature string (from the framed TCP path) against the `fw_variant` field in `/api/realtime` (from Airbear's own probe). If they disagree, the Teensy was swapped between sessions and the desktop flags a "firmware mismatch — re-validate your tune" warning (the existing `reconnect_signature_changed()` service already handles the same kind of drift for direct-serial connections).
+6. **`fw_variant` cross-check.** When the desktop connects via Airbear, it compares the `'Q'` signature string (from the framed TCP path) against the `fw_variant` field in `/api/realtime` (from Airbear's own probe). If they disagree, the Teensy was swapped between sessions and the desktop flags a "firmware mismatch — re-validate your tune" warning (the existing `reconnect_signature_changed()` service already handles the same kind of drift for direct-serial connections). ✅ **Done (sub-slice 149).** `tuner_core::airbear_api` ports the HTTP GET client (Winsock) and the JSON parser for `/api/realtime` + `/api/status`. Pure-logic `signatures_match(ecu_sig, fw_variant)` handles the `unknown` / case-insensitive substring / empty-variant edge cases. Connection dialog kicks off a 1.5s HTTP probe after every successful framed TCP connect; mismatch pops a `QMessageBox::warning` but does not block the connection. 15 new doctest cases cover the HTTP body splitter, both JSON parsers, and every match/mismatch/unknown branch.
 7. **SD card plan revision.** G5 post-Phase-14 backlog should stop assuming dedicated `cmdSdList` / `cmdSdRead` raw commands exist and instead prototype SD access via the existing page/calibration transport. If that's too awkward, the right next step is a firmware-side proposal to add the two raw commands — not a desktop-side guess about what they'll look like.
 8. **Airbear REST as a lightweight secondary-observer path.** Any tooling (external dashboards, scripting, Grafana) that only needs live channels can hit `/api/realtime` + `/api/status` instead of opening a framed TCP session. The desktop's opt-in HTTP Live-Data API (port 8080) can front this if the operator wants a single endpoint — or can let Airbear serve it directly.
-9. **Optional: `POST /updateFWUpload` integration.** Desktop can expose a one-button "Update Airbear" action that wraps the existing OTA endpoint; low priority but eliminates a big "drop into PlatformIO CLI" detour for operators.
+9. **Optional: `POST /updateFWUpload` integration.** Desktop can expose a one-button "Update Airbear" action that wraps the existing OTA endpoint; low priority but eliminates a big "drop into PlatformIO CLI" detour for operators. ✅ **Done (sub-slice 159).** `airbear_api::post_firmware` + pure-logic `build_multipart_body` ported. File menu → "Update Airbear Firmware..." prompts for host + .bin file, uploads as `multipart/form-data` with 2-minute timeout, reports response in status bar + message box. 2 new doctest cases cover the multipart shape including binary payloads with NUL bytes.
 10. **Documented append-only live-data packet contract.** Any future firmware change to the 148-byte packet must be append-only. Cross-linking from the desktop `ChannelContract` docs to the Speeduino `live_data_map.h` lock makes this explicit.
 
 #### Speeduino firmware ↔ Tuner direct contract (firmware-to-desktop, Airbear out of frame)
@@ -4390,26 +4390,26 @@ the following features are prioritized by operator impact.
 
 | # | Feature | Effort | Status |
 |---|---------|--------|--------|
-| 1 | Virtual dyno / power curve view | Moderate | Next up |
-| 2 | VE Analyze coverage heatmap overlay | Moderate | Planned |
-| 3 | Zone-based alert toasts on gauges | Trivial | Planned |
-| 4 | Airbear SD card log download | Moderate | Planned |
-| 5 | Staged-change visual diff (table heatmap) | Moderate | Planned |
-| 6 | Confidence badges on wizard generators | Trivial | Planned |
-| 7 | Plain-language VE Analyze summaries | Moderate | Planned |
-| 8 | Next-steps guidance after VE Analyze | Moderate | Planned |
-| 9 | Map switching / multi-tune slots | Moderate | Planned (firmware ready) |
-| 10 | Compressor map turbo modeling | Medium | Planned |
+| 1 | Virtual dyno / power curve view | Moderate | ✅ Done |
+| 2 | VE Analyze coverage heatmap overlay | Moderate | ✅ Done |
+| 3 | Zone-based alert toasts on gauges | Trivial | ✅ Done |
+| 4 | Airbear SD card log download | Moderate | ⏸ Blocked on firmware G5 command spec |
+| 5 | Staged-change visual diff (table heatmap) | Moderate | ✅ Done |
+| 6 | Confidence badges on wizard generators | Trivial | ✅ Done |
+| 7 | Plain-language VE Analyze summaries | Moderate | ✅ Done |
+| 8 | Next-steps guidance after VE Analyze | Moderate | ✅ Done |
+| 9 | Map switching / multi-tune slots | Moderate | Partial — steps 1+3 (schema + project-bar slot badge) ✅; steps 4–7 blocked on firmware 14G |
+| 10 | Compressor map turbo modeling | Medium | ✅ Done |
 
 ### Phase 16: Ecosystem Tightening
 
-| # | Feature | Effort | Requires |
-|---|---------|--------|----------|
-| 1 | Definition hash in firmware capability | Firmware change | Speeduino firmware PR |
-| 2 | Per-page format bitmap in 'K' response | Firmware change | Speeduino firmware PR |
-| 3 | HTTP API versioning (/api/v1/) | Trivial | Desktop only |
-| 4 | Airbear error counters in /api/status | Airbear change | Airbear firmware PR |
-| 5 | Standalone log viewer with timeline | Large | Desktop only |
+| # | Feature | Effort | Requires | Status |
+|---|---------|--------|----------|--------|
+| 1 | Definition hash in firmware capability | Firmware change | Speeduino firmware PR | Planned |
+| 2 | Per-page format bitmap in 'K' response | Firmware change | Speeduino firmware PR | Planned |
+| 3 | HTTP API versioning (/api/v1/) | Trivial | Desktop only | ✅ Done |
+| 4 | Airbear error counters in /api/status | Airbear change | Airbear firmware PR | Planned |
+| 5 | Standalone log viewer with timeline | Large | Desktop only | Planned |
 
 ### Virtual Dyno Design Notes
 

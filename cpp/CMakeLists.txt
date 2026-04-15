@@ -153,6 +153,7 @@ add_library(tuner_core STATIC
     src/wue_analyze_accumulator.cpp
     src/virtual_dyno.cpp
     src/boost_table_generator.cpp
+    src/compressor_map_modeling.cpp
     src/ve_analyze_accumulator.cpp
     src/tuning_page_builder.cpp
     src/datalog_import.cpp
@@ -181,9 +182,12 @@ add_library(tuner_core STATIC
     src/ini_autotune_sections_parser.cpp
     src/transport_serial.cpp
     src/transport_tcp.cpp
+    src/mdns_discovery.cpp
     src/speeduino_controller.cpp
     src/teensy_hex_image.cpp
     src/teensy_hid_flasher.cpp
+    src/udp_discovery.cpp
+    src/airbear_api.cpp
 )
 target_include_directories(tuner_core
     PUBLIC
@@ -341,6 +345,10 @@ if(TUNER_CORE_BUILD_TESTS)
         tests/test_ini_pc_variables_parser.cpp
         tests/test_ini_autotune_sections_parser.cpp
         tests/test_teensy_hex_image.cpp
+        tests/test_mdns_discovery.cpp
+        tests/test_udp_discovery.cpp
+        tests/test_airbear_api.cpp
+        tests/test_compressor_map_modeling.cpp
     )
     target_include_directories(tuner_core_tests
         PRIVATE
