@@ -815,7 +815,35 @@ std::filesystem::path find_native_definition() {
     // Check QSettings for a project-level definition path.
     QSettings settings;
     auto def_path = settings.value("projects/current/tunerdef", "").toString().toStdString();
-    if (!def_path.empty() && std::filesystem::exists(def_path)) return def_path;
+    if (!def_path.empty() && std::filesystem::exists(def_path)) {
+        // Prefer a v2 fixture over a legacy stored v1 path when one
+        // is available. Operators opened a New Project against the
+        // old v1 Ford300 fixture before we shipped the v2 file;
+        // preferring v2 here means their next session picks up the
+        // full-layout native definition without a manual reset.
+        std::ifstream peek(def_path, std::ios::binary);
+        if (peek) {
+            std::string head(1024, '\0');
+            peek.read(&head[0], static_cast<std::streamsize>(head.size()));
+            head.resize(static_cast<std::size_t>(peek.gcount()));
+            if (head.find("\"schema_version\": \"2") != std::string::npos ||
+                head.find("\"schema_version\":\"2") != std::string::npos) {
+                return def_path;  // stored file IS v2, use it
+            }
+        }
+        // Stored path is v1 (or unreadable) — try to find a v2 fixture
+        // alongside; only fall back to the stored v1 if no v2 exists.
+        const char* v2_candidates[] = {
+            "tests/fixtures/native/speeduino-dropbear-v2.0.1.tunerdef",
+            "../tests/fixtures/native/speeduino-dropbear-v2.0.1.tunerdef",
+            "../../tests/fixtures/native/speeduino-dropbear-v2.0.1.tunerdef",
+            "../../../tests/fixtures/native/speeduino-dropbear-v2.0.1.tunerdef",
+            "D:/Documents/JetBrains/Python/Tuner/tests/fixtures/native/speeduino-dropbear-v2.0.1.tunerdef",
+        };
+        for (const char* c : v2_candidates)
+            if (std::filesystem::exists(c)) return c;
+        return def_path;
+    }
     // Search fixture directory. Prefer the schema-v2 generated
     // definition (full layout, loads directly via the v2 path) over
     // the semantic-only v1 Ford300 fixture. The v2 file is produced
@@ -1278,9 +1306,19 @@ RecentProject load_recent_project() {
     return list.empty() ? RecentProject{} : list[0];
 }
 
+// Session flag set when the operator chose "New Project" on the
+// startup picker. Suppresses the MRU fallback during the very first
+// main-window construction so the title/project bar show a clean
+// slate instead of ghost-loading the most recent project behind the
+// dialog. Cleared right after the initial `TunerMainWindow` ctor so
+// subsequent reloads (triggered by the New Project dialog accepting)
+// see the freshly-stored project state normally.
+bool g_suppress_mru_fallback = false;
+
 RecentProject active_project() {
     auto current = load_current_project();
     if (!current.msq_path.empty() || !current.ini_path.empty()) return current;
+    if (g_suppress_mru_fallback) return {};
     return load_recent_project();
 }
 
@@ -14294,7 +14332,29 @@ public:
                 }
 
                 auto* tune_field = make_field("Tune File:");
-                tune_field->setEditText(QString::fromUtf8("(create empty)"));
+                // Pre-fill with the bundled base tune if available so
+                // operators accepting defaults get a populated editor
+                // instead of blank scalar fields + empty tables. They
+                // can still browse to another `.tuner`/`.msq` or clear
+                // the field to run the Engine Setup Wizard for a
+                // generator-derived tune.
+                {
+                    const char* base_tune_candidates[] = {
+                        "tests/fixtures/native/speeduino-dropbear-v2.0.1-base-tune.tuner",
+                        "../tests/fixtures/native/speeduino-dropbear-v2.0.1-base-tune.tuner",
+                        "../../tests/fixtures/native/speeduino-dropbear-v2.0.1-base-tune.tuner",
+                        "../../../tests/fixtures/native/speeduino-dropbear-v2.0.1-base-tune.tuner",
+                        "D:/Documents/JetBrains/Python/Tuner/tests/fixtures/native/speeduino-dropbear-v2.0.1-base-tune.tuner",
+                    };
+                    std::string prefill = "(create empty)";
+                    for (const char* c : base_tune_candidates) {
+                        if (std::filesystem::exists(c)) {
+                            prefill = c;
+                            break;
+                        }
+                    }
+                    tune_field->setEditText(QString::fromUtf8(prefill.c_str()));
+                }
                 // Wire tune browse button.
                 {
                     auto* row_layout = static_cast<QHBoxLayout*>(form->itemAt(form->count() - 1)->layout());
@@ -15707,7 +15767,35 @@ int main(int argc, char* argv[]) {
             startup_want_connect = want_connect;
         }
 
+        // If the operator picked "New Project" on the startup surface,
+        // wipe the stored `projects/current/*` keys before building
+        // the main window. Otherwise the window loads whatever the
+        // last session stored — so the window title reads "Tuner —
+        // <old project>" while the operator is staring at an empty
+        // New Project dialog and expecting a clean slate. Clearing
+        // here makes the first frame of the main window match the
+        // dialog's intent.
+        if (want_new_project) {
+            QSettings clear_qs;
+            clear_qs.setValue(kCurrentProjectNameKey, QString());
+            clear_qs.setValue(kCurrentProjectIniKey, QString());
+            clear_qs.setValue("projects/current/tunerdef", QString());
+            clear_qs.setValue(kCurrentProjectTuneKey, QString());
+            clear_qs.setValue(kCurrentProjectSigKey, QString());
+            clear_qs.setValue(kCurrentProjectDateKey, QString());
+            clear_qs.sync();
+            // Also suppress the MRU-recent fallback for the initial
+            // window construction — otherwise `active_project()` still
+            // returns the most recent project from the MRU list and
+            // paints its name into the window title while the operator
+            // is staring at an empty New Project dialog. Cleared right
+            // after ctor so subsequent reloads (after the dialog
+            // accepts) see the real stored state.
+            g_suppress_mru_fallback = true;
+        }
+
         TunerMainWindow window;
+        g_suppress_mru_fallback = false;
         debug_log("main window built");
         std::printf("[main] window built\n"); std::fflush(stdout);
         window.show();

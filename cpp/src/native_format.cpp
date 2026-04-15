@@ -192,11 +192,25 @@ json axis_to_json(const NativeAxis& a) {
     return out;
 }
 
+// Read an integer field tolerantly. Older semantic `.tunerdef` files
+// sometimes carry a [width, height] array in fields that downstream
+// code wants as a scalar count (e.g. `point_count` on a CurveEditor
+// with a display-size hint). Return 0 when the key is missing or the
+// value isn't a scalar number — surviving the load is more useful
+// than failing the whole definition parse on a cosmetic hint.
+static int read_int_tolerant(const json& obj, const char* key) {
+    if (!obj.contains(key)) return 0;
+    const auto& v = obj[key];
+    if (v.is_number_integer()) return v.get<int>();
+    if (v.is_number_float())   return static_cast<int>(v.get<double>());
+    return 0;
+}
+
 NativeAxis axis_from_json(const json& obj) {
     NativeAxis a;
     a.semantic_id = obj.at("semantic_id").get<std::string>();
     a.legacy_name = obj.at("legacy_name").get<std::string>();
-    a.length = obj.value("length", 0);
+    a.length = read_int_tolerant(obj, "length");
     a.units = get_optional_string(obj, "units");
     return a;
 }
@@ -220,8 +234,8 @@ NativeTable table_from_json(const json& obj) {
     NativeTable t;
     t.semantic_id = obj.at("semantic_id").get<std::string>();
     t.legacy_name = obj.at("legacy_name").get<std::string>();
-    t.rows = obj.value("rows", 0);
-    t.columns = obj.value("columns", 0);
+    t.rows = read_int_tolerant(obj, "rows");
+    t.columns = read_int_tolerant(obj, "columns");
     t.label = get_optional_string(obj, "label");
     t.units = get_optional_string(obj, "units");
     t.x_axis_id = get_optional_string(obj, "x_axis_id");
@@ -246,7 +260,7 @@ NativeCurve curve_from_json(const json& obj) {
     NativeCurve c;
     c.semantic_id = obj.at("semantic_id").get<std::string>();
     c.legacy_name = obj.at("legacy_name").get<std::string>();
-    c.point_count = obj.value("point_count", 0);
+    c.point_count = read_int_tolerant(obj, "point_count");
     c.label = get_optional_string(obj, "label");
     c.units = get_optional_string(obj, "units");
     c.x_axis_id = get_optional_string(obj, "x_axis_id");
