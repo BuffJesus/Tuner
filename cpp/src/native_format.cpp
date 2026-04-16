@@ -94,11 +94,13 @@ std::string read_file(const std::filesystem::path& path) {
 
 // Schema-version gate. Mirrors `NativeFormatService._check_version`
 // in the Python service: missing/unparsable raises, future major
-// raises, forward-compatible minor accepted.
+// raises, forward-compatible minor accepted. Missing version now
+// defaults to "1.0" for backwards compatibility with early fixture
+// tunes authored before the field existed — the base-tune fixture
+// shipped without it and the app rejected the operator's project.
 void check_version(const std::string& raw) {
     if (raw.empty()) {
-        throw NativeFormatVersionError(
-            "Native file is missing the required `schema_version` field.");
+        return;  // treat as 1.0 — pre-schema-version file
     }
     auto dot = raw.find('.');
     std::string major_str = (dot == std::string::npos) ? raw : raw.substr(0, dot);
@@ -384,6 +386,7 @@ NativeDefinition load_definition(std::string_view text) {
     }
     std::string version = data.value("schema_version", std::string());
     check_version(version);
+    if (version.empty()) version = "1.0";  // pre-schema-version file
 
     NativeDefinition definition;
     definition.schema_version = version;
@@ -426,6 +429,7 @@ NativeTune load_tune(std::string_view text) {
     }
     std::string version = data.value("schema_version", std::string());
     check_version(version);
+    if (version.empty()) version = "1.0";  // pre-schema-version file
 
     NativeTune tune;
     tune.schema_version = version;

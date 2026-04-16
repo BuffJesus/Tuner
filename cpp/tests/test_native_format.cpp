@@ -93,10 +93,11 @@ TEST_CASE("tune round trip preserves scalar list and string values") {
     CHECK(ve[3] == doctest::Approx(65.0));
 }
 
-TEST_CASE("missing schema_version raises") {
-    CHECK_THROWS_AS(
-        tuner_core::load_definition("{\"name\": \"x\"}"),
-        tuner_core::NativeFormatVersionError);
+TEST_CASE("missing schema_version defaults to 1.0") {
+    // Pre-schema-version files (early fixtures) now load gracefully
+    // rather than throwing, defaulting to schema version 1.0.
+    auto def = tuner_core::load_definition("{\"name\": \"x\"}");
+    CHECK(def.schema_version == "1.0");
 }
 
 TEST_CASE("future major version raises") {
