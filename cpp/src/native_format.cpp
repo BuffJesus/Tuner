@@ -434,6 +434,10 @@ NativeTune load_tune(std::string_view text) {
     NativeTune tune;
     tune.schema_version = version;
     tune.definition_signature = get_optional_string(data, "definition_signature");
+    // Fallback for pre-schema-version fixtures that stored the
+    // signature under "definition" (shorter key, same semantic).
+    if (!tune.definition_signature.has_value())
+        tune.definition_signature = get_optional_string(data, "definition");
 
     // Slot metadata (v1.1+). Absent fields stay nullopt; consumers
     // treat that as "legacy tune, target slot 0".

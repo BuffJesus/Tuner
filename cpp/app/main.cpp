@@ -13556,6 +13556,48 @@ QWidget* build_setup_tab(
     }
     render_assumption_card("Cranking Assumptions", crank_result.assumptions);
 
+    // ---- Guided SETUP cards notice -----------------------------------
+    // When no tune is loaded (fixture missing schema_version, fresh
+    // install, create-empty project), the stage_scalar_value calls
+    // inside every card below throw "Tune value not found". Rather
+    // than surfacing cryptic errors per-control, disable the whole
+    // batch with one honest notice and let the operator fix the root
+    // cause: load a tune or run the wizard.
+    if (edit_svc && !has_tune) {
+        auto* no_tune_card = new QWidget;
+        auto* ntl = new QVBoxLayout(no_tune_card);
+        ntl->setContentsMargins(tt::space_md, tt::space_sm,
+                                 tt::space_md, tt::space_sm);
+        {
+            char ns[256];
+            std::snprintf(ns, sizeof(ns),
+                "background-color: %s; border: 1px solid %s; "
+                "border-left: 3px solid %s; border-radius: %dpx;",
+                tt::bg_elevated, tt::border, tt::accent_warning, tt::radius_md);
+            no_tune_card->setStyleSheet(QString::fromUtf8(ns));
+        }
+        auto* note = new QLabel;
+        note->setTextFormat(Qt::RichText);
+        note->setWordWrap(true);
+        {
+            char t[512];
+            std::snprintf(t, sizeof(t),
+                "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
+                "No tune loaded</span><br>"
+                "<span style='color: %s; font-size: %dpx;'>"
+                "The guided setup cards below are disabled because no tune "
+                "values are available to edit. To populate them:<br>"
+                "\xc2\xb7  File \xe2\x86\x92 <b>Open Project</b> and pick a .tuner or .msq<br>"
+                "\xc2\xb7  Or File \xe2\x86\x92 <b>New Project</b> and run the Engine Setup Wizard"
+                "</span>",
+                tt::text_primary, tt::font_label,
+                tt::text_muted, tt::font_small);
+            note->setText(QString::fromUtf8(t));
+        }
+        ntl->addWidget(note);
+        layout->addWidget(no_tune_card);
+    }
+
     // ---- Engine Advanced — stroke / MAP sampling / fuel-trim enable
     // Closes three single-scalar gaps from the Python wizard that
     // didn't warrant a full card each but show up on the operator's
@@ -13703,6 +13745,7 @@ QWidget* build_setup_tab(
             1);
 
         av->addWidget(*a_status);
+        adv_card->setEnabled(has_tune);
         layout->addWidget(adv_card);
     }
 
@@ -13887,6 +13930,7 @@ QWidget* build_setup_tab(
             "Capture WOT");
 
         tv->addWidget(*tps_status);
+        tps_card->setEnabled(has_tune);
         layout->addWidget(tps_card);
     }
 
@@ -14107,6 +14151,7 @@ QWidget* build_setup_tab(
         hys_row->addStretch(1);
 
         oc_layout->addWidget(*oc_status);
+        output_card->setEnabled(has_tune);
         layout->addWidget(output_card);
     }
 
@@ -14309,6 +14354,7 @@ QWidget* build_setup_tab(
         });
 
         fc_layout->addWidget(*fc_status);
+        flex_card->setEnabled(has_tune);
         layout->addWidget(flex_card);
     }
 
@@ -14576,6 +14622,7 @@ QWidget* build_setup_tab(
         afrp_react_row->addStretch(1);
 
         sf_layout->addWidget(*sf_status);
+        safety_card->setEnabled(has_tune);
         layout->addWidget(safety_card);
     }
 
@@ -14731,6 +14778,7 @@ QWidget* build_setup_tab(
         ar_row->addStretch(1);
 
         tl->addWidget(*t_status);
+        turbo_card->setEnabled(has_tune);
         layout->addWidget(turbo_card);
     }
 
