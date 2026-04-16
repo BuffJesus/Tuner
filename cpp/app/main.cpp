@@ -1446,15 +1446,26 @@ void migrate_recent_project_keys() {
     s.remove("projects/last_opened");
 
     // One-time migration: if kCurrentProjectDirKey is empty but the
-    // current project has a tune path, infer the project dir from the
-    // tune's parent. Without this, legacy installs never get a project
-    // dir key and the inside_project fallback in the save_path gating
-    // always returns true — silently overwriting external tunes.
+    // current project has a tune path, try to infer the project dir.
+    // Only use the tune's parent if it looks like a real project dir
+    // (not a repo fixture path, not a temp dir). When we can't infer
+    // safely, leave kCurrentProjectDirKey empty — the save_path gating
+    // will fall through to the Save dialog instead of silently
+    // overwriting the source file.
     if (s.value(kCurrentProjectDirKey, "").toString().isEmpty()) {
         auto tune = s.value(kCurrentProjectTuneKey, "").toString().toStdString();
         if (!tune.empty()) {
-            auto parent = std::filesystem::path(tune).parent_path().string();
-            if (!parent.empty())
+            std::error_code ec;
+            auto canon = std::filesystem::weakly_canonical(tune, ec);
+            std::string parent = ec
+                ? std::filesystem::path(tune).parent_path().string()
+                : canon.parent_path().string();
+            // Don't set project dir to a repo fixture path — that
+            // would make Ctrl+S overwrite the bundled test fixture.
+            bool looks_like_fixture =
+                parent.find("tests") != std::string::npos
+                && parent.find("fixtures") != std::string::npos;
+            if (!parent.empty() && !looks_like_fixture)
                 s.setValue(kCurrentProjectDirKey,
                            QString::fromUtf8(parent.c_str()));
         }
@@ -17578,11 +17589,11 @@ public:
                             dir_canon.string(), 0) == 0;
                     }
                 } else {
-                    // Fall back: if no project dir is known yet,
-                    // treat same-parent as inside so existing-project
-                    // round-trips aren't broken for operators who
-                    // haven't run through New Project.
-                    inside_project = true;
+                    // No project dir known — fall through to the
+                    // Save dialog. Safer than silently overwriting
+                    // whatever file the tune path points at (could be
+                    // a bundled fixture, another project's tune, etc).
+                    inside_project = false;
                 }
                 if (inside_project) *save_path = tune_path.string();
             }
