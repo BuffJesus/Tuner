@@ -67,15 +67,38 @@ RuntimeStatus decode_runtime_status(const ValueMap& values) {
         out.warmup_or_ase_active    = channel_bool(values, "rSA_warmupASE");
         out.tune_learn_valid        = channel_bool(values, "rSA_tuneValid");
     }
-    // Active tune slot — firmware 14G adds an `activeTuneSlot` byte
-    // to the runtime packet. 0-3 are valid slots; pre-14G firmware
-    // doesn't emit the channel so channel_int returns nullopt and
-    // we leave `active_tune_slot` unset. 0xFF is the "unknown/none"
-    // sentinel firmware uses when the field isn't meaningful.
-    auto slot = channel_int(values, "activeTuneSlot");
-    if (slot.has_value() && *slot >= 0 && *slot <= 3) {
-        out.active_tune_slot = *slot;
+    // Active tune slot (14G first step) — packed into the two high
+    // bits of `status5` at live-data offset 127. Firmware defines
+    // `BIT_STATUS5_ACTIVE_TUNE_SLOT_LO` (bit 6) and `..._HI` (bit 7)
+    // in `speeduino/globals.h`. Bits always read 0 until real multi-
+    // tune storage ships — but the parse path is live today so the
+    // LIVE-tab chip will honestly render "Slot 0" on connected ECUs.
+    //
+    // Fallback: a firmware that ever promotes the field to a direct
+    // named channel will still work — the explicit `activeTuneSlot`
+    // read below takes precedence over the status5 bit decode.
+    auto direct = channel_int(values, "activeTuneSlot");
+    if (direct.has_value() && *direct >= 0 && *direct <= 3) {
+        out.active_tune_slot = *direct;
+    } else {
+        auto status5 = channel_int(values, "status5");
+        if (status5.has_value()) {
+            out.active_tune_slot = (*status5 >> 6) & 0x03;
+        }
     }
+
+    // Status3/Status4 bit channels — already emitted by today's
+    // firmware and declared in the production INI as named bit fields.
+    // Desktop had been ignoring them; surfacing them here so the
+    // LIVE-tab status strip and future diagnostic surfaces can chip
+    // on them. All channels are bool by INI declaration.
+    out.half_sync       = channel_bool(values, "halfSync");
+    out.burn_pending    = channel_bool(values, "burnPending");
+    out.staging_active  = channel_bool(values, "stagingActive");
+    out.fan_on          = channel_bool(values, "fanStatus");
+    out.vvt1_error      = channel_bool(values, "vvt1Error");
+    out.vvt2_error      = channel_bool(values, "vvt2Error");
+    out.wmi_empty       = channel_bool(values, "wmiEmptyBit");
     return out;
 }
 

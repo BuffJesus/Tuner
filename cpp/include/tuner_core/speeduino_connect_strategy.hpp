@@ -86,55 +86,22 @@ double connect_delay_seconds(const std::map<std::string, std::string>& metadata)
 // I/O and stays Python.
 // ---------------------------------------------------------------------
 
-// Parsed shape of the capability query response:
+// Parsed shape of the `'f'` capability query response (legacy, 6 bytes).
+// Source: `speeduino-202501.6/speeduino/comms.cpp` case 'f' — confirmed
+// emits exactly 6 payload bytes today:
 //   byte 0: must be 0x00 (otherwise treated as unknown)
 //   byte 1: serial protocol version
 //   bytes 2..4: blocking_factor       (big-endian u16)
 //   bytes 4..6: table_blocking_factor (big-endian u16)
 //
-// Optional Firmware Slice 14B extension (pending commit):
-//   bytes 6..38:  4 slots × 8 bytes = 32 bytes of truncated SHA-256
-//                 fingerprints identifying the tune currently burned
-//                 in each flash slot.
-//   bytes 38..54: 16-byte truncated SHA-256 of `live_data_map.h` +
-//                 `tune_storage_map.h` + `BOARD_ID`, baked at firmware
-//                 build time (Phase 16 item 1: Definition hash in
-//                 firmware capability). Desktop compares this against
-//                 the loaded tune's `definition_hash` (when set) and
-//                 warns on mismatch — prevents burning a tune built
-//                 against a different firmware schema.
-//   bytes 54..62: 64-bit per-page format bitmap (Phase 16 item 2).
-//                 Bit i set = page i uses U16 encoding; bit clear = U08.
-//                 Pre-14B firmware omits these 8 bytes so the desktop
-//                 keeps inferring the format from the INI.
-//   bytes 62..:   reserved for future extensions.
-//
-// Missing trailing bytes mean pre-14B firmware; the desktop treats
-// absent fingerprints / absent definition hash as "unknown" rather
-// than "mismatch" so the UI doesn't scream at every connect while the
-// firmware PR is in flight.
+// The richer FW-003 `'K'` capability response (schema version, board
+// ID, feature flags, signature, schema fingerprint) is a separate
+// command — see `KCapabilityResponse` below.
 struct CapabilityHeader {
     bool parsed = false;            // true iff payload is valid
     int serial_protocol_version = 0;
     int blocking_factor = 0;
     int table_blocking_factor = 0;
-
-    // Hex-encoded 8-byte fingerprints per slot (16 hex chars). Empty
-    // string = slot fingerprint not reported (pre-14B firmware) or the
-    // slot is unused (firmware reports all zeros → "0000000000000000").
-    std::array<std::string, 4> slot_fingerprints;
-
-    // Hex-encoded 16-byte firmware definition hash (32 hex chars).
-    // Empty = not reported. Identifies the firmware-side data layout
-    // (channel map + tune storage map + board id) so a desktop tune
-    // built against a different firmware can be caught at connect.
-    std::string definition_hash;
-
-    // Phase 16 item 2 — 64-bit per-page format bitmap. nullopt when
-    // firmware omits the trailing bytes. When populated, bit i set
-    // means page i is U16; otherwise U08. Lets the desktop skip the
-    // INI-based inference for high-resolution 3D tables.
-    std::optional<std::uint64_t> page_format_bitmap;
 };
 
 // `_read_capabilities` parity (payload parse half). Returns
@@ -143,6 +110,56 @@ struct CapabilityHeader {
 //   if payload is not None and len(payload) >= 6 and payload[0] == 0x00:
 // Pure byte arithmetic — no I/O.
 CapabilityHeader parse_capability_header(
+    std::optional<std::span<const std::uint8_t>> payload);
+
+// --- FW-003 `'K'` capability response -------------------------------
+//
+// Source: `speeduino-202501.6/speeduino/comms_legacy.{h,cpp}` —
+// `buildCapabilityResponse`. The desktop reads this on connect to get
+// the rich board/feature/signature snapshot.
+//
+// Layout (schema v2, 43 bytes since 14B):
+//   [0]    schema_version (1 = pre-14B, 2 = with schema_fingerprint tail)
+//   [1]    board_id
+//   [2]    board_capability_flags
+//   [3]    feature_flags  (U16P2 | RUNTIME_STATUS_A | FLASH_HEALTH)
+//   [4-5]  output_channel_size, little-endian
+//   [6]    output_channel_version
+//   [7-38] firmware_signature, null-padded to 32 bytes
+//   [39-42] schema_fingerprint, little-endian u32 (schema v2+ only)
+//
+// Schema v1 firmware returns 39 bytes; schema v2 returns 43. The
+// parser accepts either length and populates `schema_fingerprint`
+// only when at least 43 bytes are present.
+//
+// Feature flag bits (comms_legacy.h).
+constexpr std::uint8_t K_CAP_FEATURE_U16P2            = (1U << 0);
+constexpr std::uint8_t K_CAP_FEATURE_RUNTIME_STATUS_A = (1U << 1);
+constexpr std::uint8_t K_CAP_FEATURE_FLASH_HEALTH     = (1U << 2);
+
+struct KCapabilityResponse {
+    bool parsed = false;
+    int schema_version = 0;
+    int board_id = 0;
+    std::uint8_t board_capability_flags = 0;
+    std::uint8_t feature_flags = 0;
+    int output_channel_size = 0;
+    int output_channel_version = 0;
+    std::string firmware_signature;  // trimmed (no trailing nulls)
+
+    // Populated only when schema_version >= 2 AND the payload carries
+    // the trailing 4 bytes. Hex-encoded 32-bit LE. Empty on pre-14B
+    // firmware.
+    std::string schema_fingerprint;
+
+    bool has_feature(std::uint8_t bit) const {
+        return (feature_flags & bit) != 0;
+    }
+};
+
+// Parse the 39- or 43-byte `'K'` response. Short / malformed payloads
+// return `parsed=false`.
+KCapabilityResponse parse_k_capability_response(
     std::optional<std::span<const std::uint8_t>> payload);
 
 // Convenience: pick the capability source string from the parsed

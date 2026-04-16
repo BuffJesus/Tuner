@@ -1,5 +1,12 @@
 # Protocol Notes
 
+> Status (2026-04-15): TunerStudio decompiled-source observations below
+> are still useful reference for what the incumbent tool supports. The
+> C++ desktop implementation follows the architectural separation
+> observed here, not the Java class structure. The "Python rewrite
+> approach" section below is historical — the C++ native port has
+> superseded it; see `docs/architecture.md` for the current shape.
+
 ## Source observations
 
 The decompiled Java application ships five distinct transport mechanisms:
@@ -33,12 +40,16 @@ Representative source references from the decompiled tree:
 - `com/efiAnalytics/tunerStudio/search/ContinuousIpSearchPanel.java`
 - transport-heavy packages `Z`, `B`, `bQ`, `aV`
 
-## Python rewrite approach
+## Architectural approach (C++ native port)
 
-- define raw `Transport` objects first
-- place framing and packet logic in `comms`
-- keep per-protocol concerns behind `ControllerClient`
-- add a deterministic `MockTransport` for protocol tests
+The port follows the separation observed in the decompiled Java and
+Python-reference trees:
+
+- `tuner_core::transport` defines the raw byte I/O boundary (serial, TCP, mock)
+- `tuner_core::speeduino_framing` + `speeduino_protocol` handle framing and packet shapes
+- `tuner_core::speeduino_controller::SpeeduinoController` owns per-protocol connect/read/write/burn lifecycle
+- `tuner_core::xcp_packets` + `xcp_simulator` cover the XCP side (packet layer done; workspace wiring pending)
+- Mock transport in `transport::MockTransport` for deterministic protocol tests
 
 ## Future runtime telemetry requirements
 
@@ -61,11 +72,14 @@ They should stay in the output-channel / runtime-evidence path, not be conflated
 
 ## Open questions
 
-- exact project file format and persistence layout
-- tune file encoding details
-- controller packet formats by transport (framing bytes, command set)
-- XCP dialect specifics and CAN routing topology
-- firmware-specific quirks currently hidden in obfuscated classes
-- conditions under which FTDI direct-access path is selected vs serial driver path
-- jssc vs RXTX selection logic (version negotiation or platform-based?)
-- which runtime channels are available or derivable for boost pressure, spool estimation, and compressor-efficiency approximations across supported controllers
+Resolved:
+
+- ~~exact project file format and persistence layout~~ — shipped as `.tunerproj` (JSON); see `tuner_core::project_file`.
+- ~~tune file encoding details~~ — shipped as `.tuner` (JSON, schema v1.1 with slot metadata and definition hash); see `tuner_core::native_format`.
+- ~~controller packet formats by transport~~ — Speeduino raw protocol (legacy 6-byte `'f'`, 43-byte `'K'` FW-003 since Slice 14B) + framed variant (TCP/Airbear with u16 LE length + CRC32). See `tuner_core::speeduino_protocol` + `speeduino_framing`.
+
+Still open:
+
+- XCP workspace integration — packet layer done (`xcp_packets` + `xcp_simulator`); presenter-side page read/write/burn routing not wired into `EcuConnection` yet.
+- FTDI direct-access path — not ported; the Java tree's FTD2XX-JNA path is platform-specific and the C++ app uses standard Win32 serial + Winsock TCP instead.
+- Boost/spool/compressor runtime channels — partially addressed by the compressor-map modeling service; boost pressure is a standard channel; spool estimation and dynamic compressor efficiency remain derivation targets for a future analysis service.

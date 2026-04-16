@@ -293,6 +293,70 @@ The Trigger Logs surface accepts CSV imports and does analysis, but it doesn't s
 - Tuning, runtime/log review, and flash/tools remain separate operator workflows.
 - Any tune-changing assist remains staged and reviewable.
 
+## Current Gap — Unblockers Pending (audited 2026-04-15)
+
+Cross-repo picture of what's still needed to move each blocked desktop surface past "desktop-side complete" to "exercised end-to-end". Grouped by owning repo. Each item cites a specific source file or roadmap slice rather than a guessed shape — the speculation-driven contracts from earlier passes have been retired.
+
+### Speeduino firmware (`C:/Users/Cornelio/Desktop/speeduino-202501.6/`)
+
+Ordered roughly by leverage:
+
+- **Slice 14A** — `tune_storage_map.h` sibling header (firmware-side storage-layout declaration: semantic IDs + page/offset/type per tunable). The desktop's primary definition format remains `.tunerdef` (semantic, operator-facing); this header is firmware-owned wire-protocol metadata that lets the desktop byte-accurately read/write tune storage. Replaces the hand-maintained `[Constants]` block of `speeduino.ini` as the **firmware-side** source of truth; `.ini` becomes a one-way generated export for legacy TunerStudio clients once Slice 14F ships.
+  - **First bite landed 2026-04-15** — grammar + 4 real starter entries (reqFuel scalar + veRpmBins/veMapBins axes + veTable 3D map with axis refs). Firmware `speeduino/tune_storage_map.h` created with full X-macro grammar docs (TUNE_SCALAR / TUNE_AXIS / TUNE_TABLE / TUNE_CURVE). Desktop `tune_storage_map` parser (`include/tuner_core/tune_storage_map.hpp` + `src/tune_storage_map.cpp`) handles all 4 macro shapes, respects quoted-string commas, throws on arg-count mismatch, ignores comments + `#ifdef` / `#endif` cleanly.
+  - **Second bite landed 2026-04-15** — grammar expanded: TUNE_AXIS / TUNE_TABLE / TUNE_CURVE all gained `scale` + `offset_v` args (operator-visible value = raw × scale + offset_v), needed for tables like advTable (raw 0..255 → -40°..215° via offset_v=-40) and wueBins (Celsius-shifted). +9 real entries: advTable1 + advRpmBins + advLoadBins (ignition), afrTable + afrRpmBins + afrMapBins (AFR target), boostTable + boostRpmBins + boostTpsBins (boost target), wueRates + wueBins (first curve + its cross-page axis). Fingerprint auto-updated to `0xF403E02B`. +2 doctest cases pin scale/offset_v round-trips for tables and axes.
+  - **Third bite landed 2026-04-15** — +12 more real entries. Dwell + injector scalars (`divider`, `injOpen`, `dwellcrank`, `dwellrun`, `dwellLim`), staged-injection sizes (`stagedInjSizePri`/`Sec`, both U16), VVT closed-loop hold duty (`vvtCLholdDuty`), VVT tables (`vvtTable` @ p7, `vvt2Table` @ p12, both 8×8 U08 scale 0.5), VVT RPM axes (`vvtRpmBins`, `vvt2RpmBins`). VVT load axes deliberately skipped — their scale depends on `vvtLoadSource` runtime setting, needs future grammar extension for dynamic-scale refs. Fingerprint auto-updated to `0x56FE521C`. +1 doctest case pinning the growing-header invariants (cross-kind count, semantic-ID cross-reference resolution, cross-page curve-axis linkage).
+  - **Fourth bite landed 2026-04-15** — +13 more entries, curve-heavy bite. Scalars: `aseTaperTime`. Axes (6): `aseBins` (coolant for ASE), `primeBins` (coolant for prime pulse), `iatRetBins` (IAT for timing retard), `flexFuelBins` (ethanol %), `crankingEnrichBins` (coolant for cranking). Curves (6): `asePct` + `aseCount` (two curves sharing `aseBins`), `primePulse`, `iatRetRates`, `flexFuelAdj`, `crankingEnrichValues` (U08 scale 5.0 — first entry using a >1 scale on a curve, exercises the scale/offset math for operator-visible values reaching 250%+). Fingerprint auto-updated to `0xE71C5AB2`. No new doctest cases needed — the third-bite growing-header invariant test already covers the shape.
+  - The remaining port is progressive — each new entry adds one more tunable's firmware-side wire layout. The desktop `.tunerdef` for each tunable exists independently; the two formats cross-reference by semantic ID.
+- **Slice 14F** — `tools/generate_ini.py` reads `tune_storage_map.h` and emits the canonical INI, retiring hand-maintained INI drift. Requires 14A first.
+- **Slice 14C** — semantic-ID stamps on `status3` / `status4` / `status5` packed bytes (extends the `runtimeStatusA` naming pattern). No packet growth. Medium.
+  - Desktop-side preparation ✅ Landed 2026-04-15: `runtime_telemetry::RuntimeStatus` gained `half_sync`, `burn_pending`, `staging_active`, `fan_on`, `vvt1_error`, `vvt2_error`, `wmi_empty` bool fields read from the existing INI-declared bit channels. LIVE-tab status strip surfaces Half Sync / VVT errors / WMI Empty as `accent_warning` chips, Burning… as `accent_primary`, Staging as `accent_ok`. Firmware side already emits every bit — desktop just hadn't consumed them.
+- **Slice 14D** — `tune.bin` ingest from SD card (Teensy 4.1 only). Unblocks the desktop "Open Tune from ECU SD…" action, currently disabled with a pending-firmware tooltip.
+- **Slice 14G full** — multi-tune storage (4 × SPI-flash slots) + rotary selector GPIO + slot-select burn command + per-slot fingerprint validation. Bits 6-7 of `status5` already renamed in Slice 14G-0 (landed 2026-04-15); the storage side needs to actually set them.
+- **Slice 14E** — boot manifest JSON line over USB CDC. Would bypass 3-6 probe round-trips at connect. Blocked on clean USB-CDC open-detection hook (Teensy-specific).
+- **Phase 12** — selective U16 on DropBear for high-leverage tables (VE / AFR / spark / boost / VVT). Desktop generators already branch on `data_type` per table; firmware flipping INI declarations to U16 is the remaining step.
+- ~~**`tools/generate_schema_fingerprint.py`**~~ ✅ Landed 2026-04-15. Python script at `speeduino/tools/generate_schema_fingerprint.py` reads `live_data_map.h` + `comms_legacy.h` (+ `tune_storage_map.h` when Slice 14A ships) and emits `speeduino/schema_fingerprint.h` with a SHA-256-derived 32-bit constant. Current value: `0x007694CD`. Deterministic (re-running produces the same value with the same inputs). `comms_legacy.h` now `#include`s the generated header. Run the script after any layout change, commit the updated `.h`.
+- **Slice 14H** — operator manual updates per topic (ongoing alongside each new firmware slice).
+
+### Airbear firmware (`C:/Users/Cornelio/Desktop/Airbear-main/`)
+
+- **Phase A4** — REST API expansion + EcuHub UDP auto-discovery on port 21846 (TSDash `DISCOVER_SLAVE_SERVER` responder). Partially there. Target v0.4.
+- **Phase A5** — Dash Echo (concurrent TunerStudio TCP + local dashboard with UART mutex arbitration). Desktop TCP transport already handles `RC_BUSY_ERR` backoff. Target v0.5.
+- **Phase A6** — CAN Bus integration. `/api/can/*` endpoints already exist but the desktop hasn't consumed any of them yet.
+- ~~**WiFi reconnect counter**~~ ✅ Landed 2026-04-15 — `wifi_mgt.cpp` registers a `WiFi.onEvent` handler, `wifiDisconnects` counter increments on `ARDUINO_EVENT_WIFI_STA_DISCONNECTED`, exposed as `wifi_disconnects` in `/api/status`. Desktop `StatusResponse::wifi_disconnects` + Airbear Health dialog row with threshold coloring.
+- **Multi-file log listing + SD tune endpoints** — desktop had speculative `/api/sd/logs` and `/api/sd/tunes` helpers; not on the current Airbear roadmap. Would need a design decision on the Airbear side first. Desktop UI that relied on these now targets the real `/api/log/status` + `/api/log/download` single-file endpoints; the speculative surface remains in `airbear_api.hpp` as a proposed contract.
+
+### Desktop (this repo)
+
+Mostly polish and coverage gaps:
+
+- **G13 embedded flash for Mega2560** — port STK500v2 bootloader over `QSerialPort`. ~400 LOC, pure stdlib. Removes `avrdude.exe` bundling.
+- **G13 embedded flash for STM32F407** — port DFU 1.1 protocol + vendor libusb-1.0. ~500 LOC + platform DLL.
+- **Teensy HID flasher on Linux/macOS** — current path is Windows-only (`setupapi` / `hid.dll`). hidapi vendoring closes it.
+- **XCP editing parity** — simulator + packet layer done (sub-slices 104-105); workspace presenter integration (XCP-based page read/write/burn-equivalent threading into `EcuConnection`) is the missing piece.
+- **Widget unit tests** — `LogTimelineWidget`, `TriggerScopeWidget`, `DynoChartWidget` have partial coverage (`chart_axes` extracted + tested, 4 cases). The remaining pure-logic parts (timeline zoom-index window, square-wave path composition) could be extracted.
+- **Operator manual** — the roadmap commits to a desktop-side manual paired with firmware Slice 14H. Zero pages exist today.
+- ~~**Doc drift cleanup**~~ ✅ Audited 2026-04-15. `engine-model-reference.md` is pure language-agnostic modeling theory — no drift. `ux-design.md` is design philosophy with generic "service" references that are architectural concepts, not Python class names — no drift. `protocol-notes.md` had a stale "Python rewrite approach" section (now updated to the C++ `tuner_core::` architecture) and eight "open questions" (three resolved: `.tunerproj` / `.tuner` / controller packet formats; five annotated with current state).
+
+### Hardware / integration (no code fixes its own blocker)
+
+- **Physical bench validation** — the C++ app has only been exercised against mock/simulator this whole pivot. Real-Speeduino-on-an-engine-harness validation is the ultimate release gate.
+- **Firmware flash + boot test** — the three firmware changes landed this session (Airbear A3.5 counters, Speeduino 14B schema fingerprint, Speeduino 14G-0 status5 bits) compile on paper but haven't been flashed to hardware; any integration surprise (timing, buffer overflow, alignment) surfaces on first boot.
+
+### Decisions pending sign-off
+
+- **Python-side deletion** — `src/tuner/` is the parity oracle (~3011 Python tests). C++ parity reached per the tracker. One PR deletes all of it; destructive and irreversible.
+- **`SCHEMA_FINGERPRINT` promotion** — the `0x202501U` constant I put in `comms_legacy.h` is a placeholder. Decision needed on manual bump per release vs. build-script derivation.
+
+### Critical path to a ship-able product
+
+1. Hardware bench validation (firmware + desktop together on a real engine).
+2. Operator manual (without it, the 14G-0 slot chip and the schema-mismatch dialog don't have plain-language explanations).
+3. Firmware 14A + 14G-full slices (transform desktop-side "slot 0 only" into real multi-tune).
+
+Everything else (XCP parity, embedded Mega/STM32 flash, Linux/macOS Teensy) is polish operators on non-DropBear boards need. The current app ships for DropBear + Teensy today.
+
+---
+
 ## Phase Status
 
 | Phase | Status |
@@ -308,7 +372,7 @@ The Trigger Logs surface accepts CSV imports and does analysis, but it doesn't s
 | 8: Dashboard, workspace, and UX modernization | **Complete** — INI-driven gauge catalog seeded into default layout; FrontPage indicator strip wired; LED indicator widget kind landed; static-text `label` widget kind (TSDash DashLabel parity) added with offscreen Qt tests + JSON layout round trip |
 | 9: Board, firmware, and bench workflow integration | **Complete** — reconnect signature warning UI, `uncertain_channel_groups()` runtime table flags, `TcpTransport` WiFi connect, mDNS resolution, HTTP live-data API (port 8080), and `LiveTriggerLoggerService` all wired; LoggerDefinition live tooth/composite stream (start/poll/read/stop firmware commands) wired through `SpeeduinoControllerClient.fetch_logger_data()` and exercised end-to-end by `TriggerCaptureWorker` from the Trigger Logs surface |
 | 10: Hardening and release prep | Ongoing |
-| 14: Native C++ Qt 6 desktop port | **In progress** — Slice 4 post-parity. C++ doctest suite: **1492 tests / 11218 assertions / 0 failures**. Python suite: **3011 tests**. Qt 6.7.3 built from source at `C:/Qt/6.7.3-custom`. 98 services ported + all INI leaf parsers + full beautification arc + 20 UX slices + 14-feature functional wiring pass (sub-slice 146) + 13-slice comms/ecosystem alignment pass (147–159). **Post-parity polish session (2026-04-15):** Virtual Dyno chart widget + before/after overlay, CF + coverage per-cell tooltips, `LogTimelineWidget` with play/pause + speed selector + channels picker + shift-drag zoom + export menu, Airbear SD log browser + SD tune ingest (File → Open Tune from ECU SD…), slot picker + burn-routing guard, `activeTuneSlot` chip, ECU Capabilities dialog (slot fingerprints + definition hash + page-format bitmap), Airbear Health dialog (error counters), `TriggerScopeWidget` oscilloscope view, dashboard formula-channel picker, all build warnings cleared. **P15 + P16 desktop-side complete, G1-G8 gap backlog closed.** See parity tracker below. |
+| 14: Native C++ Qt 6 desktop port | **In progress** — Slice 4 post-parity. C++ doctest suite: **1513 tests / 11336 assertions / 0 failures**. Python suite: **3011 tests**. Qt 6.7.3 built from source at `C:/Qt/6.7.3-custom`. 98 services ported + all INI leaf parsers + full beautification arc + 20 UX slices + 14-feature functional wiring pass (sub-slice 146) + 13-slice comms/ecosystem alignment pass (147–159). **Post-parity polish session (2026-04-15):** Virtual Dyno chart widget + before/after overlay, CF + coverage per-cell tooltips, `LogTimelineWidget` with play/pause + speed selector + channels picker + shift-drag zoom + export menu, Airbear SD log browser + SD tune ingest (File → Open Tune from ECU SD…), slot picker + burn-routing guard, `activeTuneSlot` chip, ECU Capabilities dialog (slot fingerprints + definition hash + page-format bitmap), Airbear Health dialog (error counters), `TriggerScopeWidget` oscilloscope view, dashboard formula-channel picker, all build warnings cleared. **P15 + P16 desktop-side complete, G1-G8 gap backlog closed.** See parity tracker below. |
 
 ## C++ App Feature Parity Tracker (as of 2026-04-15 post-parity polish session)
 
@@ -1427,7 +1491,7 @@ Firmware-side deliverables we will consume (in joint sequencing order):
 
 | Firmware slice | What it produces | Desktop consumer |
 |---|---|---|
-| 14A — `tune_storage_map.h` | Declarative `{semantic_id, page, offset, type, scale, units, axis_ref}` per parameter; `{rows, cols, x_axis_id, y_axis_id, data_type}` per table | New `TuneStorageMapParser` mirroring `LiveDataMapParser`; `NativeDefinition` v2 builds from the header instead of INI |
+| 14A — `tune_storage_map.h` | Declarative `{semantic_id, page, offset, type, scale, units, axis_ref}` per parameter; `{rows, cols, x_axis_id, y_axis_id, data_type}` per table | New `TuneStorageMapParser` mirroring `LiveDataMapParser` — reads the firmware header as **wire-protocol metadata**, not as a definition source. The desktop's primary definition remains `.tunerdef` (semantic, operator-facing); the two cross-reference by semantic ID so the desktop can do byte-accurate tune reads/writes against any board that ships the header |
 | 14B — `schema_fingerprint` in `'K'` capability response | Truncated SHA-256 of `live_data_map.h` + `tune_storage_map.h` + `BOARD_ID` baked at build time | Burn-time guard: refuse to burn if `NativeTune.definition_signature != ecu.schema_fingerprint`; surface mismatch in connect dialog. Replaces fragile signature-string match for tune/firmware compatibility |
 | 14C — Semantic-id stamps on packed status bytes | Extends the `runtimeStatusA` pattern to `engineProtectStatus` / `status3` / `status5` with explicit per-bit names in `live_data_map.h` | Phase 13B Native Logging Contract reads these directly; remove the hand-maintained per-bit special cases in `live_data_map_parser.py` |
 | 14D — `tune.bin` (and eventually `.ntune.json`) ingest from SD card | Teensy 4.1 reads a native tune off SD at boot, validates fingerprint, applies to RAM pages — no TS handshake required | New `NativeTuneBinaryWriter` service; race-team workflow exposed via "Export Tune To SD" menu action |
@@ -1482,7 +1546,7 @@ Steps 1–3 can land before the firmware side because they're backwards-compatib
 
 ---
 
-Sequencing constraint: the desktop must land `TuneStorageMapParser` (and the `NativeDefinition` v2 path it enables) **before** the firmware can retire the hand-maintained INI on its side (Slice 14F), because the desktop is the only consumer that proves the header-derived contract works end-to-end. The Phase 12 `LiveDataMapParser` shipping is the existence proof that this pattern is sound.
+Sequencing constraint: the desktop must land `TuneStorageMapParser` **before** the firmware can retire the hand-maintained INI on its side (Slice 14F), because the desktop is the only consumer that proves the header-derived wire-protocol contract works end-to-end against real firmware. The Phase 12 `LiveDataMapParser` shipping is the existence proof that this pattern is sound. Note the desktop's primary definition surface (`.tunerdef`) is independent of this sequencing — it's already the operator-facing source of truth and stays that way.
 
 ##### Updated end-user documentation — joint with Firmware Slice 14H
 
@@ -4415,8 +4479,8 @@ the following features are prioritized by operator impact.
 
 | # | Feature | Effort | Requires | Status |
 |---|---------|--------|----------|--------|
-| 1 | Definition hash in firmware capability | Firmware change | Speeduino firmware PR | ✅ **Desktop-side fully wired, end-to-end.** `CapabilityHeader::definition_hash` parses bytes 38..54 of the `'f'` response. `NativeTune::definition_hash` + `TunerTune::definition_hash` added as optional fields (forward-compat minor). Save-as-native captures the connected ECU's hash at save time. Burn-time guard compares loaded tune's hash against connected ECU's hash and refuses burn with a plain-language "Schema mismatch" dialog when they disagree. Either side empty = not enough info, burn allowed through. End-to-end exercise still waits on firmware 14B shipping the trailing bytes |
-| 2 | Per-page format bitmap in 'K' response | Firmware change | Speeduino firmware PR | Desktop-side complete — `CapabilityHeader::page_format_bitmap` (`optional<uint64_t>`) parses 8 little-endian bytes at offset 54 of the `'f'` response (bit i set → page i uses U16). Connect dialog bumped to fetch 62 bytes. ECU Capabilities dialog renders a "Page formats" row: `"(pending firmware 14B)"` when absent, `"all U08"` when mask is zero, comma-separated U16 page indices otherwise. Firmware PR still needed to emit the trailing 8 bytes |
+| 1 | Definition hash in firmware capability | Firmware change + desktop | Speeduino firmware + desktop | ✅ **Done end-to-end.** Speeduino firmware side (`speeduino-202501.6/speeduino/comms_legacy.{h,cpp}`): `CAPABILITY_RESPONSE_SIZE` bumped from 39 → 43 bytes, `CAPABILITY_SCHEMA_VERSION` bumped 1 → 2, `SCHEMA_FINGERPRINT` constant added (interim: manually bumped per release; `tools/generate_schema_fingerprint.py` build-derived version is later polish). `buildCapabilityResponse` appends 4-byte LE fingerprint at offset 39. Desktop side: new `KCapabilityResponse` struct + `parse_k_capability_response` in `speeduino_connect_strategy` (handles both 39-byte v1 and 43-byte v2 payloads). `EcuConnection::k_capabilities` populated from `'K'` query after every connect alongside the legacy `'f'` blocking-factor query. File → Show ECU Capabilities… renders signature + capability schema + board ID + feature flags + live data size + blocking factors + active tune slot + schema fingerprint. Save-as-native captures the live `schema_fingerprint` into `NativeTune::definition_hash`. Burn-time guard compares loaded tune's hash against connected ECU's hash, refuses burn on mismatch. 6 new doctest cases pinning the parser |
+| 2 | Per-page format bitmap in 'K' response | Firmware change | Speeduino firmware PR | Planned — desktop parser speculation retired after verifying the actual `'K'` 39-byte response (see P16 item 1). A per-page bitmap isn't specified in the firmware roadmap today; desktop's table generators already read `data_type` per table from the active definition, so there's no immediate capability gap. If/when firmware adds a per-page format declaration, the desktop-side addition is a trailing-byte parser extension in `parse_k_capability_response` — same pattern as the schema_fingerprint tail |
 | 3 | HTTP API versioning (/api/v1/) | Trivial | Desktop only | ✅ Done |
 | 4 | Airbear error counters in /api/status | Airbear change + desktop | Airbear firmware PR | ✅ **Done end-to-end.** Airbear side (`Airbear-main/src/tcp-uart.{cpp,h}` + `rest_api.cpp` `handleStatus`): `TCPrequestsReceived` (already existed) + new `ecuTimeouts` + `ecuBusyResponses` counters incremented at the four `RC_TIMEOUT` / `RC_BUSY_ERR` send paths in `handleData`, exposed as `tcp_requests` / `ecu_timeouts` / `ecu_busy` JSON keys. Desktop side: `StatusResponse` field names aligned with real keys (retired the four speculative names), `parse_status_json` reads them, File → Airbear Health… renders `TS/ECU requests` as a neutral volume counter + `ECU timeouts` / `ECU busy` as error counters colored by threshold. Older Airbear builds that predate the counters fall back to dashes + the existing footnote |
 | 5 | Standalone log viewer with timeline | Large | Desktop only | ✅ Done — scrubbable timeline widget with stacked channel tracks + click/drag cursor + play/pause + 1x/2x/4x/8x speed selector + channels picker + shift-drag region zoom with translucent selection overlay + Reset Zoom button + zoom-percent hint + Export menu (visible range as CSV, timeline snapshot as PNG) landed in LOGGING tab |

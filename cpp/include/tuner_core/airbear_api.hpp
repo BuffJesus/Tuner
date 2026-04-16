@@ -50,11 +50,12 @@ struct StatusResponse {
     std::optional<std::string> mac;
 
     // Phase 16 item 4 — operator-facing health counters. These are
-    // real Airbear keys (wired on the bridge side in tcp-uart.cpp +
-    // rest_api.cpp). Monotonic since boot.
-    std::optional<long long> tcp_requests;     // total TS-to-ECU requests proxied
-    std::optional<long long> ecu_timeouts;     // ECU failed to respond in ECU_SERIAL_TIMEOUT
-    std::optional<long long> ecu_busy;         // DASH_ECHO mutex-busy refusals
+    // real Airbear keys (wired on the bridge side in tcp-uart.cpp,
+    // wifi_mgt.cpp, and rest_api.cpp). Monotonic since boot.
+    std::optional<long long> tcp_requests;      // total TS-to-ECU requests proxied
+    std::optional<long long> ecu_timeouts;      // ECU failed to respond in ECU_SERIAL_TIMEOUT
+    std::optional<long long> ecu_busy;          // DASH_ECHO mutex-busy refusals
+    std::optional<long long> wifi_disconnects;  // Wi-Fi STA disconnect events
 };
 
 enum class SignatureMatch {

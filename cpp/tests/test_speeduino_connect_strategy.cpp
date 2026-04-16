@@ -240,6 +240,119 @@ TEST_CASE("parse_capability_header: extra trailing bytes are ignored") {
 }
 
 // ---------------------------------------------------------------------
+// parse_k_capability_response
+// ---------------------------------------------------------------------
+
+namespace {
+
+std::vector<std::uint8_t> build_k_response(int schema_version,
+                                           int board_id,
+                                           std::uint8_t feature_flags,
+                                           int log_entry_size,
+                                           const std::string& signature,
+                                           std::uint32_t fingerprint,
+                                           bool include_fingerprint_tail) {
+    std::vector<std::uint8_t> buf;
+    buf.push_back(static_cast<std::uint8_t>(schema_version));
+    buf.push_back(static_cast<std::uint8_t>(board_id));
+    buf.push_back(0x00);  // board_capability_flags
+    buf.push_back(feature_flags);
+    buf.push_back(static_cast<std::uint8_t>(log_entry_size & 0xFF));
+    buf.push_back(static_cast<std::uint8_t>((log_entry_size >> 8) & 0xFF));
+    buf.push_back(0x01);  // output_channel_version
+    for (std::size_t i = 0; i < 32; ++i) {
+        buf.push_back(i < signature.size()
+            ? static_cast<std::uint8_t>(signature[i]) : 0x00);
+    }
+    if (include_fingerprint_tail) {
+        buf.push_back(static_cast<std::uint8_t>( fingerprint        & 0xFF));
+        buf.push_back(static_cast<std::uint8_t>((fingerprint >>  8) & 0xFF));
+        buf.push_back(static_cast<std::uint8_t>((fingerprint >> 16) & 0xFF));
+        buf.push_back(static_cast<std::uint8_t>((fingerprint >> 24) & 0xFF));
+    }
+    return buf;
+}
+
+}  // namespace
+
+TEST_CASE("parse_k_capability_response: nullopt returns parsed=false") {
+    auto r = parse_k_capability_response(std::nullopt);
+    CHECK_FALSE(r.parsed);
+}
+
+TEST_CASE("parse_k_capability_response: short payload rejected") {
+    std::vector<std::uint8_t> p(20, 0x00);
+    auto r = parse_k_capability_response(
+        std::span<const std::uint8_t>(p));
+    CHECK_FALSE(r.parsed);
+}
+
+TEST_CASE("parse_k_capability_response: schema v1 39-byte payload — no fingerprint") {
+    auto p = build_k_response(
+        /*schema=*/1, /*board=*/0x07,
+        /*flags=*/K_CAP_FEATURE_U16P2 | K_CAP_FEATURE_RUNTIME_STATUS_A,
+        /*log_entry=*/148, /*sig=*/"speeduino 202501-T41",
+        /*fingerprint=*/0xAABBCCDD, /*include_tail=*/false);
+    REQUIRE(p.size() == 39);
+    auto r = parse_k_capability_response(
+        std::span<const std::uint8_t>(p));
+    CHECK(r.parsed);
+    CHECK(r.schema_version == 1);
+    CHECK(r.board_id == 0x07);
+    CHECK(r.output_channel_size == 148);
+    CHECK(r.firmware_signature == "speeduino 202501-T41");
+    CHECK(r.has_feature(K_CAP_FEATURE_U16P2));
+    CHECK(r.has_feature(K_CAP_FEATURE_RUNTIME_STATUS_A));
+    CHECK_FALSE(r.has_feature(K_CAP_FEATURE_FLASH_HEALTH));
+    CHECK(r.schema_fingerprint.empty());  // schema v1 = no fingerprint
+}
+
+TEST_CASE("parse_k_capability_response: schema v2 43-byte payload parses fingerprint") {
+    auto p = build_k_response(
+        /*schema=*/2, /*board=*/0x07,
+        /*flags=*/K_CAP_FEATURE_U16P2
+            | K_CAP_FEATURE_RUNTIME_STATUS_A
+            | K_CAP_FEATURE_FLASH_HEALTH,
+        /*log_entry=*/148, /*sig=*/"speeduino 202501-T41",
+        /*fingerprint=*/0x00202501, /*include_tail=*/true);
+    REQUIRE(p.size() == 43);
+    auto r = parse_k_capability_response(
+        std::span<const std::uint8_t>(p));
+    CHECK(r.parsed);
+    CHECK(r.schema_version == 2);
+    CHECK(r.has_feature(K_CAP_FEATURE_FLASH_HEALTH));
+    CHECK(r.schema_fingerprint == "00202501");
+}
+
+TEST_CASE("parse_k_capability_response: schema v2 declared but payload is short") {
+    // Firmware declares v2 but only 39 bytes reached us. Parser
+    // accepts the header but leaves schema_fingerprint empty — short
+    // receive should not block the rest of the parse.
+    auto p = build_k_response(
+        /*schema=*/2, /*board=*/0x07, /*flags=*/0x00,
+        /*log_entry=*/148, /*sig=*/"speeduino 202501-T41",
+        /*fingerprint=*/0, /*include_tail=*/false);
+    REQUIRE(p.size() == 39);
+    auto r = parse_k_capability_response(
+        std::span<const std::uint8_t>(p));
+    CHECK(r.parsed);
+    CHECK(r.schema_version == 2);
+    CHECK(r.schema_fingerprint.empty());
+}
+
+TEST_CASE("parse_k_capability_response: signature null-trim is correct") {
+    // Signature "AB" followed by 30 null bytes should round-trip as "AB".
+    auto p = build_k_response(
+        /*schema=*/2, /*board=*/0, /*flags=*/0,
+        /*log_entry=*/0, /*sig=*/"AB",
+        /*fingerprint=*/0x11223344, /*include_tail=*/true);
+    auto r = parse_k_capability_response(
+        std::span<const std::uint8_t>(p));
+    CHECK(r.parsed);
+    CHECK(r.firmware_signature == "AB");
+}
+
+// ---------------------------------------------------------------------
 // compute_live_data_size
 // ---------------------------------------------------------------------
 

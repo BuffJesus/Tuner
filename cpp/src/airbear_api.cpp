@@ -90,9 +90,10 @@ StatusResponse parse_status_json(std::string_view body) {
     // Phase 16 item 4 — Airbear health counters. Missing keys leave
     // each optional as nullopt so older Airbear builds before these
     // landed still pass through cleanly.
-    read_int("tcp_requests",  out.tcp_requests);
-    read_int("ecu_timeouts",  out.ecu_timeouts);
-    read_int("ecu_busy",      out.ecu_busy);
+    read_int("tcp_requests",     out.tcp_requests);
+    read_int("ecu_timeouts",     out.ecu_timeouts);
+    read_int("ecu_busy",         out.ecu_busy);
+    read_int("wifi_disconnects", out.wifi_disconnects);
     return out;
 }
 

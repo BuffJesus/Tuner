@@ -160,63 +160,47 @@ CapabilityHeader parse_capability_header(
         (static_cast<int>(p[2]) << 8) | static_cast<int>(p[3]);
     header.table_blocking_factor =
         (static_cast<int>(p[4]) << 8) | static_cast<int>(p[5]);
-
-    // Firmware 14B extension — 4 × 8-byte slot fingerprints starting
-    // at offset 6. Pre-14B firmware omits the trailing bytes; the loop
-    // below leaves each slot_fingerprint empty which the UI renders as
-    // "— pending firmware 14B —". When 14B lands we just start getting
-    // real hex strings back from the same call path.
-    constexpr std::size_t kFpBytes = 8;
-    constexpr std::size_t kSlotCount = 4;
-    constexpr std::size_t kDefHashBytes = 16;
-    constexpr std::size_t kDefHashOffset = 6 + kFpBytes * kSlotCount;
-    if (p.size() >= 6 + kFpBytes * kSlotCount) {
-        for (std::size_t slot = 0; slot < kSlotCount; ++slot) {
-            std::string hex;
-            hex.reserve(kFpBytes * 2);
-            for (std::size_t b = 0; b < kFpBytes; ++b) {
-                char buf[3];
-                std::snprintf(buf, sizeof(buf), "%02x",
-                    p[6 + slot * kFpBytes + b]);
-                hex += buf;
-            }
-            header.slot_fingerprints[slot] = std::move(hex);
-        }
-    }
-
-    // Phase 16 item 1 — firmware definition hash (16 bytes after the
-    // slot fingerprints). Pre-14B firmware omits these; the desktop
-    // leaves `definition_hash` empty and the capability dialog shows
-    // "(pending firmware 14B)". When the hash is all-zero the firmware
-    // is explicitly declaring "no hash computed" — treat like unknown.
-    if (p.size() >= kDefHashOffset + kDefHashBytes) {
-        std::string hex;
-        hex.reserve(kDefHashBytes * 2);
-        bool any_non_zero = false;
-        for (std::size_t b = 0; b < kDefHashBytes; ++b) {
-            char buf[3];
-            std::snprintf(buf, sizeof(buf), "%02x",
-                p[kDefHashOffset + b]);
-            hex += buf;
-            if (p[kDefHashOffset + b] != 0) any_non_zero = true;
-        }
-        if (any_non_zero) header.definition_hash = std::move(hex);
-    }
-
-    // Phase 16 item 2 — 64-bit per-page format bitmap (8 bytes little-
-    // endian at offset 54). Pre-14B firmware omits these and we leave
-    // the optional unset.
-    constexpr std::size_t kPageBitmapOffset = kDefHashOffset + kDefHashBytes;
-    constexpr std::size_t kPageBitmapBytes = 8;
-    if (p.size() >= kPageBitmapOffset + kPageBitmapBytes) {
-        std::uint64_t mask = 0;
-        for (std::size_t b = 0; b < kPageBitmapBytes; ++b) {
-            mask |= static_cast<std::uint64_t>(p[kPageBitmapOffset + b])
-                 << (b * 8);
-        }
-        header.page_format_bitmap = mask;
-    }
     return header;
+}
+
+KCapabilityResponse parse_k_capability_response(
+    std::optional<std::span<const std::uint8_t>> payload) {
+    KCapabilityResponse r;
+    if (!payload.has_value()) return r;
+    const auto& p = *payload;
+    if (p.size() < 39) return r;  // need full schema-v1 payload at minimum
+
+    r.parsed = true;
+    r.schema_version = p[0];
+    r.board_id = p[1];
+    r.board_capability_flags = p[2];
+    r.feature_flags = p[3];
+    r.output_channel_size =
+        static_cast<int>(p[4]) | (static_cast<int>(p[5]) << 8);
+    r.output_channel_version = p[6];
+
+    // Signature: 32 bytes starting at offset 7, null-padded. Trim
+    // trailing zeros so the desktop gets a clean string.
+    const std::uint8_t* sig_start = p.data() + 7;
+    std::size_t sig_len = 32;
+    while (sig_len > 0 && sig_start[sig_len - 1] == 0) --sig_len;
+    r.firmware_signature.assign(
+        reinterpret_cast<const char*>(sig_start), sig_len);
+
+    // Schema-v2+ schema_fingerprint tail: 4 bytes little-endian at
+    // offset 39. Only populated when the payload actually carries
+    // those bytes AND the schema version declares v2+.
+    if (r.schema_version >= 2 && p.size() >= 43) {
+        std::uint32_t fp =
+            static_cast<std::uint32_t>(p[39])        |
+            (static_cast<std::uint32_t>(p[40]) <<  8) |
+            (static_cast<std::uint32_t>(p[41]) << 16) |
+            (static_cast<std::uint32_t>(p[42]) << 24);
+        char hex[16];
+        std::snprintf(hex, sizeof(hex), "%08x", fp);
+        r.schema_fingerprint = hex;
+    }
+    return r;
 }
 
 std::string capability_source(const CapabilityHeader& header) {

@@ -6,7 +6,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/C%2B%2B-20-blue?style=flat-square" alt="C++20" />
   <img src="https://img.shields.io/badge/Qt-6.7-green?style=flat-square" alt="Qt 6.7" />
-  <img src="https://img.shields.io/badge/tests-1492%20passing-brightgreen?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/tests-1513%20passing-brightgreen?style=flat-square" alt="Tests" />
   <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="MIT" />
 </p>
 

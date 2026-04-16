@@ -74,13 +74,15 @@ TEST_CASE("parse_status_json parses the post-health-counter shape") {
         R"({"product":"AirBear","fw_version":"0.2.1",)"
         R"("uptime_ms":300000,"free_heap":123456,"min_free_heap":98765,)"
         R"("wifi_rssi":-62,"ip":"192.168.1.50","ap_ip":"192.168.4.1",)"
-        R"("tcp_requests":4211,"ecu_timeouts":3,"ecu_busy":0})";
+        R"("tcp_requests":4211,"ecu_timeouts":3,"ecu_busy":0,)"
+        R"("wifi_disconnects":2})";
     auto s = parse_status_json(body);
     CHECK(s.min_free_heap.value_or(-1) == 98765);
     CHECK(s.ap_ip.value_or("") == "192.168.4.1");
     CHECK(s.tcp_requests.value_or(-1) == 4211);
     CHECK(s.ecu_timeouts.value_or(-1) == 3);
     CHECK(s.ecu_busy.value_or(-1) == 0);
+    CHECK(s.wifi_disconnects.value_or(-1) == 2);
 }
 
 TEST_CASE("parse_status_json absent counters stay nullopt") {
@@ -90,6 +92,7 @@ TEST_CASE("parse_status_json absent counters stay nullopt") {
     CHECK_FALSE(s.tcp_requests.has_value());
     CHECK_FALSE(s.ecu_timeouts.has_value());
     CHECK_FALSE(s.ecu_busy.has_value());
+    CHECK_FALSE(s.wifi_disconnects.has_value());
     CHECK_FALSE(s.min_free_heap.has_value());
     CHECK_FALSE(s.ap_ip.has_value());
 }

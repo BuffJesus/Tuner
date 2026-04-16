@@ -427,10 +427,14 @@ struct EcuConnection {
     // Iterated in sorted order during burn.
     std::set<int> dirty_pages;
 
-    // Last parsed capability header from the `'f'` query. Zero-init on
-    // a failed probe (parsed=false). Slot fingerprints populate once
-    // firmware 14B ships the trailing bytes.
+    // Last parsed capability header from the legacy `'f'` query
+    // (blocking factors only).
     tuner_core::speeduino_connect_strategy::CapabilityHeader capabilities;
+
+    // FW-003 `'K'` capability response — board ID, feature flags,
+    // signature, and (schema v2+) schema_fingerprint. Zero-init on a
+    // failed probe (parsed=false).
+    tuner_core::speeduino_connect_strategy::KCapabilityResponse k_capabilities;
 
     // Poll the ECU for runtime data and update `runtime` map.
     // Returns true on success, false on error (disconnects on failure).
@@ -2156,34 +2160,38 @@ bool open_connect_dialog(QWidget* parent,
             ecu_conn->info = info;
             ecu_conn->connected = true;
 
-            // Capability query — issue `'f'` and parse the 6-byte
-            // header + optional 32-byte slot-fingerprint tail
-            // (firmware 14B). Errors are non-fatal; the dialog
-            // continues with an unparsed capability header.
-            try {
-                // Firmware `'f'` command today emits exactly 6 payload
-                // bytes: { RC_OK, protocol_version, blocking_factor_BE,
-                // table_blocking_factor_BE } — verified against
-                // `speeduino-202501.6/speeduino/comms.cpp` case 'f'
-                // (lines 668–677). Asking for more bytes forces every
-                // raw-serial connect to wait the full 1.5s timeout
-                // for bytes the firmware never sends.
-                //
-                // The parser (`parse_capability_header`) can already
-                // read 62 bytes if firmware ever starts emitting them
-                // (Slice 14B slot fingerprints, definition hash, and
-                // page-format bitmap). When firmware 14B ships, bump
-                // the fetch length here alongside the firmware change
-                // — not before.
-                auto cap_bytes = ecu_conn->controller->fetch_raw(
-                    {static_cast<std::uint8_t>('f')}, 6, 1.5);
-                std::span<const std::uint8_t> span(
-                    cap_bytes.data(), cap_bytes.size());
-                ecu_conn->capabilities =
-                    tuner_core::speeduino_connect_strategy::parse_capability_header(
-                        std::optional<std::span<const std::uint8_t>>(span));
-            } catch (...) {
-                // Leave capabilities at defaults (parsed=false).
+            // Two capability queries on connect. Both are non-fatal;
+            // any exception leaves the relevant struct at defaults
+            // (parsed=false) and the connect path proceeds.
+            //
+            // Legacy `'f'` — 6 bytes: blocking factors, verified
+            // against `comms.cpp` case 'f'.
+            //
+            // FW-003 `'K'` — 43 bytes in schema v2 (since 14B): board
+            // id, feature flags, signature, schema_fingerprint tail.
+            // Schema v1 firmware returns 39 bytes; parser handles
+            // either.
+            {
+                namespace scs = tuner_core::speeduino_connect_strategy;
+                try {
+                    auto cap_bytes = ecu_conn->controller->fetch_raw(
+                        {static_cast<std::uint8_t>('f')}, 6, 1.5);
+                    std::span<const std::uint8_t> span(
+                        cap_bytes.data(), cap_bytes.size());
+                    ecu_conn->capabilities =
+                        scs::parse_capability_header(
+                            std::optional<std::span<const std::uint8_t>>(span));
+                } catch (...) {}
+
+                try {
+                    auto k_bytes = ecu_conn->controller->fetch_raw(
+                        {static_cast<std::uint8_t>('K')}, 43, 1.5);
+                    std::span<const std::uint8_t> kspan(
+                        k_bytes.data(), k_bytes.size());
+                    ecu_conn->k_capabilities =
+                        scs::parse_k_capability_response(
+                            std::optional<std::span<const std::uint8_t>>(kspan));
+                } catch (...) {}
             }
 
             // Airbear fw_variant cross-check. When connected via TCP
@@ -5694,21 +5702,19 @@ QWidget* build_tune_tab(
                 && ecu_conn->controller;
             if (live_connected
                 && !loaded_tune_hash->empty()
-                && !ecu_conn->capabilities.definition_hash.empty()
+                && !ecu_conn->k_capabilities.schema_fingerprint.empty()
                 && *loaded_tune_hash
-                    != ecu_conn->capabilities.definition_hash) {
+                    != ecu_conn->k_capabilities.schema_fingerprint) {
                 char msg[512];
                 std::snprintf(msg, sizeof(msg),
-                    "This tune was built against firmware schema "
-                    "%.16s\xe2\x80\xa6\n"
-                    "The connected ECU is running firmware schema "
-                    "%.16s\xe2\x80\xa6\n\n"
+                    "This tune was built against firmware schema %s.\n"
+                    "The connected ECU is running firmware schema %s.\n\n"
                     "Burning would write this tune into a firmware "
                     "build it wasn't designed for. Reconnect to "
                     "matching firmware, or regenerate the tune "
                     "against the current firmware, before burning.",
                     loaded_tune_hash->c_str(),
-                    ecu_conn->capabilities.definition_hash.c_str());
+                    ecu_conn->k_capabilities.schema_fingerprint.c_str());
                 QMessageBox::critical(dialog,
                     QString::fromUtf8("Schema mismatch"),
                     QString::fromUtf8(msg));
@@ -8860,6 +8866,20 @@ QWidget* build_live_tab(
         if (rs.warmup_or_ase_active) { sep(); chip("Warmup", tt::accent_warning); }
         if (rs.transient_active)     { sep(); chip("Accel", tt::accent_warning); }
         if (rs.fuel_pump_on)         { sep(); chip("Fuel Pump", tt::text_muted); }
+        // Status3/Status4 high-signal chips (14C — surface existing
+        // firmware-emitted bits). Shown only when the condition is
+        // firing so the strip stays readable on a healthy ECU.
+        if (rs.half_sync)            { sep(); chip("Half Sync", tt::accent_warning); }
+        if (rs.vvt1_error || rs.vvt2_error) {
+            sep();
+            chip(rs.vvt1_error && rs.vvt2_error ? "VVT1/2 Err"
+               : rs.vvt1_error                  ? "VVT1 Err"
+                                                : "VVT2 Err",
+                 tt::accent_warning);
+        }
+        if (rs.wmi_empty)            { sep(); chip("WMI Empty", tt::accent_warning); }
+        if (rs.burn_pending)         { sep(); chip("Burning\xe2\x80\xa6", tt::accent_primary); }
+        if (rs.staging_active)       { sep(); chip("Staging", tt::accent_ok); }
         // Active slot chip — only shown when firmware 14G ships the
         // activeTuneSlot byte (pre-14G firmware omits the channel and
         // rs.active_tune_slot stays nullopt).
@@ -15132,14 +15152,15 @@ public:
             // saving doesn't silently strip a multi-tune slot label.
             tune.slot_index = *tune_slot_index;
             tune.slot_name  = *tune_slot_name;
-            // Capture the firmware definition hash from the currently
-            // connected ECU (P16-1 / firmware 14B). When the firmware
+            // Capture the firmware schema fingerprint from the `'K'`
+            // capability response (firmware 14B). When the firmware
             // reports a hash, we bake it into the saved tune so a
             // future burn against a different firmware build gets
             // caught before the RAM write fires.
             if (ecu_conn && ecu_conn->connected
-                && !ecu_conn->capabilities.definition_hash.empty()) {
-                tune.definition_hash = ecu_conn->capabilities.definition_hash;
+                && !ecu_conn->k_capabilities.schema_fingerprint.empty()) {
+                tune.definition_hash =
+                    ecu_conn->k_capabilities.schema_fingerprint;
             }
             auto json = ntw::export_json(tune);
 
@@ -16826,21 +16847,42 @@ public:
                     html += row;
                 };
 
+                namespace scs_ns = tuner_core::speeduino_connect_strategy;
+                const auto& kcap = ecu_conn->k_capabilities;
+
                 html += "<table style='font-family: monospace;'>";
                 add_row("Signature", ecu_conn->info.signature.empty()
                     ? "(unknown)" : ecu_conn->info.signature,
                     tt::text_primary);
-                if (cap.parsed) {
-                    add_row("Protocol version",
-                        std::to_string(cap.serial_protocol_version),
+                if (kcap.parsed) {
+                    add_row("Capability schema",
+                        std::to_string(kcap.schema_version),
                         tt::text_primary);
+                    add_row("Board ID",
+                        std::to_string(kcap.board_id),
+                        tt::text_primary);
+                    add_row("Feature flags",
+                        std::to_string(kcap.feature_flags)
+                            + (kcap.has_feature(
+                                scs_ns::K_CAP_FEATURE_U16P2) ? " U16P2" : "")
+                            + (kcap.has_feature(
+                                scs_ns::K_CAP_FEATURE_RUNTIME_STATUS_A) ? " RUNSTATA" : "")
+                            + (kcap.has_feature(
+                                scs_ns::K_CAP_FEATURE_FLASH_HEALTH) ? " FLASH" : ""),
+                        tt::text_primary);
+                    add_row("Live data size",
+                        std::to_string(kcap.output_channel_size) + " B",
+                        tt::text_primary);
+                }
+                if (cap.parsed) {
                     add_row("Blocking factor",
                         std::to_string(cap.blocking_factor),
                         tt::text_primary);
                     add_row("Table blocking factor",
                         std::to_string(cap.table_blocking_factor),
                         tt::text_primary);
-                } else {
+                }
+                if (!kcap.parsed && !cap.parsed) {
                     add_row("Capability header", "(not reported)",
                         tt::text_dim);
                 }
@@ -16849,61 +16891,15 @@ public:
                         ? ("Slot " + std::to_string(*active))
                         : std::string("(pending firmware 14G)"),
                     active.has_value() ? tt::accent_primary : tt::text_dim);
-                add_row("Definition hash",
-                    cap.definition_hash.empty()
-                        ? std::string("(pending firmware 14B)")
-                        : cap.definition_hash,
-                    cap.definition_hash.empty()
+                add_row("Schema fingerprint",
+                    kcap.schema_fingerprint.empty()
+                        ? std::string(kcap.schema_version >= 2
+                            ? "(all-zero)"
+                            : "(firmware schema v1 — pre-14B)")
+                        : ("0x" + kcap.schema_fingerprint),
+                    kcap.schema_fingerprint.empty()
                         ? tt::text_dim : tt::text_primary);
-                // Render the page-format bitmap as a comma-separated
-                // list of U16 page indices, or "all U08" when the mask
-                // is zero but present. Absent = pending firmware 14B.
-                std::string page_fmt_val;
-                const char* page_fmt_color = tt::text_dim;
-                if (!cap.page_format_bitmap.has_value()) {
-                    page_fmt_val = "(pending firmware 14B)";
-                } else if (*cap.page_format_bitmap == 0) {
-                    page_fmt_val = "all U08";
-                    page_fmt_color = tt::text_muted;
-                } else {
-                    auto mask = *cap.page_format_bitmap;
-                    std::string u16s;
-                    for (int i = 0; i < 64; ++i) {
-                        if (mask & (std::uint64_t(1) << i)) {
-                            if (!u16s.empty()) u16s += ",";
-                            u16s += std::to_string(i);
-                        }
-                    }
-                    page_fmt_val = "U16 pages: " + u16s;
-                    page_fmt_color = tt::text_primary;
-                }
-                add_row("Page formats", page_fmt_val, page_fmt_color);
 
-                html += "</table>";
-
-                html += "<br><b style='color: ";
-                html += tt::text_primary;
-                html += ";'>Slot fingerprints</b><br>";
-                html += "<table style='font-family: monospace; margin-top: 6px;'>";
-                for (int i = 0; i < 4; ++i) {
-                    const auto& fp = cap.slot_fingerprints[i];
-                    char slot_lbl[16];
-                    std::snprintf(slot_lbl, sizeof(slot_lbl), "Slot %d", i);
-                    const char* color;
-                    std::string val;
-                    if (fp.empty()) {
-                        val = "(pending firmware 14B)";
-                        color = tt::text_dim;
-                    } else if (fp == "0000000000000000") {
-                        val = "(slot empty)";
-                        color = tt::text_muted;
-                    } else {
-                        val = fp;
-                        color = (active.has_value() && *active == i)
-                            ? tt::accent_primary : tt::text_primary;
-                    }
-                    add_row(slot_lbl, val, color);
-                }
                 html += "</table>";
 
                 QMessageBox box(this);
@@ -17016,11 +17012,14 @@ public:
                     counter_color(s.ecu_timeouts));
                 row(html, "ECU busy",        opt_int(s.ecu_busy),
                     counter_color(s.ecu_busy));
+                row(html, "Wi-Fi disconnects", opt_int(s.wifi_disconnects),
+                    counter_color(s.wifi_disconnects));
                 html += "</table>";
 
                 if (!s.tcp_requests.has_value()
                  && !s.ecu_timeouts.has_value()
-                 && !s.ecu_busy.has_value()) {
+                 && !s.ecu_busy.has_value()
+                 && !s.wifi_disconnects.has_value()) {
                     html += "<br><span style='color: ";
                     html += tt::text_dim;
                     html += "; font-size: 11px;'>"

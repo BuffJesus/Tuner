@@ -48,6 +48,17 @@ struct RuntimeStatus {
     // (0-3 valid; 0xFF or out of range → nullopt). Pre-14G firmware
     // doesn't emit the byte so this stays nullopt on current builds.
     std::optional<int> active_tune_slot;
+
+    // Status3/Status4 bits the INI already declares as named channels.
+    // These are emitted by today's firmware; the desktop just hadn't
+    // surfaced them. All bool — set = "condition active / bit set".
+    bool half_sync = false;           // primary trigger synced but not secondary
+    bool burn_pending = false;        // EEPROM burn in progress
+    bool staging_active = false;      // secondary injector staging firing
+    bool fan_on = false;              // radiator fan output active
+    bool vvt1_error = false;          // VVT1 cam angle out of bounds
+    bool vvt2_error = false;          // VVT2 cam angle out of bounds
+    bool wmi_empty = false;           // water/meth tank empty
 };
 
 struct TelemetrySummary {
