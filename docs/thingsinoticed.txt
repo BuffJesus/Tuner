@@ -24,3 +24,5 @@ Increasing guidance in the application for users who are not familiar with tunin
 Pressing save project does not default to the folder location specified in the initial setup page for a new project
 Pressing save project does not default to the last folder the project was saved in
 Some naming inconsistencies in the application (VE Table and Second Fuel Table for instance)
+Would be nice if curves displayed as an editable curve (like cranking enrichment curve for example)
+Curve controls like smoothing etc would be nice
