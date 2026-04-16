@@ -1,0 +1,23 @@
+cannot change logging channels, even if new profile created
+logging page doesn't take up available vertical room when maximized (would be nice if logging graph took up more vertical space, and logging profile would take up less space)
+triggers page doesn't take up available vertical room either
+Setup page is not displaying proper values etc, needs work (incorrect VE Table, assumptions, AFR Target, assumptions, spark advance, pretty much everything)
+live page could use some work (could take up more vertical space, as it doesn't take up available vertical space)
+Gauges could take up more vertical room
+Full screen dashboard does not take up available screen space
+Some kind of indicator that writing to ram and burning were successful would be nice
+Injector timing page has all values set to 355, not sure if correct
+Little bug I just noticed on injector timing page, the rpm values are listed in degrees celcius
+Same bug in voltage correction, voltage listed in degrees celcius
+Might be bug across multiple pages
+Definitely a bug in every curve page I checked
+Guided hardware setup would be nice (IAC, fan, etc)
+Only see sequential fuel trim (1-4), even though the engine is a 6 cylinder in the project
+Project is located here for reference D:\Documents\Tuner\Projects\TestProject
+Save tune does not save the current tune in the active project directory it seems
+Filter toggles for the tree would be nice (icons that match the entries, as well as text. table icon with table text for example)
+Updating firmware signature, since we have ventured far from the source code by this point
+Updating README.md for the firmware, tuner, and airbear to better tie the ecosystem together
+Including everything in a single unified GitHub maybe? Tuner, firmware, airbear etc in a centralized location for users
+Release zip so users can easily use everything immediately
+Increasing guidance in the application for users who are not familiar with tuning (alot of overwhelming information available)
