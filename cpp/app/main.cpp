@@ -17645,8 +17645,24 @@ public:
             }
         };
 
-        std::printf("[ctor] tune begin\n"); std::fflush(stdout);
-        debug_log("TunerMainWindow building tune tab");
+        // ---- Per-tab construction profiling ----
+        // Each tab is timed individually so the debug log shows
+        // exactly where startup time is spent. The operator reported
+        // 8.8s picker-to-window; we need to know which tab(s) own
+        // the time so optimization targets the right code.
+        auto prof_start = std::chrono::steady_clock::now();
+        auto prof_lap = [&prof_start](const char* label) {
+            auto now = std::chrono::steady_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(
+                now - prof_start).count();
+            char msg[128];
+            std::snprintf(msg, sizeof(msg), "PERF %-20s %.1f ms", label, ms);
+            debug_log(msg);
+            std::printf("[ctor] %s %.0fms\n", label, ms);
+            std::fflush(stdout);
+            prof_start = now;
+        };
+
         auto shared_edit_svc = std::make_shared<tuner_core::local_tune_edit::EditService>();
         auto tune_signature = std::make_shared<std::string>();
         auto tune_slot_index = std::make_shared<std::optional<int>>();
@@ -17657,23 +17673,29 @@ public:
             auto proj = active_project();
             *project_name = proj.name.empty() ? "Speeduino Project" : proj.name;
         }
-        std::printf("[ctor] tune ok\n"); std::fflush(stdout);
-        debug_log("TunerMainWindow tune tab built");
+        prof_lap("TUNE tab");
+
         stack->addWidget(build_live_tab(ecu_conn, navigate, http_server,
             shared_dash, rebuild_dashboard));
-        std::printf("[ctor] live ok\n"); std::fflush(stdout);
+        prof_lap("LIVE tab");
+
         stack->addWidget(build_flash_tab(ecu_conn));
-        std::printf("[ctor] flash ok\n"); std::fflush(stdout);
+        prof_lap("FLASH tab");
+
         stack->addWidget(build_setup_tab(shared_edit_svc, ecu_conn));
-        std::printf("[ctor] setup ok\n"); std::fflush(stdout);
+        prof_lap("SETUP tab");
+
         stack->addWidget(build_assist_tab(shared_edit_svc, ecu_conn));
-        std::printf("[ctor] assist ok\n"); std::fflush(stdout);
+        prof_lap("ASSIST tab");
+
         stack->addWidget(build_triggers_tab(ecu_conn));
-        std::printf("[ctor] triggers ok\n"); std::fflush(stdout);
+        prof_lap("TRIGGERS tab");
+
         stack->addWidget(build_logging_tab(ecu_conn));
-        std::printf("[ctor] logging ok\n"); std::fflush(stdout);
+        prof_lap("LOGGING tab");
+
         stack->addWidget(build_history_tab());
-        std::printf("[ctor] history ok\n"); std::fflush(stdout);
+        prof_lap("HISTORY tab");
 
         // Wire sidebar → stack page switching.
         QObject::connect(sidebar, &QListWidget::currentRowChanged,
@@ -20443,7 +20465,19 @@ int main(int argc, char* argv[]) {
                 tt::radius_sm, tt::space_xs + 2, tt::space_sm, tt::font_small);
             qApp->setStyleSheet(QString::fromUtf8(DARK_QSS));
         }
-        std::printf("[main] dark theme applied\n"); std::fflush(stdout);
+        auto main_prof = std::chrono::steady_clock::now();
+        auto main_lap = [&main_prof](const char* label) {
+            auto now = std::chrono::steady_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(
+                now - main_prof).count();
+            char msg[128];
+            std::snprintf(msg, sizeof(msg), "PERF %-20s %.1f ms", label, ms);
+            debug_log(msg);
+            std::printf("[main] %s %.0fms\n", label, ms);
+            std::fflush(stdout);
+            main_prof = now;
+        };
+        main_lap("stylesheet");
 
         bool startup_want_connect = false;
         bool want_new_project = false;
@@ -20647,11 +20681,12 @@ int main(int argc, char* argv[]) {
             g_suppress_mru_fallback = true;
         }
 
+        main_lap("startup picker");
         TunerMainWindow window;
+        main_lap("window ctor");
         g_suppress_mru_fallback = false;
-        debug_log("main window built");
-        std::printf("[main] window built\n"); std::fflush(stdout);
         window.show();
+        main_lap("window.show()");
         if (startup_want_connect) {
             // Trigger File → Connect after the event loop starts.
             QTimer::singleShot(100, [&window]() {
