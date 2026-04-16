@@ -93,11 +93,21 @@ TEST_CASE("tune round trip preserves scalar list and string values") {
     CHECK(ve[3] == doctest::Approx(65.0));
 }
 
-TEST_CASE("missing schema_version defaults to 1.0") {
-    // Pre-schema-version files (early fixtures) now load gracefully
-    // rather than throwing, defaulting to schema version 1.0.
+TEST_CASE("missing schema_version defaults to 1.0 — definition") {
     auto def = tuner_core::load_definition("{\"name\": \"x\"}");
     CHECK(def.schema_version == "1.0");
+}
+
+TEST_CASE("missing schema_version defaults to 1.0 — tune") {
+    auto tune = tuner_core::load_tune("{\"values\": {\"reqFuel\": 8.5}}");
+    CHECK(tune.schema_version == "1.0");
+}
+
+TEST_CASE("tune definition fallback reads legacy key") {
+    auto tune = tuner_core::load_tune(
+        "{\"definition\": \"speeduino 202501-T41\", \"values\": {}}");
+    REQUIRE(tune.definition_signature.has_value());
+    CHECK(*tune.definition_signature == "speeduino 202501-T41");
 }
 
 TEST_CASE("future major version raises") {

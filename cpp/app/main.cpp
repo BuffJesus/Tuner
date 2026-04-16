@@ -1444,6 +1444,21 @@ void migrate_recent_project_keys() {
     s.remove("projects/last_msq");
     s.remove("projects/last_signature");
     s.remove("projects/last_opened");
+
+    // One-time migration: if kCurrentProjectDirKey is empty but the
+    // current project has a tune path, infer the project dir from the
+    // tune's parent. Without this, legacy installs never get a project
+    // dir key and the inside_project fallback in the save_path gating
+    // always returns true — silently overwriting external tunes.
+    if (s.value(kCurrentProjectDirKey, "").toString().isEmpty()) {
+        auto tune = s.value(kCurrentProjectTuneKey, "").toString().toStdString();
+        if (!tune.empty()) {
+            auto parent = std::filesystem::path(tune).parent_path().string();
+            if (!parent.empty())
+                s.setValue(kCurrentProjectDirKey,
+                           QString::fromUtf8(parent.c_str()));
+        }
+    }
 }
 
 // Format today's date as "YYYY-MM-DD".
@@ -10252,12 +10267,20 @@ QWidget* build_flash_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
         if (!found.empty()) {
             int idx = port_combo->findText(QString::fromUtf8(found.c_str()));
             if (idx >= 0) port_combo->setCurrentIndex(idx);
+            auto_ports_btn->setText(QString::fromUtf8(
+                ("\xe2\x9c\x93 " + found).c_str()));
             auto_ports_btn->setToolTip(QString::fromUtf8(
                 ("Found Speeduino on " + found).c_str()));
         } else {
+            auto_ports_btn->setText(QString::fromUtf8("None"));
             auto_ports_btn->setToolTip(QString::fromUtf8(
                 "No Speeduino detected \xe2\x80\x94 check cable, power, baud"));
         }
+        // Restore label after 3s so the button returns to "Auto"
+        // for the next probe attempt.
+        QTimer::singleShot(3000, [auto_ports_btn]() {
+            auto_ports_btn->setText(QString::fromUtf8("Auto"));
+        });
         auto_ports_btn->setEnabled(true);
         refresh_ports_btn->setEnabled(true);
     });
@@ -18653,6 +18676,17 @@ public:
                         }
                         new_rp.msq_path = settings.value(
                             kCurrentProjectTuneKey, "").toString().toStdString();
+                        // Guard: only push if the tune file we're
+                        // pointing at actually exists. If copy_file
+                        // failed (disk full, permissions), the key
+                        // holds the external source path — pushing
+                        // that would pollute recents with a stale
+                        // entry that re-opens the wrong file.
+                        if (!new_rp.msq_path.empty()) {
+                            std::error_code ec;
+                            if (!std::filesystem::exists(new_rp.msq_path, ec))
+                                new_rp.msq_path.clear();
+                        }
                         new_rp.signature = "";
                         new_rp.last_opened = today_iso();
                         if (!new_rp.name.empty())

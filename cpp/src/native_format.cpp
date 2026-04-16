@@ -98,8 +98,13 @@ std::string read_file(const std::filesystem::path& path) {
 // defaults to "1.0" for backwards compatibility with early fixture
 // tunes authored before the field existed — the base-tune fixture
 // shipped without it and the app rejected the operator's project.
-void check_version(const std::string& raw) {
+void check_version(const std::string& raw, bool key_present) {
     if (raw.empty()) {
+        if (key_present) {
+            throw NativeFormatVersionError(
+                "schema_version key is present but empty — "
+                "set it to \"1.0\" or remove the key.");
+        }
         std::fprintf(stderr,
             "[native_format] schema_version missing — treating as 1.0\n");
         return;
@@ -387,7 +392,7 @@ NativeDefinition load_definition(std::string_view text) {
         throw std::runtime_error("Native file root must be a JSON object.");
     }
     std::string version = data.value("schema_version", std::string());
-    check_version(version);
+    check_version(version, data.contains("schema_version"));
     if (version.empty()) version = "1.0";  // pre-schema-version file
 
     NativeDefinition definition;
@@ -430,7 +435,7 @@ NativeTune load_tune(std::string_view text) {
         throw std::runtime_error("Native file root must be a JSON object.");
     }
     std::string version = data.value("schema_version", std::string());
-    check_version(version);
+    check_version(version, data.contains("schema_version"));
     if (version.empty()) version = "1.0";  // pre-schema-version file
 
     NativeTune tune;
