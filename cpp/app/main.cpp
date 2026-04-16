@@ -7075,13 +7075,16 @@ protected:
                        Qt::AlignCenter, QString::fromUtf8(cfg_.units.c_str()));
         }
 
-        // Title.
+        // Title — use the full widget width so longer titles like
+        // "Engine Speed" and "Throttle Position" don't clip. The prior
+        // rect width was `r` (half the dial), which clipped anything
+        // longer than ~6 characters at small gauge sizes.
         {
             QFont tf;
             tf.setPixelSize(std::max(7, static_cast<int>(side * 0.085)));
             p.setFont(tf);
             p.setPen(QColor(130, 135, 148));
-            p.drawText(QRectF(cx - r * 0.5, cy + r * 0.65, r, r * 0.22),
+            p.drawText(QRectF(2, cy + r * 0.65, side - 4, r * 0.22),
                        Qt::AlignCenter, QString::fromUtf8(cfg_.title.c_str()));
         }
     }
@@ -9003,6 +9006,7 @@ QWidget* build_live_tab(
             chip->setMinimumWidth(40);
             chip->setAlignment(Qt::AlignCenter);
             chip->setStyleSheet(QString::fromUtf8(off_s));
+            chip->setVisible(false);  // start hidden; shown on first active eval
             b.chip = chip;
 
             ind_grid->addWidget(chip, i / 8, i % 8);
@@ -9047,7 +9051,24 @@ QWidget* build_live_tab(
             w.title = g->title;
             w.units = g->units;
             w.min_value = g->lo.value_or(0.0);
-            w.max_value = g->hi.value_or(100.0);
+            // Channel-specific max fallback so gauges without an
+            // explicit `hi` in the INI don't all cap at 100. RPM
+            // at max 100 makes the needle pin and the arc useless.
+            double hi_fallback = 100.0;
+            {
+                std::string ch = g->channel;
+                for (auto& c : ch) c = static_cast<char>(
+                    std::tolower(static_cast<unsigned char>(c)));
+                if (ch.find("rpm") != std::string::npos)      hi_fallback = 8000.0;
+                else if (ch.find("map") != std::string::npos) hi_fallback = 260.0;
+                else if (ch.find("clt") != std::string::npos
+                      || ch.find("iat") != std::string::npos) hi_fallback = 120.0;
+                else if (ch.find("afr") != std::string::npos) hi_fallback = 20.0;
+                else if (ch.find("batt") != std::string::npos
+                      || ch.find("bat") != std::string::npos) hi_fallback = 16.0;
+                else if (ch.find("advance") != std::string::npos) hi_fallback = 50.0;
+            }
+            w.max_value = g->hi.value_or(hi_fallback);
 
             // Derive color zones from thresholds.
             gcz::Thresholds th;
@@ -9654,11 +9675,17 @@ QWidget* build_live_tab(
             "<span style='font-size: %dpx; font-weight: bold; color: %s; "
             "letter-spacing: 0.5px;'>\xe2\x97\x89 %s</span>"
             "<span style='color: %s; font-size: %dpx;'>"
-            "  \xc2\xb7  RPM %.0f  \xc2\xb7  TPS %.1f%%  \xc2\xb7  tick %d</span>",
+            "  \xc2\xb7  RPM </span>"
+            "<span style='color: %s; font-size: %dpx; font-weight: bold;'>%.0f</span>"
+            "<span style='color: %s; font-size: %dpx;'>"
+            "  \xc2\xb7  TPS </span>"
+            "<span style='color: %s; font-size: %dpx; font-weight: bold;'>%.1f%%</span>",
             rec_buf,
             tt::font_label, phase_color, phase,
-            tt::text_dim, tt::font_small,
-            rpm, tps, tick);
+            tt::text_muted, tt::font_body,
+            tt::text_primary, tt::font_body, rpm,
+            tt::text_muted, tt::font_body,
+            tt::text_primary, tt::font_body, tps);
         phase_label->setText(QString::fromUtf8(phase_buf));
 
         for (auto& b : *bindings) {
@@ -9772,6 +9799,10 @@ QWidget* build_live_tab(
                         active ? b.on_text.c_str() : b.off_text.c_str()));
                     b.chip->setStyleSheet(QString::fromUtf8(
                         active ? b.on_style.c_str() : b.off_style.c_str()));
+                    // Hide OFF-state chips so the strip only surfaces
+                    // active warnings / errors. 40+ "OFF" chips were
+                    // a grey wall that hid the 2-3 that matter.
+                    b.chip->setVisible(active);
                 }
             }
         });
