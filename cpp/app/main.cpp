@@ -10137,6 +10137,17 @@ QWidget* build_flash_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
     refresh_ports_btn->setCursor(Qt::PointingHandCursor);
     refresh_ports_btn->setToolTip(QString::fromUtf8("Rescan serial ports"));
 
+    // Auto-detect button — same probe pattern the Connection dialog
+    // uses. Opens each enumerated COM port at 115200 and looks for a
+    // Speeduino signature response. Useful on the FLASH tab so the
+    // operator doesn't have to switch tabs just to figure out which
+    // COM port the board is on.
+    auto* auto_ports_btn = new QPushButton(QString::fromUtf8("Auto"));
+    auto_ports_btn->setFixedWidth(56);
+    auto_ports_btn->setCursor(Qt::PointingHandCursor);
+    auto_ports_btn->setToolTip(QString::fromUtf8(
+        "Probe each COM port at 115200 baud for a Speeduino signature"));
+
     // Flash button — enabled when firmware + port selected.
     auto* flash_btn = new QPushButton(QString::fromUtf8("Flash Firmware"));
     flash_btn->setCursor(Qt::PointingHandCursor);
@@ -10185,9 +10196,44 @@ QWidget* build_flash_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
     }
     port_row->addWidget(port_combo);
     port_row->addWidget(refresh_ports_btn);
+    port_row->addWidget(auto_ports_btn);
     port_row->addStretch(1);
     port_row->addWidget(flash_btn);
     layout->addLayout(port_row);
+
+    QObject::connect(auto_ports_btn, &QPushButton::clicked,
+                     [port_combo, auto_ports_btn, refresh_ports_btn]() {
+        auto p_list = list_serial_ports();
+        if (p_list.empty()) return;
+        auto_ports_btn->setEnabled(false);
+        refresh_ports_btn->setEnabled(false);
+        std::string found;
+        for (const auto& p : p_list) {
+            QApplication::processEvents();
+            try {
+                auto transport = std::make_unique<
+                    tuner_core::transport::SerialTransport>(p, 115200);
+                tuner_core::speeduino_controller::SpeeduinoController probe(
+                    std::move(transport));
+                auto info = probe.connect({115200}, 'Q', 0.5, nullptr);
+                std::string lower = info.signature;
+                for (auto& c : lower) c = static_cast<char>(
+                    std::tolower(static_cast<unsigned char>(c)));
+                if (lower.find("speeduino") != std::string::npos) {
+                    found = p;
+                    probe.disconnect();
+                    break;
+                }
+                probe.disconnect();
+            } catch (...) {}
+        }
+        if (!found.empty()) {
+            int idx = port_combo->findText(QString::fromUtf8(found.c_str()));
+            if (idx >= 0) port_combo->setCurrentIndex(idx);
+        }
+        auto_ports_btn->setEnabled(true);
+        refresh_ports_btn->setEnabled(true);
+    });
 
     auto* firmware_card = new QWidget;
     auto* firmware_layout = new QVBoxLayout(firmware_card);
@@ -17388,7 +17434,36 @@ public:
             std::string ext = tune_path.extension().string();
             for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             if (ext == ".tuner") {
-                *save_path = tune_path.string();
+                // Only seed save_path when the tune lives inside the
+                // project directory. If the operator opened a tune
+                // that sits elsewhere (Downloads folder, a fixture,
+                // another project's dir), fall through to the Save
+                // Tune dialog so Ctrl+S doesn't silently overwrite
+                // the external file. The New Project flow already
+                // copies external tunes into the project dir for new
+                // projects; this closes the same hole for existing
+                // projects opened via File → Open Project.
+                QSettings s_qs;
+                auto project_dir_str = s_qs.value(
+                    kCurrentProjectDirKey, "").toString().toStdString();
+                bool inside_project = false;
+                if (!project_dir_str.empty()) {
+                    std::error_code ec;
+                    auto tune_canon = std::filesystem::weakly_canonical(tune_path, ec);
+                    auto dir_canon = std::filesystem::weakly_canonical(
+                        std::filesystem::path(project_dir_str), ec);
+                    if (!ec) {
+                        inside_project = tune_canon.string().rfind(
+                            dir_canon.string(), 0) == 0;
+                    }
+                } else {
+                    // Fall back: if no project dir is known yet,
+                    // treat same-parent as inside so existing-project
+                    // round-trips aren't broken for operators who
+                    // haven't run through New Project.
+                    inside_project = true;
+                }
+                if (inside_project) *save_path = tune_path.string();
             }
         }
         // tune_signature is populated by build_tune_tab above.

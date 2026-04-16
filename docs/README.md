@@ -4,6 +4,7 @@
 
 | File | Purpose |
 |------|---------|
+| `operator-manual.md` | End-user manual — install, projects, connect, TUNE/SETUP workflow, shortcuts, troubleshooting |
 | `tuning-roadmap.md` | Living roadmap — phases, parity tracker, ecosystem alignment |
 | `ux-design.md` | UX philosophy ("guided power"), visual system tokens, design principles |
 | `architecture.md` | Service architecture, layer boundaries, comms model |

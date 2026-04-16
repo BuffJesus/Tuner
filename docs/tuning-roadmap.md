@@ -336,7 +336,7 @@ Mostly polish and coverage gaps:
 - **Teensy HID flasher on Linux/macOS** — current path is Windows-only (`setupapi` / `hid.dll`). hidapi vendoring closes it.
 - **XCP editing parity** — simulator + packet layer done (sub-slices 104-105); workspace presenter integration (XCP-based page read/write/burn-equivalent threading into `EcuConnection`) is the missing piece.
 - **Widget unit tests** — `LogTimelineWidget`, `TriggerScopeWidget`, `DynoChartWidget` have partial coverage (`chart_axes` extracted + tested, 4 cases). The remaining pure-logic parts (timeline zoom-index window, square-wave path composition) could be extracted.
-- **Operator manual** — the roadmap commits to a desktop-side manual paired with firmware Slice 14H. Zero pages exist today.
+- **Operator manual** — the roadmap commits to a desktop-side manual paired with firmware Slice 14H. First pass landed 2026-04-16 at `docs/operator-manual.md` (install → projects → connect → TUNE → Write/Burn/power-cycle → SETUP cards → wizard → other tabs → shortcuts → troubleshooting). Per-tab deep-dives and per-feature how-tos are the open follow-up.
 - ~~**Doc drift cleanup**~~ ✅ Audited 2026-04-15. `engine-model-reference.md` is pure language-agnostic modeling theory — no drift. `ux-design.md` is design philosophy with generic "service" references that are architectural concepts, not Python class names — no drift. `protocol-notes.md` had a stale "Python rewrite approach" section (now updated to the C++ `tuner_core::` architecture) and eight "open questions" (three resolved: `.tunerproj` / `.tuner` / controller packet formats; five annotated with current state).
 
 ### Hardware / integration (no code fixes its own blocker)
@@ -352,7 +352,7 @@ Mostly polish and coverage gaps:
 ### Critical path to a ship-able product
 
 1. Hardware bench validation (firmware + desktop together on a real engine).
-2. Operator manual (without it, the 14G-0 slot chip and the schema-mismatch dialog don't have plain-language explanations).
+2. ~~Operator manual~~ — first pass seeded 2026-04-16 at `docs/operator-manual.md`. Remaining: per-tab deep-dives, screenshots, and pairing with firmware 14H release notes.
 3. Firmware 14A + 14G-full slices (transform desktop-side "slot 0 only" into real multi-tune).
 
 Everything else (XCP parity, embedded Mega/STM32 flash, Linux/macOS Teensy) is polish operators on non-DropBear boards need. The current app ships for DropBear + Teensy today.
