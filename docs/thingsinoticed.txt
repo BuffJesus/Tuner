@@ -26,3 +26,4 @@ Pressing save project does not default to the last folder the project was saved 
 Some naming inconsistencies in the application (VE Table and Second Fuel Table for instance)
 Would be nice if curves displayed as an editable curve (like cranking enrichment curve for example)
 Curve controls like smoothing etc would be nice
+Auto detecting the ECU port would be nice (in project setup, connection page, flashing page, etc)
