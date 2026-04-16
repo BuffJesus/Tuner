@@ -13397,12 +13397,42 @@ QWidget* build_setup_tab(
 
     // Read engine context from loaded tune if available, otherwise
     // fall back to demo values (Ford 300 Twin GT28 context).
+    //
+    // The native .tuner file (and MSQ-imported tunes) stores many
+    // scalars as STRINGS even when the value is numeric. For example
+    // nCylinders = "6" (not 6.0), boostEnabled = "Off" (not 0).
+    // The original read_scalar only checked holds_alternative<double>,
+    // causing every string-typed scalar to silently return the
+    // fallback. This was THE root cause of the "SETUP page shows
+    // wrong values" bug — the tune loaded 841 values but the
+    // generators saw only fallbacks because the type didn't match.
     auto read_scalar = [&edit_svc](const std::string& name, double fallback) -> double {
         if (!edit_svc) return fallback;
         auto* tv = edit_svc->get_value(name);
-        if (tv && std::holds_alternative<double>(tv->value))
+        if (!tv) return fallback;
+        if (std::holds_alternative<double>(tv->value))
             return std::get<double>(tv->value);
+        if (std::holds_alternative<std::string>(tv->value)) {
+            const auto& s = std::get<std::string>(tv->value);
+            try { return std::stod(s); }
+            catch (...) { return fallback; }
+        }
         return fallback;
+    };
+    // Read a string scalar as-is (for enum fields like boostEnabled
+    // where the value is "Off" / "On" / "Open Loop" etc.).
+    auto read_string = [&edit_svc](const std::string& name) -> std::string {
+        if (!edit_svc) return {};
+        auto* tv = edit_svc->get_value(name);
+        if (!tv) return {};
+        if (std::holds_alternative<std::string>(tv->value))
+            return std::get<std::string>(tv->value);
+        if (std::holds_alternative<double>(tv->value)) {
+            char b[32];
+            std::snprintf(b, sizeof(b), "%.4g", std::get<double>(tv->value));
+            return b;
+        }
+        return {};
     };
     double disp = read_scalar("displacement", 2998.0);
     int ncyl = static_cast<int>(read_scalar("nCylinders", 6));
@@ -13410,17 +13440,25 @@ QWidget* build_setup_tab(
     double req_fuel = read_scalar("reqFuel", 8.5);
     double inj_flow = read_scalar("injFlow1", 550.0);
     double boost_kpa = read_scalar("boostTarget", 200.0);
-    double dwell = read_scalar("dwellRun", 3.5);
+    // The fixture uses lowercase "dwellrun" — try both cases.
+    double dwell = read_scalar("dwellRun", -1.0);
+    if (dwell < 0.0) dwell = read_scalar("dwellrun", 3.5);
     bool has_tune = (edit_svc != nullptr && edit_svc->get_value("reqFuel") != nullptr);
     const char* data_source = has_tune ? "loaded tune" : "no tune loaded";
 
-    // Detect induction topology from tune — `boostEnabled` is the
-    // scalar the Engine Setup Wizard stages (0 = NA, 1 = forced).
-    // Default to NA so a stock tune doesn't preview as a turbo build
-    // (the prior hardcoded SINGLE_TURBO is what produced #4's
-    // "incorrect VE / AFR / spark" complaint on a stock Ford 300).
-    bool is_forced_induction =
-        read_scalar("boostEnabled", 0.0) > 0.5;
+    // Detect induction topology from tune. boostEnabled is an ENUM
+    // string in the tune — "Off" / "On" / not present. The prior
+    // read_scalar(double) path always returned 0.0 because the value
+    // is a string, not a number.
+    auto boost_str = read_string("boostEnabled");
+    bool is_forced_induction = false;
+    if (!boost_str.empty()) {
+        std::string lower = boost_str;
+        for (auto& c : lower) c = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(c)));
+        is_forced_induction = (lower != "off" && lower != "0"
+                               && lower != "no" && lower != "");
+    }
     namespace gt = tuner_core::generator_types;
     auto setup_topology = is_forced_induction
         ? gt::ForcedInductionTopology::SINGLE_TURBO
