@@ -7068,7 +7068,7 @@ protected:
         // Units.
         if (!cfg_.units.empty()) {
             QFont uf;
-            uf.setPixelSize(std::max(7, static_cast<int>(side * 0.075)));
+            uf.setPixelSize(std::max(tt::font_micro, static_cast<int>(side * 0.075)));
             p.setFont(uf);
             p.setPen(QColor(90, 96, 110));
             p.drawText(QRectF(cx - r * 0.4, cy + r * 0.46, r * 0.8, r * 0.2),
@@ -7081,7 +7081,7 @@ protected:
         // longer than ~6 characters at small gauge sizes.
         {
             QFont tf;
-            tf.setPixelSize(std::max(7, static_cast<int>(side * 0.085)));
+            tf.setPixelSize(std::max(tt::font_micro, static_cast<int>(side * 0.085)));
             p.setFont(tf);
             p.setPen(QColor(130, 135, 148));
             p.drawText(QRectF(2, cy + r * 0.65, side - 4, r * 0.22),
@@ -9160,7 +9160,7 @@ QWidget* build_live_tab(
     auto mock_ecu = std::make_shared<mer::MockEcu>(42);
 
     auto* dash_grid = new QGridLayout;
-    dash_grid->setSpacing(tt::space_xs);
+    dash_grid->setSpacing(tt::space_sm);
     auto* dash_container = new QWidget;
     dash_container->setLayout(dash_grid);
 
@@ -9203,7 +9203,7 @@ QWidget* build_live_tab(
             binding.title = w.title;
             binding.units = w.units;
             binding.zones = w.color_zones;
-            binding.font_size = (gh > 1) ? 28 : 18;
+            binding.font_size = (gh > 1) ? 32 : tt::font_hero;
 
             if (w.kind == "dial") {
                 DialGaugeWidget::Config cfg;
@@ -17451,12 +17451,12 @@ public:
                 "  border-left: 3px solid %s; }"
                 "QListWidget::item:hover:!selected { background: %s; color: %s; }",
                 tt::bg_deep, tt::border,
-                tt::font_body,
+                tt::font_label,
                 tt::space_md, tt::space_lg,
                 tt::text_muted,
-                tt::bg_panel, tt::text_primary,
+                tt::bg_elevated, tt::text_primary,
                 tt::accent_primary,
-                tt::bg_base, tt::text_secondary);
+                tt::bg_panel, tt::text_secondary);
             sidebar->setStyleSheet(QString::fromUtf8(sidebar_style));
         }
 
@@ -20448,7 +20448,7 @@ int main(int argc, char* argv[]) {
                 tt::space_sm, tt::space_lg + 2, tt::border,
                 tt::bg_elevated, tt::text_primary, tt::accent_primary,
                 tt::bg_panel, tt::text_secondary,
-                tt::bg_panel, tt::text_muted, tt::border,
+                tt::bg_panel, tt::text_secondary, tt::border,
                 tt::bg_elevated, tt::border,
                 tt::radius_sm, tt::space_xs + 2, tt::space_sm, tt::text_primary,
                 tt::accent_primary,

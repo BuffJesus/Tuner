@@ -223,7 +223,7 @@ inline void format_tab_header_html(char* buf, std::size_t buf_size,
 // / `accent_danger`). `top_border_px` is the thickness of the top
 // bar — the call site pulses this to 4px on danger-zone entry as
 // an attention flash, then drops back to 2px on the next tick.
-inline std::string number_card_style(const char* accent, int top_border_px = 2) {
+inline std::string number_card_style(const char* accent, int top_border_px = 3) {
     std::string s;
     s.reserve(224);
     s += "background-color: "; s += bg_panel; s += "; ";
