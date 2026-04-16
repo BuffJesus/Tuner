@@ -21,3 +21,5 @@ Updating README.md for the firmware, tuner, and airbear to better tie the ecosys
 Including everything in a single unified GitHub maybe? Tuner, firmware, airbear etc in a centralized location for users
 Release zip so users can easily use everything immediately
 Increasing guidance in the application for users who are not familiar with tuning (alot of overwhelming information available)
+Pressing save project does not default to the folder location specified in the initial setup page for a new project
+Pressing save project does not default to the last folder the project was saved in
