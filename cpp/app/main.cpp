@@ -860,8 +860,13 @@ std::filesystem::path find_native_definition() {
             "../../../tests/fixtures/native/speeduino-dropbear-v2.0.1.tunerdef",
             "D:/Documents/JetBrains/Python/Tuner/tests/fixtures/native/speeduino-dropbear-v2.0.1.tunerdef",
         };
-        for (const char* c : v2_candidates)
-            if (std::filesystem::exists(c)) return c;
+        for (const char* c : v2_candidates) {
+            std::error_code ec;
+            if (std::filesystem::exists(c, ec)) {
+                auto abs = std::filesystem::weakly_canonical(c, ec);
+                return ec ? std::filesystem::path(c) : abs;
+            }
+        }
         return def_path;
     }
     // Search fixture directory. Prefer the schema-v2 generated
@@ -886,8 +891,13 @@ std::filesystem::path find_native_definition() {
         "../../../tests/fixtures/native/Ford300_TwinGT28_BaseStartup.tunerdef",
         "D:/Documents/JetBrains/Python/Tuner/tests/fixtures/native/Ford300_TwinGT28_BaseStartup.tunerdef",
     };
-    for (const char* c : candidates)
-        if (std::filesystem::exists(c)) return c;
+    for (const char* c : candidates) {
+        std::error_code ec;
+        if (std::filesystem::exists(c, ec)) {
+            auto abs = std::filesystem::weakly_canonical(c, ec);
+            return ec ? std::filesystem::path(c) : abs;
+        }
+    }
     return {};
 }
 
@@ -909,7 +919,11 @@ std::filesystem::path find_production_ini() {
         "D:/Documents/JetBrains/Python/Tuner/tests/fixtures/speeduino-dropbear-v2.0.1.ini",
     };
     for (const char* c : candidates) {
-        if (std::filesystem::exists(c)) return c;
+        std::error_code ec;
+        if (std::filesystem::exists(c, ec)) {
+            auto abs = std::filesystem::weakly_canonical(c, ec);
+            return ec ? std::filesystem::path(c) : abs;
+        }
     }
     return {};
 }
