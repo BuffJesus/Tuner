@@ -13355,6 +13355,32 @@ QWidget* build_setup_tab(
                     }
                 }
 
+                // Persist wizard engine context to QSettings so the SETUP
+                // tab can read displacement, CR, boost target, etc. on
+                // the next launch. These values CAN'T go into edit_svc
+                // because they're not Speeduino firmware scalars (no
+                // [Constants] entry = stage_scalar_value throws). The
+                // .tuner file only stores firmware-side values; the
+                // wizard's engine-description context lives in QSettings
+                // alongside the project metadata.
+                {
+                    QSettings wqs;
+                    wqs.setValue("wizard/displacement_cc", wr.displacement_cc);
+                    wqs.setValue("wizard/compression_ratio", wr.compression_ratio);
+                    wqs.setValue("wizard/cylinders", wr.cylinders);
+                    wqs.setValue("wizard/boost_target_kpa", boost_kpa);
+                    wqs.setValue("wizard/intercooler", wr.intercooler_present);
+                    wqs.setValue("wizard/induction", wr.induction);
+                    wqs.setValue("wizard/injector_flow", wr.injector_flow);
+                    wqs.setValue("wizard/dead_time_ms", wr.dead_time_ms);
+                    wqs.setValue("wizard/stoich", wr.stoich);
+                    wqs.setValue("wizard/dwell_running", wr.dwell_running);
+                    // cam_duration, head_flow_class, intake_manifold_style
+                    // are NOT in WizardResult — the wizard's generators use
+                    // default contexts for these. The SETUP tab reads them
+                    // from QSettings if present but doesn't require them.
+                }
+
                 // Post-wizard guidance — tell the operator what to do next.
                 // This is the "guided power" moment: the wizard did the hard
                 // work, now guide them through the first steps.
@@ -13434,30 +13460,55 @@ QWidget* build_setup_tab(
         }
         return {};
     };
-    double disp = read_scalar("displacement", 2998.0);
-    int ncyl = static_cast<int>(read_scalar("nCylinders", 6));
-    double cr = read_scalar("compressionRatio", 10.5);
+    // Three-tier value resolution for the SETUP previews:
+    //   1. Wizard context from QSettings (persisted on Finish)
+    //   2. Tune values from edit_svc (firmware scalars)
+    //   3. Conservative fallback defaults
+    // The wizard stores engine-description values (displacement, CR)
+    // that aren't firmware scalars — they can't go into edit_svc
+    // because there's no [Constants] entry to patch. QSettings is the
+    // persistence surface for these.
+    QSettings wqs;
+    bool has_wizard = wqs.contains("wizard/displacement_cc");
+    double disp = has_wizard
+        ? wqs.value("wizard/displacement_cc", 2998.0).toDouble()
+        : read_scalar("displacement", 2998.0);
+    int ncyl = has_wizard
+        ? wqs.value("wizard/cylinders", 6).toInt()
+        : static_cast<int>(read_scalar("nCylinders", 6));
+    double cr = has_wizard
+        ? wqs.value("wizard/compression_ratio", 10.5).toDouble()
+        : read_scalar("compressionRatio", 10.5);
     double req_fuel = read_scalar("reqFuel", 8.5);
-    double inj_flow = read_scalar("injFlow1", 550.0);
-    double boost_kpa = read_scalar("boostTarget", 200.0);
-    // The fixture uses lowercase "dwellrun" — try both cases.
-    double dwell = read_scalar("dwellRun", -1.0);
-    if (dwell < 0.0) dwell = read_scalar("dwellrun", 3.5);
+    double inj_flow = has_wizard
+        ? wqs.value("wizard/injector_flow", 550.0).toDouble()
+        : read_scalar("injFlow1", 550.0);
+    double boost_kpa = has_wizard
+        ? wqs.value("wizard/boost_target_kpa", 200.0).toDouble()
+        : read_scalar("boostTarget", 200.0);
+    double dwell = has_wizard
+        ? wqs.value("wizard/dwell_running", 3.5).toDouble()
+        : read_scalar("dwellRun", read_scalar("dwellrun", 3.5));
     bool has_tune = (edit_svc != nullptr && edit_svc->get_value("reqFuel") != nullptr);
-    const char* data_source = has_tune ? "loaded tune" : "no tune loaded";
+    const char* data_source = has_wizard
+        ? "from Engine Setup Wizard" : (has_tune ? "loaded tune" : "no tune loaded");
 
-    // Detect induction topology from tune. boostEnabled is an ENUM
-    // string in the tune — "Off" / "On" / not present. The prior
-    // read_scalar(double) path always returned 0.0 because the value
-    // is a string, not a number.
-    auto boost_str = read_string("boostEnabled");
+    // Detect induction topology. Three sources:
+    //   1. Wizard QSettings (induction > 0 = forced)
+    //   2. Tune's boostEnabled string ("Off" / "On")
+    //   3. Default NA
     bool is_forced_induction = false;
-    if (!boost_str.empty()) {
-        std::string lower = boost_str;
-        for (auto& c : lower) c = static_cast<char>(
-            std::tolower(static_cast<unsigned char>(c)));
-        is_forced_induction = (lower != "off" && lower != "0"
-                               && lower != "no" && lower != "");
+    if (has_wizard) {
+        is_forced_induction = wqs.value("wizard/induction", 0).toInt() > 0;
+    } else {
+        auto boost_str = read_string("boostEnabled");
+        if (!boost_str.empty()) {
+            std::string lower = boost_str;
+            for (auto& c : lower) c = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(c)));
+            is_forced_induction = (lower != "off" && lower != "0"
+                                   && lower != "no" && lower != "");
+        }
     }
     namespace gt = tuner_core::generator_types;
     auto setup_topology = is_forced_induction
@@ -13499,12 +13550,23 @@ QWidget* build_setup_tab(
     // VE table — baseline preview (empty head_flow / manifold =
     // flat corrections so the curve reads as "stock" until the
     // operator specifies otherwise via the wizard).
+    // Read wizard head/manifold/cam context if available; baseline
+    // (empty = no corrections) otherwise.
+    double cam_dur = has_wizard
+        ? wqs.value("wizard/cam_duration", 250.0).toDouble() : 250.0;
+    std::string head_flow = has_wizard
+        ? wqs.value("wizard/head_flow_class", "").toString().toStdString() : "";
+    std::string manifold = has_wizard
+        ? wqs.value("wizard/intake_manifold_style", "").toString().toStdString() : "";
+    bool intercooler = has_wizard
+        ? wqs.value("wizard/intercooler", false).toBool() : is_forced_induction;
+
     vg::VeGeneratorContext ve_ctx;
     ve_ctx.forced_induction_topology = setup_topology;
-    ve_ctx.cam_duration_deg = 250.0;   // stock-ish, idle-friendly
+    ve_ctx.cam_duration_deg = cam_dur;
     ve_ctx.compression_ratio = cr;
-    ve_ctx.head_flow_class = "";
-    ve_ctx.intake_manifold_style = "";
+    ve_ctx.head_flow_class = head_flow;
+    ve_ctx.intake_manifold_style = manifold;
     ve_ctx.cylinder_count = ncyl;
     ve_ctx.displacement_cc = disp;
     ve_ctx.required_fuel_ms = req_fuel;
@@ -13549,7 +13611,7 @@ QWidget* build_setup_tab(
     ag::AfrGeneratorContext afr_ctx;
     afr_ctx.forced_induction_topology = setup_topology;
     afr_ctx.boost_target_kpa = effective_boost_kpa;
-    afr_ctx.intercooler_present = setup_intercooler;
+    afr_ctx.intercooler_present = intercooler;
     auto afr_result = ag::generate(afr_ctx, ag::CalibrationIntent::FIRST_START);
     {
         char afr_title[256];
@@ -13573,7 +13635,7 @@ QWidget* build_setup_tab(
     spark_ctx.forced_induction_topology = setup_topology;
     spark_ctx.compression_ratio = cr;
     spark_ctx.boost_target_kpa = effective_boost_kpa;
-    spark_ctx.intercooler_present = setup_intercooler;
+    spark_ctx.intercooler_present = intercooler;
     spark_ctx.cylinder_count = ncyl;
     spark_ctx.dwell_ms = dwell;
     auto spark_result = sg::generate(spark_ctx, sg::CalibrationIntent::FIRST_START);
@@ -13590,9 +13652,9 @@ QWidget* build_setup_tab(
     // stock-ish 250° cam to match the VE table preview.
     irg::GeneratorContext idle_ctx;
     idle_ctx.forced_induction_topology = setup_topology;
-    idle_ctx.cam_duration_deg = 250.0;
-    idle_ctx.head_flow_class = "";
-    idle_ctx.intake_manifold_style = "";
+    idle_ctx.cam_duration_deg = cam_dur;
+    idle_ctx.head_flow_class = head_flow;
+    idle_ctx.intake_manifold_style = manifold;
     auto idle_result = irg::generate(idle_ctx, irg::CalibrationIntent::FIRST_START);
     {
         char idle_title[256];
