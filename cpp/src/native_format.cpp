@@ -100,7 +100,9 @@ std::string read_file(const std::filesystem::path& path) {
 // shipped without it and the app rejected the operator's project.
 void check_version(const std::string& raw) {
     if (raw.empty()) {
-        return;  // treat as 1.0 — pre-schema-version file
+        std::fprintf(stderr,
+            "[native_format] schema_version missing — treating as 1.0\n");
+        return;
     }
     auto dot = raw.find('.');
     std::string major_str = (dot == std::string::npos) ? raw : raw.substr(0, dot);

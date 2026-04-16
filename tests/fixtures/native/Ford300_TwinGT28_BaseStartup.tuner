@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
   "format": "tuner-tune-v1",
-  "definition": "speeduino 202501-T41",
+  "definition_signature": "speeduino 202501-T41",
   "created": "2026-04-10T00:00:00Z",
   "modified": "2026-04-10T00:00:00Z",
   "values": {

@@ -10252,6 +10252,11 @@ QWidget* build_flash_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
         if (!found.empty()) {
             int idx = port_combo->findText(QString::fromUtf8(found.c_str()));
             if (idx >= 0) port_combo->setCurrentIndex(idx);
+            auto_ports_btn->setToolTip(QString::fromUtf8(
+                ("Found Speeduino on " + found).c_str()));
+        } else {
+            auto_ports_btn->setToolTip(QString::fromUtf8(
+                "No Speeduino detected \xe2\x80\x94 check cable, power, baud"));
         }
         auto_ports_btn->setEnabled(true);
         refresh_ports_btn->setEnabled(true);
@@ -13583,10 +13588,10 @@ QWidget* build_setup_tab(
             char t[512];
             std::snprintf(t, sizeof(t),
                 "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
-                "No tune loaded</span><br>"
+                "Tune not available</span><br>"
                 "<span style='color: %s; font-size: %dpx;'>"
-                "The guided setup cards below are disabled because no tune "
-                "values are available to edit. To populate them:<br>"
+                "The guided setup cards below are disabled because the tune "
+                "either failed to load or has no values. To populate them:<br>"
                 "\xc2\xb7  File \xe2\x86\x92 <b>Open Project</b> and pick a .tuner or .msq<br>"
                 "\xc2\xb7  Or File \xe2\x86\x92 <b>New Project</b> and run the Engine Setup Wizard"
                 "</span>",
@@ -17541,11 +17546,11 @@ public:
                     kCurrentProjectDirKey, "").toString().toStdString();
                 bool inside_project = false;
                 if (!project_dir_str.empty()) {
-                    std::error_code ec;
-                    auto tune_canon = std::filesystem::weakly_canonical(tune_path, ec);
+                    std::error_code ec1, ec2;
+                    auto tune_canon = std::filesystem::weakly_canonical(tune_path, ec1);
                     auto dir_canon = std::filesystem::weakly_canonical(
-                        std::filesystem::path(project_dir_str), ec);
-                    if (!ec) {
+                        std::filesystem::path(project_dir_str), ec2);
+                    if (!ec1 && !ec2) {
                         inside_project = tune_canon.string().rfind(
                             dir_canon.string(), 0) == 0;
                     }
@@ -18639,8 +18644,13 @@ public:
                     {
                         RecentProject new_rp;
                         new_rp.name = name;
-                        new_rp.ini_path = def_path != "(create empty)"
-                            ? def_path : std::string();
+                        // Canonicalize def_path so the recent list
+                        // doesn't store a relative candidate string.
+                        if (def_path != "(create empty)" && !def_path.empty()) {
+                            std::error_code ec;
+                            auto abs = std::filesystem::weakly_canonical(def_path, ec);
+                            new_rp.ini_path = ec ? def_path : abs.string();
+                        }
                         new_rp.msq_path = settings.value(
                             kCurrentProjectTuneKey, "").toString().toStdString();
                         new_rp.signature = "";
@@ -20273,9 +20283,10 @@ int main(int argc, char* argv[]) {
                     auto existing = load_recent_projects();
                     bool found = false;
                     for (const auto& rp : existing) {
-                        if (rp.msq_path == cur.msq_path
-                            && !cur.msq_path.empty()) { found = true; break; }
-                        if (rp.name == cur.name) { found = true; break; }
+                        if (!cur.msq_path.empty()
+                            && rp.msq_path == cur.msq_path) { found = true; break; }
+                        if (cur.msq_path.empty() && rp.msq_path.empty()
+                            && rp.name == cur.name) { found = true; break; }
                     }
                     if (!found) {
                         if (cur.last_opened.empty()) cur.last_opened = today_iso();
