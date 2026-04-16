@@ -1378,7 +1378,15 @@ RecentProject project_from_file(const std::filesystem::path& raw_path) {
             + "\" ini=\"" + rp.ini_path
             + "\" tune=\"" + rp.msq_path + "\"");
         if (rp.msq_path.empty() || !std::filesystem::exists(rp.msq_path)) {
-            throw std::runtime_error(".tunerproj does not point to an existing tune file");
+            std::string msg = ".tunerproj tune path does not exist";
+            if (!rp.msq_path.empty()) {
+                msg += ":\n  raw  = " + project.tune_path;
+                msg += "\n  resolved = " + rp.msq_path;
+            }
+            msg += "\n\nUse File \xe2\x86\x92 Open Project and pick the actual "
+                   ".tuner / .msq file directly, or re-create this project "
+                   "via File \xe2\x86\x92 New Project.";
+            throw std::runtime_error(msg);
         }
         return rp;
     }
@@ -18213,8 +18221,21 @@ public:
 
                 pf::Project out;
                 out.name = proj.name.empty() ? "Speeduino Project" : proj.name;
-                out.definition_path = proj.ini_path;
-                out.tune_path = proj.msq_path;
+                // Canonicalize definition + tune paths to absolute so
+                // the saved .tunerproj remains valid regardless of the
+                // exe's runtime dir. Prior relative strings like
+                // "../../tests/fixtures/..." resolved correctly from
+                // the build/ dir but not from the project's dir,
+                // making TestProject unopenable on restart.
+                auto canon = [](const std::string& p) -> std::string {
+                    if (p.empty()) return p;
+                    std::error_code ec;
+                    auto abs = std::filesystem::weakly_canonical(
+                        std::filesystem::path(p), ec);
+                    return ec ? p : abs.string();
+                };
+                out.definition_path = canon(proj.ini_path);
+                out.tune_path = canon(proj.msq_path);
                 out.firmware_signature = proj.signature;
                 out.last_opened_iso = today_iso();
 
@@ -18390,10 +18411,18 @@ public:
                         "../../../tests/fixtures/native/speeduino-dropbear-v2.0.1-base-tune.tuner",
                         "D:/Documents/JetBrains/Python/Tuner/tests/fixtures/native/speeduino-dropbear-v2.0.1-base-tune.tuner",
                     };
+                    // Canonicalize to an absolute path so the value
+                    // persisted into the project file doesn't depend
+                    // on the exe's runtime directory. Relative-path
+                    // storage bit the TestProject: `../../tests/...`
+                    // resolved from the project dir (not the build/
+                    // dir) pointed at a path that didn't exist.
                     std::string prefill = "(create empty)";
                     for (const char* c : base_tune_candidates) {
-                        if (std::filesystem::exists(c)) {
-                            prefill = c;
+                        std::error_code ec;
+                        if (std::filesystem::exists(c, ec)) {
+                            auto abs = std::filesystem::weakly_canonical(c, ec);
+                            prefill = ec ? std::string(c) : abs.string();
                             break;
                         }
                     }
