@@ -17387,13 +17387,12 @@ public:
         // overrides this whenever a prior session exists.
         resize(1280, 800);
 
-        // Organization / application names feed QSettings — they
-        // decide the registry / ini path the persistence layer uses.
-        // Match `QApplication::setApplicationName("Tuner")` from
-        // main() so every `QSettings(...)` call across the app sees
-        // the same storage.
-        QCoreApplication::setOrganizationName("Cornelio");
-        QCoreApplication::setOrganizationDomain("tuner.local");
+        // Organization + domain now set in main() before the startup
+        // picker so QSettings sees the correct registry path from the
+        // very first access. The setOrganizationName / setApplicationName
+        // calls that used to live here were too late — the startup picker
+        // already ran with an empty org, reading HKCU\Software\Tuner
+        // instead of HKCU\Software\Cornelio\Tuner.
         // Migrate single-entry recent project to multi-entry list.
         migrate_recent_project_keys();
 
@@ -20321,6 +20320,15 @@ int main(int argc, char* argv[]) {
         debug_log("QApplication constructed");
         std::printf("[main] qapp ok\n"); std::fflush(stdout);
         QApplication::setApplicationName("Tuner");
+        // Organization + domain MUST be set before any QSettings access.
+        // Previously these lived in TunerMainWindow::ctor (line ~17395),
+        // but the startup picker runs before the ctor — so QSettings in
+        // the picker read HKCU\Software\Tuner (no org) while the data
+        // lives at HKCU\Software\Cornelio\Tuner. That's why
+        // load_recent_projects returned 0 entries in the picker even
+        // though the registry had recent_count=5 under the correct key.
+        QCoreApplication::setOrganizationName("Cornelio");
+        QCoreApplication::setOrganizationDomain("tuner.local");
         // Dark theme via stylesheet only (no QPalette + Fusion combo, which
         // has been observed to interact badly with the Qt 6.7 prebuilt MinGW
         // DLLs on UCRT 15.2 — see diagnostic notes in file header). Composed
@@ -20440,6 +20448,18 @@ int main(int argc, char* argv[]) {
                 }
             }
             auto recent_proj = load_recent_project();
+            debug_log("startup picker recent_proj name=\""
+                + recent_proj.name + "\" tune=\"" + recent_proj.msq_path
+                + "\" sig=\"" + recent_proj.signature + "\"");
+            {
+                auto all = load_recent_projects();
+                debug_log("startup picker load_recent_projects count="
+                    + std::to_string(all.size()));
+                for (std::size_t i = 0; i < all.size(); ++i) {
+                    debug_log("  recent[" + std::to_string(i) + "] name=\""
+                        + all[i].name + "\" tune=\"" + all[i].msq_path + "\"");
+                }
+            }
             auto* startup = new QDialog;
             startup->setWindowTitle("Tuner \xe2\x80\x94 Welcome");
             startup->setFixedSize(520, 380);
