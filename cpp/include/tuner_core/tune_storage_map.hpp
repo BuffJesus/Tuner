@@ -27,13 +27,15 @@
 // headers for wire-protocol purposes only; they don't override the
 // operator-facing native format when both are present.
 //
-// Grammar (mirrors the firmware header comment). Every entry carries
-// (scale, offset_v) so operator-visible value = raw * scale + offset_v.
+// Grammar (mirrors the firmware header comment). Every static entry
+// carries (scale, offset_v) so operator-visible value = raw * scale +
+// offset_v. Dynamic-scale axes carry a controller_id instead.
 //
-//   TUNE_SCALAR(semantic_id, page, offset, type, scale, offset_v, units, label)
-//   TUNE_AXIS  (semantic_id, page, offset, length, type, scale, offset_v, units, label)
-//   TUNE_TABLE (semantic_id, page, offset, rows, cols, type, scale, offset_v, x_axis_id, y_axis_id, units, label)
-//   TUNE_CURVE (semantic_id, page, offset, length, type, scale, offset_v, x_axis_id, units, label)
+//   TUNE_SCALAR       (semantic_id, page, offset, type, scale, offset_v, units, label)
+//   TUNE_AXIS         (semantic_id, page, offset, length, type, scale, offset_v, units, label)
+//   TUNE_AXIS_DYNAMIC (semantic_id, page, offset, length, type, controller_id, units_hint, label)
+//   TUNE_TABLE        (semantic_id, page, offset, rows, cols, type, scale, offset_v, x_axis_id, y_axis_id, units, label)
+//   TUNE_CURVE        (semantic_id, page, offset, length, type, scale, offset_v, x_axis_id, units, label)
 //
 // Pure-logic. No I/O — callers slurp the file themselves.
 
@@ -46,7 +48,7 @@
 
 namespace tuner_core::tune_storage_map {
 
-enum class Kind { Scalar, Axis, Table, Curve };
+enum class Kind { Scalar, Axis, AxisDynamic, Table, Curve };
 
 struct Entry {
     Kind kind = Kind::Scalar;
@@ -71,6 +73,11 @@ struct Entry {
     std::optional<int> cols;
     std::optional<std::string> x_axis_id;
     std::optional<std::string> y_axis_id;     // table only; nullopt on curves
+
+    // AxisDynamic only: the semantic_id of the scalar whose runtime
+    // value picks the axis's scale/units. The desktop resolves via an
+    // opt-in registry keyed by (this.semantic_id, controller_value).
+    std::optional<std::string> controller_id;
 };
 
 struct Map {

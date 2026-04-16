@@ -123,6 +123,25 @@ void parse_scalar(const std::vector<std::string>& args,
     e.label       = strip_quotes(args[7]);
 }
 
+void parse_axis_dynamic(const std::vector<std::string>& args,
+                        int line_no, Entry& e) {
+    if (args.size() != 8) {
+        throw std::invalid_argument(
+            "tune_storage_map.h line " + std::to_string(line_no)
+            + ": TUNE_AXIS_DYNAMIC expects 8 args, got "
+            + std::to_string(args.size()));
+    }
+    e.kind = Kind::AxisDynamic;
+    e.semantic_id  = args[0];
+    e.page         = parse_int(args[1], line_no);
+    e.offset       = parse_int(args[2], line_no);
+    e.length       = parse_int(args[3], line_no);
+    e.data_type    = args[4];
+    e.controller_id = args[5];
+    e.units        = strip_quotes(args[6]);
+    e.label        = strip_quotes(args[7]);
+}
+
 void parse_axis(const std::vector<std::string>& args,
                 int line_no, Entry& e) {
     if (args.size() != 9) {
