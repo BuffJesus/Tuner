@@ -23,3 +23,4 @@ Release zip so users can easily use everything immediately
 Increasing guidance in the application for users who are not familiar with tuning (alot of overwhelming information available)
 Pressing save project does not default to the folder location specified in the initial setup page for a new project
 Pressing save project does not default to the last folder the project was saved in
+Some naming inconsistencies in the application (VE Table and Second Fuel Table for instance)
