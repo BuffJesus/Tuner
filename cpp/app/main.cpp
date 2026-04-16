@@ -802,6 +802,14 @@ constexpr const char* kCurrentProjectIniKey = "projects/current/ini";
 constexpr const char* kCurrentProjectTuneKey = "projects/current/tune";
 constexpr const char* kCurrentProjectSigKey = "projects/current/sig";
 constexpr const char* kCurrentProjectDateKey = "projects/current/date";
+// Remembered directories for Save dialogs so the operator doesn't
+// start at the OS default every time. `current/dir` captures the
+// active project's on-disk directory (set by New Project and by
+// successful saves); `last_tunerproj_dir` is the last-used Save
+// Project target so #24/#25 stop landing operators in ~/Documents
+// when they have a clear "in this folder" expectation.
+constexpr const char* kCurrentProjectDirKey = "projects/current/dir";
+constexpr const char* kLastTunerprojDirKey = "projects/last_tunerproj_dir";
 std::vector<QPointer<QWidget>> g_retired_windows;
 
 std::filesystem::path selected_ini_path();
@@ -1693,6 +1701,226 @@ private:
     bool dragging_ = false;
 };
 
+// ---------------------------------------------------------------------------
+// EditableCurveChartWidget — live line-chart editor for 1D curves.
+// Paints bins on the X axis and values on the Y axis with a connected
+// polyline + filled area + draggable vertex dots. Click a vertex and
+// drag vertically to change that bin's Y value; `on_value_changed`
+// fires with (index, new_value) so the caller can stage the edit +
+// sync a companion QTableWidget. Read-only when on_value_changed is
+// left null. No Q_OBJECT — uses std::function callbacks.
+// ---------------------------------------------------------------------------
+class EditableCurveChartWidget : public QWidget {
+public:
+    explicit EditableCurveChartWidget(QWidget* parent = nullptr)
+        : QWidget(parent) {
+        setMinimumSize(420, 180);
+        setMouseTracking(true);
+    }
+
+    void set_data(const std::vector<double>& x,
+                  const std::vector<double>& y,
+                  const std::string& x_units,
+                  const std::string& y_units,
+                  double y_min, double y_max) {
+        x_ = x;
+        y_ = y;
+        x_units_ = x_units;
+        y_units_ = y_units;
+        y_min_ = y_min;
+        y_max_ = y_max;
+        update();
+    }
+
+    void set_y_value(std::size_t index, double v) {
+        if (index < y_.size()) {
+            y_[index] = v;
+            update();
+        }
+    }
+
+    void set_accent(const char* accent_hex) {
+        accent_ = accent_hex;
+        update();
+    }
+
+    std::function<void(std::size_t, double)> on_value_changed;
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.fillRect(rect(), QColor(QString::fromUtf8(tt::bg_elevated)));
+
+        if (x_.empty() || y_.empty()) return;
+
+        const int left_pad = 44;
+        const int right_pad = 12;
+        const int top_pad = 10;
+        const int bot_pad = 26;
+        QRectF plot(left_pad, top_pad,
+                    width() - left_pad - right_pad,
+                    height() - top_pad - bot_pad);
+        if (plot.width() <= 0 || plot.height() <= 0) return;
+
+        const std::size_t n = std::min(x_.size(), y_.size());
+        double y_lo = y_min_;
+        double y_hi = y_max_;
+        if (y_hi <= y_lo) {
+            double mn = *std::min_element(y_.begin(), y_.begin() + n);
+            double mx = *std::max_element(y_.begin(), y_.begin() + n);
+            double span = std::max(1.0, mx - mn);
+            y_lo = mn - span * 0.10;
+            y_hi = mx + span * 0.10;
+        }
+        double y_span = std::max(1e-9, y_hi - y_lo);
+
+        p.setPen(QPen(QColor(QString::fromUtf8(tt::border)), 1, Qt::DotLine));
+        for (int i = 0; i <= 4; ++i) {
+            double y = plot.top() + plot.height() * i / 4.0;
+            p.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y));
+            double v = y_hi - y_span * i / 4.0;
+            char yl[32];
+            std::snprintf(yl, sizeof(yl), "%.1f", v);
+            p.setPen(QColor(QString::fromUtf8(tt::text_muted)));
+            QFont af = p.font(); af.setPixelSize(tt::font_micro); p.setFont(af);
+            p.drawText(QRectF(0, y - 8, left_pad - 4, 16),
+                       Qt::AlignRight | Qt::AlignVCenter,
+                       QString::fromUtf8(yl));
+            p.setPen(QPen(QColor(QString::fromUtf8(tt::border)), 1, Qt::DotLine));
+        }
+
+        points_.clear();
+        points_.reserve(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            double xf = (n == 1) ? 0.5
+                : static_cast<double>(i) / static_cast<double>(n - 1);
+            double yf = (y_[i] - y_lo) / y_span;
+            QPointF pt(plot.left() + xf * plot.width(),
+                       plot.bottom() - yf * plot.height());
+            points_.push_back(pt);
+        }
+
+        QColor accent(QString::fromUtf8(accent_));
+        QColor accent_soft = accent; accent_soft.setAlpha(60);
+
+        QPolygonF fill;
+        fill.append(QPointF(points_.front().x(), plot.bottom()));
+        for (const auto& pt : points_) fill.append(pt);
+        fill.append(QPointF(points_.back().x(), plot.bottom()));
+        p.setPen(Qt::NoPen);
+        p.setBrush(accent_soft);
+        p.drawPolygon(fill);
+
+        p.setPen(QPen(accent, 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p.setBrush(Qt::NoBrush);
+        for (std::size_t i = 1; i < points_.size(); ++i)
+            p.drawLine(points_[i - 1], points_[i]);
+
+        for (std::size_t i = 0; i < points_.size(); ++i) {
+            double r = (editing_ && i == drag_index_) ? 5.5 : 3.5;
+            p.setPen(QPen(QColor(QString::fromUtf8(tt::bg_base)), 1.5));
+            p.setBrush(accent);
+            p.drawEllipse(points_[i], r, r);
+        }
+
+        p.setPen(QColor(QString::fromUtf8(tt::text_muted)));
+        QFont af = p.font(); af.setPixelSize(tt::font_micro); p.setFont(af);
+        auto draw_x_label = [&](std::size_t i) {
+            if (i >= x_.size()) return;
+            char xl[40];
+            std::snprintf(xl, sizeof(xl), "%g", x_[i]);
+            p.drawText(
+                QRectF(points_[i].x() - 32, plot.bottom() + 4, 64, 14),
+                Qt::AlignCenter, QString::fromUtf8(xl));
+        };
+        draw_x_label(0);
+        if (n >= 3) draw_x_label(n / 2);
+        if (n >= 2) draw_x_label(n - 1);
+
+        if (!x_units_.empty() || !y_units_.empty()) {
+            char ulbl[64];
+            std::snprintf(ulbl, sizeof(ulbl), "Y %s  \xc2\xb7  X %s",
+                y_units_.c_str(), x_units_.c_str());
+            p.setPen(QColor(QString::fromUtf8(tt::text_dim)));
+            p.drawText(
+                QRectF(plot.left(), plot.bottom() + 14, plot.width(), 12),
+                Qt::AlignRight | Qt::AlignVCenter,
+                QString::fromUtf8(ulbl));
+        }
+    }
+
+    void mousePressEvent(QMouseEvent* ev) override {
+        if (!on_value_changed) return;
+        if (ev->button() != Qt::LeftButton) return;
+        int idx = nearest_vertex(ev->position());
+        if (idx < 0) return;
+        editing_ = true;
+        drag_index_ = static_cast<std::size_t>(idx);
+        apply_drag(ev->position());
+    }
+
+    void mouseMoveEvent(QMouseEvent* ev) override {
+        if (!editing_) return;
+        apply_drag(ev->position());
+    }
+
+    void mouseReleaseEvent(QMouseEvent*) override {
+        editing_ = false;
+        update();
+    }
+
+private:
+    int nearest_vertex(QPointF pos) const {
+        int best = -1;
+        double best_d = 20.0;
+        for (std::size_t i = 0; i < points_.size(); ++i) {
+            double dx = points_[i].x() - pos.x();
+            double dy = points_[i].y() - pos.y();
+            double d = std::sqrt(dx * dx + dy * dy);
+            if (d < best_d) { best_d = d; best = static_cast<int>(i); }
+        }
+        return best;
+    }
+
+    void apply_drag(QPointF pos) {
+        if (drag_index_ >= y_.size()) return;
+        const int top_pad = 10;
+        const int bot_pad = 26;
+        double plot_top = top_pad;
+        double plot_bot = height() - bot_pad;
+        double plot_h = plot_bot - plot_top;
+        if (plot_h <= 0) return;
+
+        double y_lo = y_min_, y_hi = y_max_;
+        if (y_hi <= y_lo) {
+            double mn = *std::min_element(y_.begin(), y_.end());
+            double mx = *std::max_element(y_.begin(), y_.end());
+            double span = std::max(1.0, mx - mn);
+            y_lo = mn - span * 0.10;
+            y_hi = mx + span * 0.10;
+        }
+        double yf = (plot_bot - pos.y()) / plot_h;
+        if (yf < 0.0) yf = 0.0;
+        if (yf > 1.0) yf = 1.0;
+        double new_v = y_lo + yf * (y_hi - y_lo);
+        y_[drag_index_] = new_v;
+        update();
+        if (on_value_changed) on_value_changed(drag_index_, new_v);
+    }
+
+    std::vector<double> x_;
+    std::vector<double> y_;
+    std::string x_units_;
+    std::string y_units_;
+    double y_min_ = 0.0;
+    double y_max_ = 0.0;
+    const char* accent_ = tt::accent_primary;
+    mutable std::vector<QPointF> points_;
+    bool editing_ = false;
+    std::size_t drag_index_ = 0;
+};
+
 // Event filter for click / double-click / drag on heatmap cells.
 // Single click: select cell (Shift extends selection range).
 // Double click: open inline editor overlay.
@@ -1812,6 +2040,18 @@ const char* page_context_hint(const std::string& display_title) {
         return "Flex-fuel sensor configuration.\nAllows automatic fuel and timing adjustment based on ethanol content.";
     if (lower.find("trigger") != std::string::npos || lower.find("decoder") != std::string::npos)
         return "Trigger wheel and decoder configuration.\nMust match your physical crank/cam wheel exactly for sync.";
+    // Injector close angles / injection timing — must match BEFORE the
+    // broader "injector" hint below, otherwise it gets swallowed by the
+    // hardware-characteristics fallback.
+    if (lower.find("injector close") != std::string::npos
+        || lower.find("injector timing") != std::string::npos
+        || lower.find("injection angle") != std::string::npos
+        || lower.find("inj timing") != std::string::npos)
+        return "Injector close angle (degrees BTDC) per bank or channel.\n"
+               "355\xc2\xb0 is the firmware default \xe2\x80\x94 a safe, conservative "
+               "starting point. Most engines run well at the default until "
+               "VE tuning is stable; revisit only if spray-pattern timing "
+               "against the intake valve becomes limiting.";
     if (lower.find("injector") != std::string::npos || lower.find("inj char") != std::string::npos)
         return "Injector hardware characteristics.\nDead time and flow rate directly affect fueling accuracy.";
     if (lower.find("engine constant") != std::string::npos)
@@ -1856,7 +2096,8 @@ QWidget* render_1d_curve(const std::vector<double>& bins,
                           const std::vector<double>& values,
                           const char* title_text,
                           const char* units,
-                          const char* accent);
+                          const char* accent = tt::accent_primary,
+                          const char* x_units = "\xc2\xb0""C");
 
 // ---------------------------------------------------------------------------
 // Connect dialog — lets operator pick Serial (COM port + baud) or TCP
@@ -1899,6 +2140,7 @@ bool open_connect_dialog(QWidget* parent,
     auto* transport_combo = new QComboBox;
     transport_combo->addItem("Serial");
     transport_combo->addItem("TCP / WiFi");
+    // Restore below after last_transport is read from QSettings.
     type_row->addWidget(transport_combo, 1);
     layout->addLayout(type_row);
 
@@ -1907,6 +2149,19 @@ bool open_connect_dialog(QWidget* parent,
     auto* serial_layout = new QVBoxLayout(serial_group);
     serial_layout->setContentsMargins(0, 0, 0, 0);
     serial_layout->setSpacing(tt::space_sm);
+
+    // Remembered serial + TCP selections from the last successful
+    // connect attempt so the dialog doesn't force re-entry each time.
+    // Keys match the existing "session/..." namespace convention.
+    QSettings conn_qs;
+    auto last_port = conn_qs.value("session/last_serial_port", "").toString();
+    auto last_baud = conn_qs.value("session/last_serial_baud", "115200").toString();
+    auto last_host = conn_qs.value("session/last_tcp_host",
+                                    "speeduino.local").toString();
+    auto last_tcp_port = conn_qs.value("session/last_tcp_port", "2000").toString();
+    auto last_transport = conn_qs.value("session/last_transport", 0).toInt();
+    if (last_transport >= 0 && last_transport < transport_combo->count())
+        transport_combo->setCurrentIndex(last_transport);
 
     auto* port_row = new QHBoxLayout;
     port_row->addWidget(new QLabel("Port:"));
@@ -1917,6 +2172,12 @@ bool open_connect_dialog(QWidget* parent,
         port_combo->addItem(QString::fromUtf8(p.c_str()));
     if (ports.empty())
         port_combo->addItem("COM3");
+    // Restore the last-used port if it's still enumerated.
+    if (!last_port.isEmpty()) {
+        int idx = port_combo->findText(last_port);
+        if (idx >= 0) port_combo->setCurrentIndex(idx);
+        else port_combo->setEditText(last_port);
+    }
     port_row->addWidget(port_combo, 1);
 
     // Refresh button.
@@ -1936,7 +2197,30 @@ bool open_connect_dialog(QWidget* parent,
         if (idx >= 0) port_combo->setCurrentIndex(idx);
     });
     port_row->addWidget(refresh_btn);
+
+    // Auto-detect button — probes each enumerated COM port at the
+    // Speeduino default baud looking for a signature response. First
+    // match wins and auto-fills the combo. Keeps the search fast by
+    // trying only 115200 (the most common setting); operators on
+    // other bauds can fall back to manual + baud combo.
+    auto* autodetect_btn = new QPushButton(QString::fromUtf8("Auto"));
+    autodetect_btn->setFixedWidth(56);
+    autodetect_btn->setToolTip(QString::fromUtf8(
+        "Probe each COM port at 115200 baud for a Speeduino signature"));
+    port_row->addWidget(autodetect_btn);
     serial_layout->addLayout(port_row);
+
+    // Probe status line below the port row — used by the auto-detect
+    // flow so the operator sees per-port progress during the scan.
+    auto* probe_status = new QLabel;
+    {
+        char s[128];
+        std::snprintf(s, sizeof(s),
+            "QLabel { color: %s; font-size: %dpx; }",
+            tt::text_muted, tt::font_small);
+        probe_status->setStyleSheet(QString::fromUtf8(s));
+    }
+    serial_layout->addWidget(probe_status);
 
     auto* baud_row = new QHBoxLayout;
     baud_row->addWidget(new QLabel("Baud:"));
@@ -1945,10 +2229,78 @@ bool open_connect_dialog(QWidget* parent,
     baud_combo->addItem("230400");
     baud_combo->addItem("57600");
     baud_combo->addItem("9600");
-    baud_combo->setCurrentIndex(0);
+    // Restore last-used baud.
+    {
+        int bidx = baud_combo->findText(last_baud);
+        baud_combo->setCurrentIndex(bidx >= 0 ? bidx : 0);
+    }
     baud_row->addWidget(baud_combo, 1);
     serial_layout->addLayout(baud_row);
     layout->addWidget(serial_group);
+
+    // Wire the auto-detect click handler now that baud_combo exists.
+    QObject::connect(autodetect_btn, &QPushButton::clicked,
+                     [port_combo, baud_combo, autodetect_btn,
+                      refresh_btn, probe_status]() {
+        auto ports = list_serial_ports();
+        if (ports.empty()) {
+            probe_status->setText(QString::fromUtf8(
+                "No COM ports enumerated"));
+            return;
+        }
+        autodetect_btn->setEnabled(false);
+        refresh_btn->setEnabled(false);
+
+        std::string found_port;
+        for (const auto& p : ports) {
+            char m[128];
+            std::snprintf(m, sizeof(m), "Probing %s @ 115200\xe2\x80\xa6", p.c_str());
+            probe_status->setText(QString::fromUtf8(m));
+            QApplication::processEvents();
+            try {
+                auto transport = std::make_unique<
+                    tuner_core::transport::SerialTransport>(p, 115200);
+                tuner_core::speeduino_controller::SpeeduinoController probe(
+                    std::move(transport));
+                // Single-baud probe, short settle. On mismatch / no
+                // response, connect() throws and we move on.
+                auto info = probe.connect({115200}, 'Q', 0.5, nullptr);
+                std::string sig = info.signature;
+                std::string lower = sig;
+                for (auto& c : lower) c = static_cast<char>(
+                    std::tolower(static_cast<unsigned char>(c)));
+                if (lower.find("speeduino") != std::string::npos) {
+                    found_port = p;
+                    probe.disconnect();
+                    break;
+                }
+                probe.disconnect();
+            } catch (...) {
+                // Port busy, no response, or wrong baud — continue.
+            }
+        }
+
+        if (!found_port.empty()) {
+            int idx = port_combo->findText(QString::fromUtf8(found_port.c_str()));
+            if (idx < 0) {
+                port_combo->addItem(QString::fromUtf8(found_port.c_str()));
+                idx = port_combo->count() - 1;
+            }
+            port_combo->setCurrentIndex(idx);
+            int baud_idx = baud_combo->findText(QString::fromUtf8("115200"));
+            if (baud_idx >= 0) baud_combo->setCurrentIndex(baud_idx);
+            char m[128];
+            std::snprintf(m, sizeof(m),
+                "\xe2\x9c\x85 Found Speeduino on %s @ 115200",
+                found_port.c_str());
+            probe_status->setText(QString::fromUtf8(m));
+        } else {
+            probe_status->setText(QString::fromUtf8(
+                "No Speeduino detected \xe2\x80\x94 check cable, power, and baud"));
+        }
+        autodetect_btn->setEnabled(true);
+        refresh_btn->setEnabled(true);
+    });
 
     // TCP fields.
     auto* tcp_group = new QWidget;
@@ -1959,14 +2311,14 @@ bool open_connect_dialog(QWidget* parent,
     auto* host_row = new QHBoxLayout;
     host_row->addWidget(new QLabel("Host:"));
     auto* host_edit = new QLineEdit;
-    host_edit->setText("speeduino.local");
+    host_edit->setText(last_host);
     host_row->addWidget(host_edit, 1);
     tcp_layout->addLayout(host_row);
 
     auto* tcp_port_row = new QHBoxLayout;
     tcp_port_row->addWidget(new QLabel("Port:"));
     auto* tcp_port_edit = new QLineEdit;
-    tcp_port_edit->setText("2000");
+    tcp_port_edit->setText(last_tcp_port);
     tcp_port_row->addWidget(tcp_port_edit, 1);
     tcp_layout->addLayout(tcp_port_row);
 
@@ -2159,6 +2511,27 @@ bool open_connect_dialog(QWidget* parent,
 
             ecu_conn->info = info;
             ecu_conn->connected = true;
+
+            // Persist the successful-connect parameters so the next
+            // Connect dialog open starts with the same values. We
+            // only write after the probe succeeds — a failed attempt
+            // shouldn't overwrite a previously-good config.
+            {
+                QSettings persist;
+                persist.setValue("session/last_transport",
+                                 transport_combo->currentIndex());
+                if (transport_combo->currentIndex() == 0) {
+                    persist.setValue("session/last_serial_port",
+                                     port_combo->currentText());
+                    persist.setValue("session/last_serial_baud",
+                                     baud_combo->currentText());
+                } else {
+                    persist.setValue("session/last_tcp_host",
+                                     host_edit->text());
+                    persist.setValue("session/last_tcp_port",
+                                     tcp_port_edit->text());
+                }
+            }
 
             // Two capability queries on connect. Both are non-fatal;
             // any exception leaves the relevant struct at defaults
@@ -2529,6 +2902,74 @@ QWidget* build_tune_tab(
     search->setClearButtonEnabled(true);
     left_layout->addWidget(search);
 
+    // Kind filter — which leaf kinds show in the tree. Hoisted up
+    // here so the toggle buttons below and the rebuild_tree lambda
+    // further down share the same shared_ptr state.
+    auto enabled_kinds = std::make_shared<std::set<char>>(
+        std::set<char>{'s', 't', 'c'});
+
+    // Kind-filter toggle row above the search. Three chip-style
+    // checkable buttons with the same icons the tree leaves use, so
+    // the visual grammar matches (scalar pill / table grid / curve
+    // sweep). Operator can narrow a large definition to just tables
+    // or just curves with one click. Clicking a button's icon area
+    // or label toggles its kind in `enabled_kinds`; rebuild_tree is
+    // then re-fired with the current search text so name + kind
+    // filters compose. All three are enabled by default.
+    auto* filter_row = new QHBoxLayout;
+    filter_row->setContentsMargins(0, 0, 0, tt::space_xs);
+    filter_row->setSpacing(tt::space_xs);
+    auto* filter_label = new QLabel(QString::fromUtf8("Filter:"));
+    {
+        char s[96];
+        std::snprintf(s, sizeof(s),
+            "QLabel { color: %s; font-size: %dpx; }",
+            tt::text_muted, tt::font_small);
+        filter_label->setStyleSheet(QString::fromUtf8(s));
+    }
+    filter_row->addWidget(filter_label);
+    auto make_kind_btn = [](char kind, const char* label_text) {
+        auto* btn = new QPushButton(QString::fromUtf8(label_text));
+        btn->setCheckable(true);
+        btn->setChecked(true);
+        btn->setCursor(Qt::PointingHandCursor);
+        btn->setIcon(make_tree_leaf_icon(kind, tt::accent_primary));
+        btn->setIconSize(QSize(14, 14));
+        char bs[512];
+        std::snprintf(bs, sizeof(bs),
+            "QPushButton { background: %s; color: %s; border: 1px solid %s; "
+            "border-radius: %dpx; padding: 2px %dpx; font-size: %dpx; } "
+            "QPushButton:checked { background: %s; color: %s; border-color: %s; } "
+            "QPushButton:!checked { color: %s; } "
+            "QPushButton:hover { border-color: %s; }",
+            tt::bg_elevated, tt::text_secondary, tt::border,
+            tt::radius_sm, tt::space_sm, tt::font_small,
+            tt::fill_primary_mid, tt::text_primary, tt::accent_primary,
+            tt::text_dim, tt::accent_primary);
+        btn->setStyleSheet(QString::fromUtf8(bs));
+        return btn;
+    };
+    auto* kind_scalar_btn = make_kind_btn('s', "Scalars");
+    auto* kind_table_btn  = make_kind_btn('t', "Tables");
+    auto* kind_curve_btn  = make_kind_btn('c', "Curves");
+    filter_row->addWidget(kind_scalar_btn);
+    filter_row->addWidget(kind_table_btn);
+    filter_row->addWidget(kind_curve_btn);
+    filter_row->addStretch(1);
+    left_layout->addLayout(filter_row);
+
+    // Wire the toggles — mutate `enabled_kinds` and re-fire the
+    // existing search path so name + kind filters compose.
+    auto wire_kind_btn = [enabled_kinds, search](QPushButton* btn, char kind,
+                                                  const std::function<void(const std::string&)>& refire) {
+        QObject::connect(btn, &QPushButton::toggled,
+                         [enabled_kinds, search, kind, refire](bool on) {
+            if (on) enabled_kinds->insert(kind);
+            else    enabled_kinds->erase(kind);
+            refire(search->text().toStdString());
+        });
+    };
+
     auto* tree = new QTreeWidget;
     tree->setHeaderHidden(true);
     tree->setAnimated(true);
@@ -2644,7 +3085,9 @@ QWidget* build_tune_tab(
     detail_label->setText(QString::fromUtf8(
         "Pick a page from the tree on the left to see its parameters, "
         "table, or curve.  \xc2\xb7  Press Ctrl+K to search by name.  "
-        "\xc2\xb7  Press F1 for every keyboard shortcut."));
+        "\xc2\xb7  Press F1 for every keyboard shortcut.  "
+        "\xc2\xb7  New to tuning? File \xe2\x86\x92 <b>New Project</b> runs the "
+        "Engine Setup Wizard to generate a complete starter tune."));
     right_layout->addWidget(detail_label);
 
     // Scrollable form area for parameter fields.
@@ -2678,6 +3121,13 @@ QWidget* build_tune_tab(
         std::string base_text;
     };
     auto visible_editors = std::make_shared<std::unordered_map<std::string, EditorEntry>>();
+
+    // Cross-dialog state: how many power-cycle-required params landed
+    // in RAM via the last Write. Set by the Write-to-RAM handler,
+    // consumed by the Burn handler to offer an auto-reboot once the
+    // values reach flash. Persists across review-dialog open/close so
+    // the Write and Burn flows can run in separate dialogs.
+    auto pending_reboot_count = std::make_shared<int>(0);
 
     // Workspace state machine — tracks staged edits per page. Owned
     // by MainWindow now (sub-slice 92) so the sidebar's "N staged"
@@ -2995,7 +3445,9 @@ QWidget* build_tune_tab(
             std::snprintf(msg, sizeof(msg),
                 "Pick a page from the tree on the left to see its parameters, "
                 "table, or curve.  \xc2\xb7  Press Ctrl+K to search by name.  "
-                "\xc2\xb7  Press F1 for every keyboard shortcut.");
+                "\xc2\xb7  Press F1 for every keyboard shortcut.  "
+                "\xc2\xb7  New to tuning? File \xe2\x86\x92 <b>New Project</b> runs the "
+                "Engine Setup Wizard to generate a complete starter tune.");
         }
         detail_label->setText(QString::fromUtf8(msg));
         if (has_project) {
@@ -3023,6 +3475,7 @@ QWidget* build_tune_tab(
         std::string target;
         std::string base_label;
         int subgroup_index = -1;  // -1 = leaf is direct child of group
+        char kind = 's';          // 's' scalar, 't' table, 'c' curve
     };
     struct TreeGroupRef {
         QTreeWidgetItem* group;
@@ -3034,7 +3487,8 @@ QWidget* build_tune_tab(
     };
     auto tree_refs = std::make_shared<std::vector<TreeGroupRef>>();
 
-    auto rebuild_tree = [tree, item_info, all_groups, tree_refs](const std::string& needle) {
+    auto rebuild_tree = [tree, item_info, all_groups, tree_refs,
+                         enabled_kinds](const std::string& needle) {
         // First call: build the tree.
         if (tree_refs->empty()) {
             for (const auto& grp : *all_groups) {
@@ -3202,7 +3656,7 @@ QWidget* build_tune_tab(
                         leaf->setToolTip(0, QString::fromUtf8(pg.target.c_str()));
                     (*item_info)[leaf] = {pg.display, pg.target};
                     ref.leaves.push_back({leaf, pg.display, pg.target,
-                                           label_only, subgroup_slot});
+                                           label_only, subgroup_slot, kind});
                 }
                 tree_refs->push_back(std::move(ref));
             }
@@ -3219,12 +3673,19 @@ QWidget* build_tune_tab(
         }
         // Subsequent calls: show/hide. Subgroup visibility is derived
         // from its leaves — an empty subgroup hides so a narrow search
-        // doesn't leave phantom headers behind.
+        // doesn't leave phantom headers behind. When a kind filter is
+        // active (not all three kinds enabled), we treat that as a
+        // narrowing filter equivalent to a search needle so empty
+        // groups/subgroups collapse the same way.
+        bool kind_filter_active = enabled_kinds->size() < 3;
+        bool narrowing = !needle.empty() || kind_filter_active;
         for (auto& ref : *tree_refs) {
             std::vector<int> per_subgroup_visible(ref.subgroups.size(), 0);
             int total_visible = 0;
             for (auto& lf : ref.leaves) {
-                bool match = needle.empty() || icontains(lf.title, needle);
+                bool name_match = needle.empty() || icontains(lf.title, needle);
+                bool kind_match = enabled_kinds->count(lf.kind) > 0;
+                bool match = name_match && kind_match;
                 lf.item->setHidden(!match);
                 if (match) {
                     total_visible++;
@@ -3235,12 +3696,12 @@ QWidget* build_tune_tab(
             }
             for (std::size_t i = 0; i < ref.subgroups.size(); ++i) {
                 ref.subgroups[i]->setHidden(
-                    per_subgroup_visible[i] == 0 && !needle.empty());
-                if (!needle.empty() && per_subgroup_visible[i] > 0)
+                    per_subgroup_visible[i] == 0 && narrowing);
+                if (narrowing && per_subgroup_visible[i] > 0)
                     ref.subgroups[i]->setExpanded(true);
             }
-            ref.group->setHidden(total_visible == 0 && !needle.empty());
-            ref.group->setExpanded(!needle.empty() && total_visible > 0);
+            ref.group->setHidden(total_visible == 0 && narrowing);
+            ref.group->setExpanded(narrowing && total_visible > 0);
         }
     };
 
@@ -3351,6 +3812,12 @@ QWidget* build_tune_tab(
             // with operator-friendly labels.
             auto humanize = [](const std::string& raw) -> std::string {
                 // Known replacements.
+                // Naming rule: primary table has no suffix; a paired
+                // secondary table adds " 2" for consistency. Prior to
+                // this, the primaries were unsuffixed but the
+                // secondaries were "Second Fuel Table" / "Second Spark
+                // Table" — which read as a different thing rather than
+                // "the second one" and made tree scanning harder.
                 static const std::vector<std::pair<std::string, std::string>> known = {
                     {"veTableDialog", "VE Table"},
                     {"advanceTableDialog", "Spark Advance Table"},
@@ -3359,8 +3826,8 @@ QWidget* build_tune_tab(
                     {"boostTableDialog", "Boost Target Table"},
                     {"boostDutyDialog", "Boost Duty Table"},
                     {"vvtTableDialog", "VVT Target Table"},
-                    {"fuelTable2Dialog", "Second Fuel Table"},
-                    {"sparkTable2Dialog", "Second Spark Table"},
+                    {"fuelTable2Dialog", "VE Table 2"},
+                    {"sparkTable2Dialog", "Spark Advance Table 2"},
                     {"idleUpDown", "Idle Control"},
                     {"accelEnrichDialog", "Acceleration Enrichment"},
                     {"engineConstants", "Engine Constants"},
@@ -3518,6 +3985,16 @@ QWidget* build_tune_tab(
                     needle.clear();
                 rebuild_tree(needle);
             });
+
+            // Wire the kind-filter toggles now that rebuild_tree is in
+            // scope. Each toggle mutates `enabled_kinds` and re-fires
+            // rebuild_tree with the current search text so name + kind
+            // filters compose. See wire_kind_btn lambda above.
+            std::function<void(const std::string&)> refire_rebuild =
+                [rebuild_tree](const std::string& n) { rebuild_tree(n); };
+            wire_kind_btn(kind_scalar_btn, 's', refire_rebuild);
+            wire_kind_btn(kind_table_btn,  't', refire_rebuild);
+            wire_kind_btn(kind_curve_btn,  'c', refire_rebuild);
 
             // Save tree expansion state on every expand/collapse so the
             // next launch restores the same group visibility.
@@ -4243,6 +4720,35 @@ QWidget* build_tune_tab(
                 std::snprintf(info, sizeof(info), "%s", context_hint);
             else
                 std::snprintf(info, sizeof(info), "Table with %d supporting field(s).", field_count);
+            // Contextual cylinder/channel-count note on fuel trim
+            // pages. The firmware only ships four fuel-trim tables
+            // (output channels 1–4); a 6-cylinder (or more) engine
+            // doesn't get a per-cylinder trim. Surface the mapping
+            // so operators don't assume "Trim 5 / Trim 6" is hiding.
+            {
+                std::string tl = title_str;
+                for (auto& c : tl) c = static_cast<char>(
+                    std::tolower(static_cast<unsigned char>(c)));
+                if (tl.find("fuel trim") != std::string::npos
+                    || tl.find("fueltrim") != std::string::npos) {
+                    int ncyl = 0;
+                    if (auto* tv = edit_svc->get_value("nCylinders")) {
+                        if (std::holds_alternative<double>(tv->value))
+                            ncyl = static_cast<int>(std::get<double>(tv->value));
+                    }
+                    if (ncyl > 4) {
+                        std::size_t cur = std::strlen(info);
+                        std::snprintf(info + cur, sizeof(info) - cur,
+                            "\n\xe2\x9a\xa0 Firmware only exposes 4 fuel-trim "
+                            "channels. On a %d-cylinder engine each trim "
+                            "table maps to injector output 1\xe2\x80\x93" "4 per the "
+                            "Injection Layout setting \xe2\x80\x94 NOT to a "
+                            "specific cylinder. Expect shared trims where "
+                            "multiple cylinders share an output.",
+                            ncyl);
+                    }
+                }
+            }
         } else {
             int field_count = 0;
             for (const auto& s : page.sections) field_count += static_cast<int>(s.fields.size());
@@ -4370,6 +4876,19 @@ QWidget* build_tune_tab(
                     }
                 }
 
+                // Power-cycle marker — the INI's `[ConstantsExtensions]`
+                // `requiresPowerCycle` list names parameters that only
+                // take effect after the ECU reboots. Surface this on
+                // both the tooltip and a small inline chip so the
+                // operator doesn't stage a silent no-op.
+                bool needs_power_cycle =
+                    ecu_def->constants_extensions.requires_power_cycle
+                        .count(f.parameter_name) > 0;
+                if (needs_power_cycle) {
+                    tooltip_text +=
+                        " \xc2\xb7 \xe2\x9a\xa0 Requires ECU power cycle after burn";
+                }
+
                 // Label — humanize the field label.
                 std::string display_label = f.label.empty()
                     ? humanize_param(f.parameter_name) : f.label;
@@ -4378,6 +4897,23 @@ QWidget* build_tune_tab(
                 label->setFixedWidth(180);
                 label->setToolTip(QString::fromUtf8(tooltip_text.c_str()));
                 row->addWidget(label);
+
+                if (needs_power_cycle) {
+                    auto* pc_chip = new QLabel(QString::fromUtf8("\xe2\x9f\xb3"));
+                    char chip_style[256];
+                    std::snprintf(chip_style, sizeof(chip_style),
+                        "QLabel { color: %s; background: %s; "
+                        "border: 1px solid %s; border-radius: %dpx; "
+                        "padding: 0px 4px; font-size: %dpx; }",
+                        tt::accent_warning, tt::bg_inset, tt::border,
+                        tt::radius_sm, tt::font_micro);
+                    pc_chip->setStyleSheet(QString::fromUtf8(chip_style));
+                    pc_chip->setToolTip(QString::fromUtf8(
+                        "Changes take effect only after the ECU is "
+                        "power-cycled. Burn, then disconnect and "
+                        "reconnect power to the ECU."));
+                    row->addWidget(pc_chip);
+                }
 
                 // Value editor or display.
                 auto* tv = edit_svc->get_value(f.parameter_name);
@@ -4741,41 +5277,163 @@ QWidget* build_tune_tab(
                             vl->addWidget(yll);
                         }
 
-                        // Bar chart — rendered via render_1d_curve. We
-                        // keep a pointer to the bar chart widget and a
-                        // shared y-values vector so editing a Y value
-                        // can rebuild the bar chart in-place.
-                        QWidget* bar_widget = nullptr;
+                        // Live-editable line-chart — click + drag a
+                        // vertex to change its Y value. The chart and
+                        // the QLineEdit table below it edit the same
+                        // underlying list, so touching either surface
+                        // keeps both in sync.
                         auto live_y = std::make_shared<std::vector<double>>(y_vals);
                         auto live_x = std::make_shared<std::vector<double>>(x_vals);
                         std::string curve_y_label_str = curve.y_label;
+                        std::string curve_x_label_str = curve.x_label;
+
+                        EditableCurveChartWidget* chart = nullptr;
+                        // Per-row QLineEdit* pointers collected below so
+                        // a chart-driven edit can write text into the
+                        // matching table cell.
+                        auto row_edits = std::make_shared<std::vector<QLineEdit*>>();
+                        // Snapshot of the base (un-edited) Y values so
+                        // the "Revert" button can restore them. Taken
+                        // before the chart is drawn so any edits the
+                        // operator makes this session can be undone.
+                        auto base_y = std::make_shared<std::vector<double>>(y_vals);
+
+                        double chart_y_min = 0.0, chart_y_max = 0.0;
+                        if (curve.y_axis.has_value()) {
+                            chart_y_min = curve.y_axis->min;
+                            chart_y_max = curve.y_axis->max;
+                        }
                         if (!x_vals.empty()) {
-                            bar_widget = render_1d_curve(x_vals, y_vals,
-                                "", curve.y_label.c_str(), tt::accent_primary);
-                            vl->addWidget(bar_widget);
+                            // Curve transform controls — sit above the
+                            // chart so they're discoverable before the
+                            // operator starts dragging. Each button
+                            // runs a pure transform on live_y, then
+                            // stages every changed cell through the
+                            // same stage_list_cell path the drag +
+                            // table editors use.
+                            std::string y_param = yb.param;
+                            std::string pt = target;
+                            auto* ctrl_row = new QHBoxLayout;
+                            ctrl_row->setContentsMargins(0, 0, 0, tt::space_xs);
+                            ctrl_row->setSpacing(tt::space_xs);
+                            auto make_ctrl = [](const char* label) {
+                                auto* b = new QPushButton(QString::fromUtf8(label));
+                                b->setCursor(Qt::PointingHandCursor);
+                                char bs[384];
+                                std::snprintf(bs, sizeof(bs),
+                                    "QPushButton { background: %s; color: %s; "
+                                    "border: 1px solid %s; border-radius: %dpx; "
+                                    "padding: 2px %dpx; font-size: %dpx; } "
+                                    "QPushButton:hover { background: %s; border-color: %s; }",
+                                    tt::bg_elevated, tt::text_secondary,
+                                    tt::border, tt::radius_sm,
+                                    tt::space_sm, tt::font_small,
+                                    tt::fill_primary_mid, tt::accent_primary);
+                                b->setStyleSheet(QString::fromUtf8(bs));
+                                return b;
+                            };
+                            auto* smooth_btn = make_ctrl("Smooth");
+                            smooth_btn->setToolTip(QString::fromUtf8(
+                                "3-point moving average \xe2\x80\x94 softens spikes without "
+                                "moving the endpoints. Stages a change per bin."));
+                            auto* interp_btn = make_ctrl("Interpolate");
+                            interp_btn->setToolTip(QString::fromUtf8(
+                                "Replace every intermediate bin with a "
+                                "straight line from first Y to last Y."));
+                            auto* revert_btn = make_ctrl("Revert");
+                            revert_btn->setToolTip(QString::fromUtf8(
+                                "Restore the original Y values as they "
+                                "were when this page was opened."));
+                            ctrl_row->addWidget(smooth_btn);
+                            ctrl_row->addWidget(interp_btn);
+                            ctrl_row->addWidget(revert_btn);
+                            ctrl_row->addStretch(1);
+                            vl->addLayout(ctrl_row);
+
+                            chart = new EditableCurveChartWidget;
+                            chart->setFixedHeight(220);
+                            chart->set_accent(tt::accent_primary);
+                            chart->set_data(x_vals, y_vals,
+                                curve.x_label, curve.y_label,
+                                chart_y_min, chart_y_max);
+                            vl->addWidget(chart);
+
+                            // Shared apply path: stages every changed
+                            // index and resyncs chart + row_edits.
+                            // Stored behind a shared function pointer
+                            // so each control-row handler captures a
+                            // single pointer rather than 10+ values —
+                            // keeps the lambda nesting flat.
+                            auto apply_transform = std::make_shared<
+                                std::function<void(const std::vector<double>&)>>();
+                            *apply_transform =
+                                [chart, live_y, row_edits, y_param, pt,
+                                 edit_svc, workspace, on_staged_changed,
+                                 refresh_page_chip, refresh_review_button,
+                                 refresh_tree_state_indicators](
+                                    const std::vector<double>& new_vals) {
+                                std::size_t n = std::min(new_vals.size(),
+                                                         live_y->size());
+                                for (std::size_t i = 0; i < n; ++i) {
+                                    if ((*live_y)[i] == new_vals[i]) continue;
+                                    try {
+                                        edit_svc->stage_list_cell(
+                                            y_param, static_cast<int>(i),
+                                            new_vals[i]);
+                                    } catch (...) { continue; }
+                                    (*live_y)[i] = new_vals[i];
+                                    if (chart) chart->set_y_value(i, new_vals[i]);
+                                    if (i < row_edits->size() && (*row_edits)[i]) {
+                                        char b[24];
+                                        std::snprintf(b, sizeof(b), "%.4g", new_vals[i]);
+                                        (*row_edits)[i]->setText(QString::fromUtf8(b));
+                                    }
+                                }
+                                workspace->stage_edit(pt, y_param);
+                                (*refresh_page_chip)(pt);
+                                (*refresh_review_button)();
+                                (*refresh_tree_state_indicators)();
+                                if (on_staged_changed) on_staged_changed();
+                            };
+
+                            QObject::connect(smooth_btn, &QPushButton::clicked,
+                                             [live_y, apply_transform]() {
+                                const auto& src = *live_y;
+                                if (src.size() < 3) return;
+                                std::vector<double> out = src;
+                                for (std::size_t i = 1; i + 1 < src.size(); ++i)
+                                    out[i] = (src[i - 1] + src[i] + src[i + 1]) / 3.0;
+                                (*apply_transform)(out);
+                            });
+                            QObject::connect(interp_btn, &QPushButton::clicked,
+                                             [live_y, apply_transform]() {
+                                const auto& src = *live_y;
+                                if (src.size() < 2) return;
+                                double a = src.front();
+                                double b = src.back();
+                                std::vector<double> out(src.size());
+                                for (std::size_t i = 0; i < src.size(); ++i) {
+                                    double t = static_cast<double>(i) /
+                                        static_cast<double>(src.size() - 1);
+                                    out[i] = a + (b - a) * t;
+                                }
+                                (*apply_transform)(out);
+                            });
+                            QObject::connect(revert_btn, &QPushButton::clicked,
+                                             [base_y, apply_transform]() {
+                                (*apply_transform)(*base_y);
+                            });
                         }
 
-                        // Lambda that rebuilds the bar chart after a Y edit.
-                        auto refresh_curve_bar = [vl, &bar_widget, live_x, live_y, curve_y_label_str]() {
-                            // Can't delete widgets in handlers — hide the
-                            // old one and insert a new one at the same position.
-                            // The bar chart is always at index 2 in the card
-                            // layout (after info label and optional line label).
-                            if (live_x->empty()) return;
-                            auto* new_bar = render_1d_curve(*live_x, *live_y,
-                                "", curve_y_label_str.c_str(), tt::accent_primary);
-                            if (bar_widget) bar_widget->hide();
-                            // Insert after the first visible widget.
-                            int insert_idx = -1;
-                            for (int j = 0; j < vl->count(); ++j) {
-                                auto* w = vl->itemAt(j)->widget();
-                                if (w && w == bar_widget) { insert_idx = j; break; }
-                            }
-                            if (insert_idx >= 0)
-                                vl->insertWidget(insert_idx + 1, new_bar);
-                            else
-                                vl->insertWidget(1, new_bar);
-                            bar_widget = new_bar;
+                        // Callback hook for keeping chart + table in
+                        // sync when the QLineEdit editingFinished path
+                        // stages a value. Replaces the old lambda that
+                        // tore down + rebuilt the bar chart widget.
+                        auto refresh_curve_bar = [chart, live_y, row_edits]() {
+                            if (!chart) return;
+                            // live_y is already updated by the caller.
+                            for (std::size_t i = 0; i < live_y->size(); ++i)
+                                chart->set_y_value(i, (*live_y)[i]);
                         };
 
                         // Editable value table: X | Y columns.
@@ -4822,6 +5480,10 @@ QWidget* build_tune_tab(
                             ye->setStyleSheet(QString::fromUtf8(
                                 tt::scalar_editor_style(tt::EditorState::Default).c_str()));
                             grid->addWidget(ye, i + 1, 1);
+                            // Capture for chart → table writeback.
+                            if (static_cast<int>(row_edits->size()) <= i)
+                                row_edits->resize(i + 1, nullptr);
+                            (*row_edits)[i] = ye;
 
                             // Wire editing — stages the value AND refreshes the bar chart.
                             std::string y_param = yb.param;
@@ -4854,6 +5516,44 @@ QWidget* build_tune_tab(
                         auto* gw = new QWidget; gw->setLayout(grid);
                         gw->setStyleSheet("border: none;");
                         vl->addWidget(gw);
+
+                        // Drag handler — on every chart-driven Y
+                        // change, stage the value + update the
+                        // matching table cell so the two surfaces
+                        // stay byte-identical in the tune.
+                        if (chart) {
+                            std::string y_param = yb.param;
+                            std::string pt = target;
+                            chart->on_value_changed =
+                                [y_param, pt, row_edits, live_y,
+                                 edit_svc, workspace, on_staged_changed,
+                                 refresh_page_chip, refresh_review_button,
+                                 refresh_tree_state_indicators](
+                                    std::size_t idx, double nv) {
+                                try {
+                                    edit_svc->stage_list_cell(
+                                        y_param, static_cast<int>(idx), nv);
+                                    workspace->stage_edit(pt, y_param);
+                                    if (idx < live_y->size())
+                                        (*live_y)[idx] = nv;
+                                    if (idx < row_edits->size()
+                                        && (*row_edits)[idx]) {
+                                        char b[24];
+                                        std::snprintf(b, sizeof(b), "%.4g", nv);
+                                        (*row_edits)[idx]->setText(
+                                            QString::fromUtf8(b));
+                                        (*row_edits)[idx]->setStyleSheet(
+                                            QString::fromUtf8(
+                                                tt::scalar_editor_style(
+                                                    tt::EditorState::Ok).c_str()));
+                                    }
+                                    (*refresh_page_chip)(pt);
+                                    (*refresh_review_button)();
+                                    (*refresh_tree_state_indicators)();
+                                    if (on_staged_changed) on_staged_changed();
+                                } catch (...) {}
+                            };
+                        }
                     }
 
                     *heatmap_widget = card;
@@ -5302,7 +6002,8 @@ QWidget* build_tune_tab(
                                resync_workspace, on_staged_changed,
                                selected_label, page_staged_chip,
                                visible_editors, ecu_conn, ecu_def,
-                               target_slot_index, loaded_tune_hash]() {
+                               target_slot_index, loaded_tune_hash,
+                               pending_reboot_count]() {
         auto names = edit_svc->staged_names();
         if (names.empty()) return;  // Nothing to review.
 
@@ -5584,10 +6285,36 @@ QWidget* build_tune_tab(
                           write_scalar_map, write_array_map,
                           refresh_page_chip,
                           refresh_review_button, refresh_tree_state_indicators,
-                          on_staged_changed]() {
+                          on_staged_changed, pending_reboot_count]() {
             namespace wsns = tuner_core::workspace_state;
             namespace spc = tuner_core::speeduino_param_codec;
             namespace svc = tuner_core::speeduino_value_codec;
+
+            // Success/failure counters for the completion indicator.
+            // Operator asked for visible feedback — silent completion
+            // left them unsure whether anything reached the ECU.
+            int written_ok = 0;
+            int written_err = 0;
+            int pc_count = 0;  // staged params that need a power cycle
+            std::string first_error;
+
+            // Count staged params that the INI flags as
+            // `requiresPowerCycle`. Surfaced in the completion toast
+            // so the operator knows to power-cycle the ECU for the
+            // change to take effect — otherwise the write/burn reaches
+            // flash but the behavior doesn't change until next boot.
+            {
+                const auto& pc_set =
+                    ecu_def->constants_extensions.requires_power_cycle;
+                for (const auto& name : edit_svc->staged_names()) {
+                    if (pc_set.count(name) > 0) ++pc_count;
+                }
+            }
+            // Record for the subsequent Burn handler — burn-time is
+            // when the power-cycle actually matters (RAM writes don't
+            // survive a reboot, only the flashed values do). Carry
+            // across dialog open/close via the shared counter.
+            if (pc_count > 0) *pending_reboot_count = pc_count;
 
             // If connected, send each staged parameter to the ECU.
             bool live = ecu_conn && ecu_conn->connected && ecu_conn->controller;
@@ -5635,8 +6362,15 @@ QWidget* build_tune_tab(
                         }
 
                         auto encoded = spc::encode_scalar(layout, val, page_slice);
-                        ecu_conn->write_chunked(page, offset,
-                            encoded.data(), encoded.size(), false);
+                        try {
+                            ecu_conn->write_chunked(page, offset,
+                                encoded.data(), encoded.size(), false);
+                            ++written_ok;
+                        } catch (const std::exception& e) {
+                            ++written_err;
+                            if (first_error.empty())
+                                first_error = name + ": " + e.what();
+                        }
                         continue;
                     }
 
@@ -5661,8 +6395,15 @@ QWidget* build_tune_tab(
                         layout.columns = static_cast<std::size_t>(ar->columns);
 
                         auto encoded = spc::encode_table(layout, vals);
-                        ecu_conn->write_chunked(page, offset,
-                            encoded.data(), encoded.size(), true);
+                        try {
+                            ecu_conn->write_chunked(page, offset,
+                                encoded.data(), encoded.size(), true);
+                            ++written_ok;
+                        } catch (const std::exception& e) {
+                            ++written_err;
+                            if (first_error.empty())
+                                first_error = name + ": " + e.what();
+                        }
                     }
                 }
             }
@@ -5677,6 +6418,47 @@ QWidget* build_tune_tab(
             if (on_staged_changed) on_staged_changed();
             const std::string& active = workspace->active_page();
             if (!active.empty()) (*refresh_page_chip)(active);
+
+            // Operator-visible completion indicator. Three cases:
+            //   (a) partial/full failure — modal warning, keeps the
+            //       review dialog open so operator can retry.
+            //   (b) offline — informational toast noting staged-only.
+            //   (c) success — status-bar message via the main window
+            //       so the review dialog can still close cleanly.
+            if (written_err > 0) {
+                char msg[512];
+                std::snprintf(msg, sizeof(msg),
+                    "%d parameter(s) written, %d failed.\n\nFirst error: %s",
+                    written_ok, written_err, first_error.c_str());
+                QMessageBox::warning(dialog,
+                    QString::fromUtf8("Write to RAM — partial failure"),
+                    QString::fromUtf8(msg));
+                return;  // Leave the dialog open for retry.
+            }
+            if (auto* mw = qobject_cast<QMainWindow*>(dialog->window())) {
+                char msg[256];
+                if (live) {
+                    if (pc_count > 0) {
+                        std::snprintf(msg, sizeof(msg),
+                            "\xe2\x9c\x85 Wrote %d parameter(s) to ECU RAM  "
+                            "\xc2\xb7  \xe2\x9f\xb3 %d change(s) require a "
+                            "power cycle after burn",
+                            written_ok, pc_count);
+                    } else {
+                        std::snprintf(msg, sizeof(msg),
+                            "\xe2\x9c\x85 Wrote %d parameter(s) to ECU RAM",
+                            written_ok);
+                    }
+                } else {
+                    std::snprintf(msg, sizeof(msg),
+                        "\xe2\x84\xb9 Offline \xe2\x80\x94 %d change(s) staged (not written to ECU)",
+                        static_cast<int>(edit_svc->staged_names().size()));
+                }
+                // Longer timeout when a power-cycle hint is shown so
+                // the operator actually reads it.
+                int timeout_ms = (pc_count > 0) ? 10000 : 5000;
+                mw->statusBar()->showMessage(QString::fromUtf8(msg), timeout_ms);
+            }
             dialog->accept();
         });
 
@@ -5688,8 +6470,8 @@ QWidget* build_tune_tab(
                          [dialog, workspace, edit_svc, visible_editors,
                           refresh_page_chip, refresh_review_button,
                           refresh_tree_state_indicators, on_staged_changed,
-                          page_staged_chip, ecu_conn, target_slot_index,
-                          loaded_tune_hash]() {
+                          page_staged_chip, ecu_conn, ecu_def, target_slot_index,
+                          loaded_tune_hash, pending_reboot_count]() {
             namespace wsns = tuner_core::workspace_state;
 
             // Definition-hash guard (P16-1 / firmware 14B). When both
@@ -5754,14 +6536,42 @@ QWidget* build_tune_tab(
 
             // If connected, burn each dirty page to flash.
             bool live = ecu_conn && ecu_conn->connected && ecu_conn->controller;
+            int burned_ok = 0;
+            int burned_err = 0;
+            std::string first_burn_error;
             if (live && !ecu_conn->dirty_pages.empty()) {
                 for (int page : ecu_conn->dirty_pages) {
-                    ecu_conn->controller->burn(
-                        static_cast<std::uint8_t>(page));
+                    try {
+                        ecu_conn->controller->burn(
+                            static_cast<std::uint8_t>(page));
+                        ++burned_ok;
+                    } catch (const std::exception& e) {
+                        ++burned_err;
+                        if (first_burn_error.empty()) {
+                            char b[128];
+                            std::snprintf(b, sizeof(b), "page %d: %s",
+                                page, e.what());
+                            first_burn_error = b;
+                        }
+                    }
                     // 20ms inter-page delay — matches Python.
                     std::this_thread::sleep_for(std::chrono::milliseconds(20));
                 }
                 ecu_conn->dirty_pages.clear();
+            }
+
+            // Partial or full burn failure — keep the dialog open so the
+            // operator can retry. Successful pages already landed in
+            // flash so we don't try to roll them back.
+            if (burned_err > 0) {
+                char msg[512];
+                std::snprintf(msg, sizeof(msg),
+                    "%d page(s) burned, %d failed.\n\nFirst error: %s",
+                    burned_ok, burned_err, first_burn_error.c_str());
+                QMessageBox::warning(dialog,
+                    QString::fromUtf8("Burn to Flash — partial failure"),
+                    QString::fromUtf8(msg));
+                return;
             }
 
             auto written_pages = workspace->pages_in_state(wsns::PageState::WRITTEN);
@@ -5781,6 +6591,107 @@ QWidget* build_tune_tab(
             (*refresh_review_button)();
             (*refresh_tree_state_indicators)();
             if (on_staged_changed) on_staged_changed();
+
+            // Completion indicator — status bar toast.
+            if (auto* mw = qobject_cast<QMainWindow*>(dialog->window())) {
+                char msg[128];
+                if (live && burned_ok > 0) {
+                    std::snprintf(msg, sizeof(msg),
+                        "\xf0\x9f\x94\xa5 Burned %d page(s) to flash",
+                        burned_ok);
+                } else {
+                    std::snprintf(msg, sizeof(msg),
+                        "\xe2\x84\xb9 Offline burn \xe2\x80\x94 staged state cleared");
+                }
+                mw->statusBar()->showMessage(QString::fromUtf8(msg), 5000);
+            }
+
+            // Power-cycle flow — fires only when the preceding Write
+            // to RAM included at least one parameter that the INI's
+            // `[ConstantsExtensions] requiresPowerCycle` list flagged,
+            // and the burn actually sent bytes to flash. Without this,
+            // the operator would burn changes that silently don't take
+            // effect until the next reboot — a surprise that
+            // TunerStudio surfaces in the dialog text but that the app
+            // was silent about until now.
+            if (live && burned_ok > 0 && *pending_reboot_count > 0) {
+                int pc = *pending_reboot_count;
+                *pending_reboot_count = 0;  // consumed
+
+                // Look up `cmdstm32reboot` from the parsed
+                // [ControllerCommands] list. Present on STM32 builds
+                // of the Speeduino firmware; absent on AVR / Teensy
+                // production INIs. We probe the parsed list rather
+                // than hard-coding the payload so any firmware that
+                // ships a reboot command under the same name picks
+                // it up automatically.
+                const std::vector<std::uint8_t>* reboot_payload = nullptr;
+                for (const auto& c : ecu_def->controller_commands.commands) {
+                    if (c.name == "cmdstm32reboot") {
+                        reboot_payload = &c.payload;
+                        break;
+                    }
+                }
+
+                char prompt[384];
+                std::snprintf(prompt, sizeof(prompt),
+                    "%d change(s) require the ECU to be power-cycled "
+                    "to take effect.\n\n%s",
+                    pc,
+                    reboot_payload
+                        ? "Attempt automatic reboot now? The app will "
+                          "disconnect during the reset and try to "
+                          "reconnect automatically."
+                        : "This firmware doesn't expose a software "
+                          "reboot command. Disconnect and reconnect "
+                          "ECU power, then click OK to reconnect.");
+
+                auto answer = QMessageBox::question(dialog,
+                    QString::fromUtf8("Power cycle required"),
+                    QString::fromUtf8(prompt),
+                    reboot_payload
+                        ? (QMessageBox::Yes | QMessageBox::No)
+                        : (QMessageBox::Ok | QMessageBox::Cancel),
+                    reboot_payload ? QMessageBox::Yes : QMessageBox::Ok);
+
+                bool do_auto = reboot_payload
+                    && answer == QMessageBox::Yes;
+                bool do_manual = !reboot_payload
+                    && answer == QMessageBox::Ok;
+
+                if (do_auto) {
+                    // Send reboot. The ECU resets mid-exchange so the
+                    // call typically throws on timeout — that's the
+                    // expected success signal here.
+                    try {
+                        ecu_conn->controller->fetch_raw(
+                            *reboot_payload, 1, 0.5);
+                    } catch (...) {
+                        // Expected — ECU is resetting.
+                    }
+                    ecu_conn->close();
+                    if (auto* mw = qobject_cast<QMainWindow*>(dialog->window())) {
+                        mw->statusBar()->showMessage(
+                            QString::fromUtf8(
+                                "\xe2\x9f\xb3 ECU rebooting\xe2\x80\xa6 "
+                                "reconnect via File \xe2\x86\x92 Connect "
+                                "when it comes back up."),
+                            10000);
+                    }
+                } else if (do_manual) {
+                    ecu_conn->close();
+                    if (auto* mw = qobject_cast<QMainWindow*>(dialog->window())) {
+                        mw->statusBar()->showMessage(
+                            QString::fromUtf8(
+                                "\xe2\x9c\x85 Disconnected. Power-cycle the "
+                                "ECU, then reconnect via File \xe2\x86\x92 "
+                                "Connect."),
+                            10000);
+                    }
+                }
+                // else: operator chose to skip — leave connection open.
+            }
+
             dialog->accept();
         });
 
@@ -8396,7 +9307,11 @@ QWidget* build_live_tab(
 
     // Initial build.
     (*rebuild_dashboard)();
-    layout->addWidget(dash_container);
+    // Dashboard claims vertical stretch so gauges grow with the window
+    // in maximized mode instead of huddling near the top. The trailing
+    // addStretch(1) at the end of build_live_tab is dropped in favor
+    // of this — letting the gauges themselves absorb extra space.
+    layout->addWidget(dash_container, 1);
 
     // Fullscreen dashboard — frameless, stays-on-top window with
     // larger fonts. Escape or double-click to close. F11 shortcut.
@@ -8478,7 +9393,9 @@ QWidget* build_live_tab(
             }
             fs_bindings->push_back(std::move(binding));
         }
-        dl->addLayout(grid);
+        // Grid takes stretch so gauges fill the whole screen in
+        // fullscreen mode (was letting content hug the top corner).
+        dl->addLayout(grid, 1);
 
         // Hint label.
         auto* hint = new QLabel(QString::fromUtf8(
@@ -9102,7 +10019,6 @@ QWidget* build_live_tab(
 
     timer->start(200);
 
-    layout->addStretch(1);
     scroll->setWidget(container);
     return scroll;
 }
@@ -11104,7 +12020,8 @@ QWidget* render_1d_curve(const std::vector<double>& bins,
                           const std::vector<double>& values,
                           const char* title_text,
                           const char* units,
-                          const char* accent = tt::accent_primary) {
+                          const char* accent,
+                          const char* x_units) {
     auto* card = new QWidget;
     auto* vl = new QVBoxLayout(card);
     vl->setContentsMargins(tt::space_md + 2, tt::space_sm + 2, tt::space_md + 2, tt::space_sm + 2);
@@ -11138,12 +12055,12 @@ QWidget* render_1d_curve(const std::vector<double>& bins,
         char buf[512];
         std::snprintf(buf, sizeof(buf),
             "<span style='color: %s; font-size: %dpx; "
-            "font-family: monospace;'>%6.0f\xc2\xb0""C </span>"
+            "font-family: monospace;'>%6.0f %s </span>"
             "<span style='background-color: %s; color: %s; "
             "padding: 2px %dpx 2px 6px; border-radius: 2px; "
             "font-size: %dpx; font-family: monospace;'>"
             "%.0f %s</span>",
-            tt::text_muted, tt::font_micro, bins[i],
+            tt::text_muted, tt::font_micro, bins[i], x_units,
             accent, tt::text_inverse, bar_width, tt::font_micro,
             values[i], units);
         auto* row = new QLabel;
@@ -12390,6 +13307,26 @@ QWidget* build_setup_tab(
     bool has_tune = (edit_svc != nullptr && edit_svc->get_value("reqFuel") != nullptr);
     const char* data_source = has_tune ? "loaded tune" : "no tune loaded";
 
+    // Detect induction topology from tune — `boostEnabled` is the
+    // scalar the Engine Setup Wizard stages (0 = NA, 1 = forced).
+    // Default to NA so a stock tune doesn't preview as a turbo build
+    // (the prior hardcoded SINGLE_TURBO is what produced #4's
+    // "incorrect VE / AFR / spark" complaint on a stock Ford 300).
+    bool is_forced_induction =
+        read_scalar("boostEnabled", 0.0) > 0.5;
+    namespace gt = tuner_core::generator_types;
+    auto setup_topology = is_forced_induction
+        ? gt::ForcedInductionTopology::SINGLE_TURBO
+        : gt::ForcedInductionTopology::NA;
+    const char* topology_label =
+        is_forced_induction ? "Single Turbo" : "NA";
+    // The Setup-page preview uses baseline head + manifold (empty
+    // strings = no bonuses/penalties in the generator math) because
+    // we have no way to infer porting + runner length from scalars.
+    // Operators who want a shaped curve tell the wizard explicitly.
+    double effective_boost_kpa = is_forced_induction ? boost_kpa : 100.0;
+    bool setup_intercooler = is_forced_induction;
+
     namespace vg = tuner_core::ve_table_generator;
     namespace ag = tuner_core::afr_target_generator;
     namespace sg = tuner_core::spark_table_generator;
@@ -12414,13 +13351,15 @@ QWidget* build_setup_tab(
                                          legend, tt::accent_primary));
     }
 
-    // VE table
+    // VE table — baseline preview (empty head_flow / manifold =
+    // flat corrections so the curve reads as "stock" until the
+    // operator specifies otherwise via the wizard).
     vg::VeGeneratorContext ve_ctx;
-    ve_ctx.forced_induction_topology = vg::ForcedInductionTopology::SINGLE_TURBO;
-    ve_ctx.cam_duration_deg = 280.0;
+    ve_ctx.forced_induction_topology = setup_topology;
+    ve_ctx.cam_duration_deg = 250.0;   // stock-ish, idle-friendly
     ve_ctx.compression_ratio = cr;
-    ve_ctx.head_flow_class = "race_ported";
-    ve_ctx.intake_manifold_style = "short_runner_plenum";
+    ve_ctx.head_flow_class = "";
+    ve_ctx.intake_manifold_style = "";
     ve_ctx.cylinder_count = ncyl;
     ve_ctx.displacement_cc = disp;
     ve_ctx.required_fuel_ms = req_fuel;
@@ -12428,8 +13367,8 @@ QWidget* build_setup_tab(
     {
         char ve_title[256];
         std::snprintf(ve_title, sizeof(ve_title),
-            "VE Table (%.0fcc %dcyl, %.1f:1 CR) \xe2\x80\x94 %s",
-            disp, ncyl, cr, data_source);
+            "VE Table (%.0fcc %dcyl, %.1f:1 CR, %s) \xe2\x80\x94 %s",
+            disp, ncyl, cr, topology_label, data_source);
         layout->addWidget(render_heatmap(ve_result.values, 16, 16, ve_title));
     }
 
@@ -12458,43 +13397,71 @@ QWidget* build_setup_tab(
     };
     render_assumption_card("VE Assumptions", ve_result.assumptions);
 
-    // AFR target table
+    // AFR target table — baseline preview. Topology + boost target
+    // read from the tune; intercooler defaults to true for boost,
+    // false for NA since a non-boosted engine has no compressor to
+    // cool anything from.
     ag::AfrGeneratorContext afr_ctx;
-    afr_ctx.forced_induction_topology = ag::ForcedInductionTopology::SINGLE_TURBO;
-    afr_ctx.boost_target_kpa = boost_kpa;
-    afr_ctx.intercooler_present = true;
+    afr_ctx.forced_induction_topology = setup_topology;
+    afr_ctx.boost_target_kpa = effective_boost_kpa;
+    afr_ctx.intercooler_present = setup_intercooler;
     auto afr_result = ag::generate(afr_ctx, ag::CalibrationIntent::FIRST_START);
-    layout->addWidget(render_heatmap(afr_result.values, 16, 16,
-        "AFR Target (Single Turbo, 200 kPa, intercooled, first-start)"));
+    {
+        char afr_title[256];
+        if (is_forced_induction) {
+            std::snprintf(afr_title, sizeof(afr_title),
+                "AFR Target (%s, %.0f kPa, %s, first-start) \xe2\x80\x94 %s",
+                topology_label, boost_kpa,
+                setup_intercooler ? "intercooled" : "non-intercooled",
+                data_source);
+        } else {
+            std::snprintf(afr_title, sizeof(afr_title),
+                "AFR Target (%s, first-start) \xe2\x80\x94 %s",
+                topology_label, data_source);
+        }
+        layout->addWidget(render_heatmap(afr_result.values, 16, 16, afr_title));
+    }
     render_assumption_card("AFR Assumptions", afr_result.assumptions);
 
-    // Spark advance table
+    // Spark advance table.
     sg::SparkGeneratorContext spark_ctx;
-    spark_ctx.forced_induction_topology = sg::ForcedInductionTopology::SINGLE_TURBO;
+    spark_ctx.forced_induction_topology = setup_topology;
     spark_ctx.compression_ratio = cr;
-    spark_ctx.boost_target_kpa = boost_kpa;
-    spark_ctx.intercooler_present = true;
+    spark_ctx.boost_target_kpa = effective_boost_kpa;
+    spark_ctx.intercooler_present = setup_intercooler;
     spark_ctx.cylinder_count = ncyl;
     spark_ctx.dwell_ms = dwell;
     auto spark_result = sg::generate(spark_ctx, sg::CalibrationIntent::FIRST_START);
-    layout->addWidget(render_heatmap(spark_result.values, 16, 16,
-        "Spark Advance (Single Turbo, 10.5:1 CR, first-start)"));
+    {
+        char spark_title[256];
+        std::snprintf(spark_title, sizeof(spark_title),
+            "Spark Advance (%s, %.1f:1 CR, first-start) \xe2\x80\x94 %s",
+            topology_label, cr, data_source);
+        layout->addWidget(render_heatmap(spark_result.values, 16, 16, spark_title));
+    }
     render_assumption_card("Spark Assumptions", spark_result.assumptions);
 
-    // Idle RPM curve
+    // Idle RPM curve — baseline head/manifold (empty strings) and a
+    // stock-ish 250° cam to match the VE table preview.
     irg::GeneratorContext idle_ctx;
-    idle_ctx.forced_induction_topology = irg::ForcedInductionTopology::SINGLE_TURBO;
-    idle_ctx.cam_duration_deg = 280.0;
-    idle_ctx.head_flow_class = "race_ported";
-    idle_ctx.intake_manifold_style = "short_runner_plenum";
+    idle_ctx.forced_induction_topology = setup_topology;
+    idle_ctx.cam_duration_deg = 250.0;
+    idle_ctx.head_flow_class = "";
+    idle_ctx.intake_manifold_style = "";
     auto idle_result = irg::generate(idle_ctx, irg::CalibrationIntent::FIRST_START);
-    layout->addWidget(render_1d_curve(
-        idle_result.clt_bins, idle_result.rpm_targets,
-        "Idle RPM Targets (turbo, 280\xc2\xb0 cam, race-ported, short-runner)",
-        "RPM", tt::accent_ok));
+    {
+        char idle_title[256];
+        std::snprintf(idle_title, sizeof(idle_title),
+            "Idle RPM Targets (%s, 250\xc2\xb0 cam, baseline head/manifold) "
+            "\xe2\x80\x94 %s",
+            topology_label, data_source);
+        layout->addWidget(render_1d_curve(
+            idle_result.clt_bins, idle_result.rpm_targets,
+            idle_title, "RPM", tt::accent_ok));
+    }
     render_assumption_card("Idle RPM Assumptions", idle_result.assumptions);
 
-    // WUE curve
+    // WUE curve — petrol stoich is the only context that matters.
     seg::StartupContext wue_ctx;
     wue_ctx.stoich_ratio = 14.7;
     auto wue_result = seg::generate_wue(wue_ctx, seg::CalibrationIntent::FIRST_START);
@@ -12504,24 +13471,1185 @@ QWidget* build_setup_tab(
         "%", tt::accent_warning));
     render_assumption_card("WUE Assumptions", wue_result.assumptions);
 
-    // Cranking enrichment
+    // Cranking enrichment — pull CR from the tune so it matches
+    // the same CR the operator sees on the VE + spark cards instead
+    // of a hardcoded 10.5:1 that often didn't match.
     seg::StartupContext crank_ctx;
-    crank_ctx.compression_ratio = 10.5;
+    crank_ctx.compression_ratio = cr;
     auto crank_result = seg::generate_cranking(crank_ctx, seg::CalibrationIntent::FIRST_START);
-    layout->addWidget(render_1d_curve(
-        crank_result.clt_bins, crank_result.enrichment_pct,
-        "Cranking Enrichment (10.5:1 CR, first-start)",
-        "%", tt::accent_danger));
+    {
+        char crank_title[192];
+        std::snprintf(crank_title, sizeof(crank_title),
+            "Cranking Enrichment (%.1f:1 CR, first-start) \xe2\x80\x94 %s",
+            cr, data_source);
+        layout->addWidget(render_1d_curve(
+            crank_result.clt_bins, crank_result.enrichment_pct,
+            crank_title, "%", tt::accent_danger));
+    }
     render_assumption_card("Cranking Assumptions", crank_result.assumptions);
+
+    // ---- Engine Advanced — stroke / MAP sampling / fuel-trim enable
+    // Closes three single-scalar gaps from the Python wizard that
+    // didn't warrant a full card each but show up on the operator's
+    // first-start checklist: 2-stroke vs 4-stroke selection, MAP
+    // sampling algorithm, master fuel-trim enable toggle. All three
+    // get inline dropdowns here so the operator doesn't have to hunt
+    // across three different TUNE-tab scalar pages.
+    if (edit_svc) {
+        auto* adv_card = new QWidget;
+        auto* av = new QVBoxLayout(adv_card);
+        av->setContentsMargins(tt::space_md, tt::space_sm,
+                                tt::space_md, tt::space_sm);
+        av->setSpacing(tt::space_sm);
+        {
+            char as[256];
+            std::snprintf(as, sizeof(as),
+                "background-color: %s; border: 1px solid %s; "
+                "border-left: 3px solid %s; border-radius: %dpx;",
+                tt::bg_elevated, tt::border, tt::accent_ok, tt::radius_md);
+            adv_card->setStyleSheet(QString::fromUtf8(as));
+        }
+
+        auto* a_title = new QLabel;
+        a_title->setTextFormat(Qt::RichText);
+        {
+            char t[256];
+            std::snprintf(t, sizeof(t),
+                "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
+                "Engine Advanced</span>"
+                "<span style='color: %s; font-size: %dpx;'>  \xc2\xb7  "
+                "Stroke, MAP sampling, fuel trim master toggle"
+                "</span>",
+                tt::text_primary, tt::font_label,
+                tt::text_muted, tt::font_small);
+            a_title->setText(QString::fromUtf8(t));
+            a_title->setStyleSheet("border: none;");
+        }
+        av->addWidget(a_title);
+
+        auto a_status = std::make_shared<QLabel*>(new QLabel);
+        {
+            char ss[96];
+            std::snprintf(ss, sizeof(ss),
+                "QLabel { color: %s; font-size: %dpx; }",
+                tt::text_dim, tt::font_small);
+            (*a_status)->setStyleSheet(QString::fromUtf8(ss));
+        }
+
+        auto a_make_row = [av](const char* label_text,
+                                const char* hint_text) -> QHBoxLayout* {
+            auto* col = new QVBoxLayout;
+            col->setContentsMargins(0, 0, 0, 0);
+            col->setSpacing(1);
+            auto* row = new QHBoxLayout;
+            row->setContentsMargins(0, 0, 0, 0);
+            row->setSpacing(tt::space_sm);
+            auto* lbl = new QLabel(QString::fromUtf8(label_text));
+            lbl->setFixedWidth(180);
+            char ls[96];
+            std::snprintf(ls, sizeof(ls),
+                "QLabel { color: %s; font-size: %dpx; }",
+                tt::text_secondary, tt::font_small);
+            lbl->setStyleSheet(QString::fromUtf8(ls));
+            row->addWidget(lbl);
+            col->addLayout(row);
+            if (hint_text && *hint_text) {
+                auto* hint = new QLabel(QString::fromUtf8(hint_text));
+                hint->setWordWrap(true);
+                char hs[128];
+                std::snprintf(hs, sizeof(hs),
+                    "QLabel { color: %s; font-size: %dpx; "
+                    "padding-left: 184px; }",
+                    tt::text_dim, tt::font_micro);
+                hint->setStyleSheet(QString::fromUtf8(hs));
+                col->addWidget(hint);
+            }
+            av->addLayout(col);
+            return row;
+        };
+
+        char a_combo_style[256];
+        std::snprintf(a_combo_style, sizeof(a_combo_style),
+            "QComboBox { background: %s; color: %s; border: 1px solid %s; "
+            "border-radius: %dpx; padding: 2px 8px; font-size: %dpx; }",
+            tt::bg_elevated, tt::text_primary, tt::border,
+            tt::radius_sm, tt::font_small);
+
+        auto a_make_combo = [edit_svc, a_status, a_combo_style](
+                const char* param, const char* label,
+                std::initializer_list<const char*> options) {
+            auto* combo = new QComboBox;
+            combo->setStyleSheet(QString::fromUtf8(a_combo_style));
+            for (auto* o : options) combo->addItem(QString::fromUtf8(o));
+            if (auto* tv = edit_svc->get_value(param)) {
+                std::string cur;
+                if (std::holds_alternative<std::string>(tv->value))
+                    cur = std::get<std::string>(tv->value);
+                int idx = combo->findText(QString::fromUtf8(cur.c_str()));
+                if (idx >= 0) combo->setCurrentIndex(idx);
+            }
+            std::string p = param;
+            std::string lbl = label;
+            QObject::connect(combo,
+                static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+                [edit_svc, combo, p, lbl, a_status](int) {
+                    try {
+                        edit_svc->stage_scalar_value(p,
+                            combo->currentText().toStdString());
+                        char m[128];
+                        std::snprintf(m, sizeof(m),
+                            "\xe2\x9c\x85 %s staged \xe2\x80\x94 review on TUNE tab",
+                            lbl.c_str());
+                        (*a_status)->setText(QString::fromUtf8(m));
+                    } catch (...) {}
+                });
+            return combo;
+        };
+
+        auto* stroke_row = a_make_row("Stroke Type:",
+            "Two-stroke engines fire every revolution; four-stroke "
+            "every other revolution. Wrong setting = injector pulse "
+            "width off by 2\xc3\x97.");
+        stroke_row->addWidget(
+            a_make_combo("twoStroke", "Stroke Type",
+                {"Four-stroke", "Two-stroke"}),
+            1);
+
+        auto* msamp_row = a_make_row("MAP Sampling:",
+            "Cycle Average is recommended for 3+ cylinder engines. "
+            "Cycle Minimum suits 1\xe2\x80\x93" "2 cylinder where pressure "
+            "pulses are large. Instantaneous is fastest but noisy.");
+        msamp_row->addWidget(
+            a_make_combo("mapSample", "MAP Sampling",
+                {"Instantaneous", "Cycle Average", "Cycle Minimum",
+                 "Event Average"}),
+            1);
+
+        auto* ftrim_row = a_make_row("Fuel Trim Master:",
+            "Master on/off for the four fuelTrimN tables. Leave Off "
+            "until VE tuning is stable \xe2\x80\x94 enabling too early "
+            "masks real VE errors.");
+        ftrim_row->addWidget(
+            a_make_combo("fuelTrimEnabled", "Fuel Trim Master",
+                {"No", "Yes"}),
+            1);
+
+        av->addWidget(*a_status);
+        layout->addWidget(adv_card);
+    }
+
+    // ---- TPS Calibration — closes final Python-wizard gap ----------
+    // Manual entry + live-capture buttons. When connected, the capture
+    // buttons read the current tpsADC channel from ecu_conn->runtime
+    // and stamp it into the corresponding field; operator presses
+    // closed throttle → "Capture closed", then WOT → "Capture WOT".
+    // When offline, the buttons are disabled so the operator knows to
+    // connect first. Manual entry stays available for operators who
+    // know their values from a multimeter probe.
+    if (edit_svc) {
+        auto* tps_card = new QWidget;
+        auto* tv = new QVBoxLayout(tps_card);
+        tv->setContentsMargins(tt::space_md, tt::space_sm,
+                                tt::space_md, tt::space_sm);
+        tv->setSpacing(tt::space_sm);
+        {
+            char tps_style[256];
+            std::snprintf(tps_style, sizeof(tps_style),
+                "background-color: %s; border: 1px solid %s; "
+                "border-left: 3px solid %s; border-radius: %dpx;",
+                tt::bg_elevated, tt::border, tt::accent_primary, tt::radius_md);
+            tps_card->setStyleSheet(QString::fromUtf8(tps_style));
+        }
+
+        auto* tps_title = new QLabel;
+        tps_title->setTextFormat(Qt::RichText);
+        {
+            char t[320];
+            std::snprintf(t, sizeof(t),
+                "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
+                "TPS Calibration</span>"
+                "<span style='color: %s; font-size: %dpx;'>  \xc2\xb7  "
+                "Min (closed) / Max (WOT) ADC values. Connect the ECU "
+                "for one-click capture from the live TPS channel.</span>",
+                tt::text_primary, tt::font_label,
+                tt::text_muted, tt::font_small);
+            tps_title->setText(QString::fromUtf8(t));
+            tps_title->setStyleSheet("border: none;");
+        }
+        tv->addWidget(tps_title);
+
+        auto tps_status = std::make_shared<QLabel*>(new QLabel);
+        {
+            char ss[96];
+            std::snprintf(ss, sizeof(ss),
+                "QLabel { color: %s; font-size: %dpx; }",
+                tt::text_dim, tt::font_small);
+            (*tps_status)->setStyleSheet(QString::fromUtf8(ss));
+        }
+
+        auto tps_make_edit_with_capture = [edit_svc, ecu_conn, tps_status, tv](
+                const char* param, const char* label, const char* hint,
+                const char* capture_label) {
+            // Row 1: label + edit + capture button.
+            auto* row = new QHBoxLayout;
+            row->setContentsMargins(0, 0, 0, 0);
+            row->setSpacing(tt::space_sm);
+            auto* lbl = new QLabel(QString::fromUtf8(label));
+            lbl->setFixedWidth(180);
+            char ls[96];
+            std::snprintf(ls, sizeof(ls),
+                "QLabel { color: %s; font-size: %dpx; }",
+                tt::text_secondary, tt::font_small);
+            lbl->setStyleSheet(QString::fromUtf8(ls));
+            row->addWidget(lbl);
+
+            auto* edit = new QLineEdit;
+            edit->setFixedWidth(100);
+            char es[256];
+            std::snprintf(es, sizeof(es),
+                "QLineEdit { background: %s; color: %s; "
+                "border: 1px solid %s; border-radius: %dpx; "
+                "padding: 2px 6px; font-size: %dpx; }",
+                tt::bg_elevated, tt::text_primary, tt::border,
+                tt::radius_sm, tt::font_small);
+            edit->setStyleSheet(QString::fromUtf8(es));
+            if (auto* existing = edit_svc->get_value(param)) {
+                if (std::holds_alternative<double>(existing->value)) {
+                    char b[24];
+                    std::snprintf(b, sizeof(b), "%.4g",
+                        std::get<double>(existing->value));
+                    edit->setText(QString::fromUtf8(b));
+                }
+            }
+            row->addWidget(edit, 0);
+
+            auto* capture = new QPushButton(QString::fromUtf8(capture_label));
+            capture->setCursor(Qt::PointingHandCursor);
+            char cs[384];
+            std::snprintf(cs, sizeof(cs),
+                "QPushButton { background: %s; color: %s; "
+                "border: 1px solid %s; border-radius: %dpx; "
+                "padding: 2px %dpx; font-size: %dpx; } "
+                "QPushButton:hover { border-color: %s; } "
+                "QPushButton:disabled { color: %s; background: %s; }",
+                tt::bg_elevated, tt::text_secondary, tt::border,
+                tt::radius_sm, tt::space_md, tt::font_small,
+                tt::accent_primary, tt::text_dim, tt::bg_inset);
+            capture->setStyleSheet(QString::fromUtf8(cs));
+            bool live = ecu_conn && ecu_conn->connected;
+            capture->setEnabled(live);
+            if (!live) {
+                capture->setToolTip(QString::fromUtf8(
+                    "Connect the ECU (File \xe2\x86\x92 Connect) to capture "
+                    "the current tpsADC reading."));
+            }
+            row->addWidget(capture);
+            row->addStretch(1);
+            tv->addLayout(row);
+
+            // Hint under the row.
+            auto* hint_lbl = new QLabel(QString::fromUtf8(hint));
+            hint_lbl->setWordWrap(true);
+            char hs[128];
+            std::snprintf(hs, sizeof(hs),
+                "QLabel { color: %s; font-size: %dpx; "
+                "padding-left: 184px; }",
+                tt::text_dim, tt::font_micro);
+            hint_lbl->setStyleSheet(QString::fromUtf8(hs));
+            tv->addWidget(hint_lbl);
+
+            // Wire manual edit.
+            std::string p = param;
+            std::string label_str = label;
+            QObject::connect(edit, &QLineEdit::editingFinished,
+                             [edit, edit_svc, p, label_str, tps_status]() {
+                try {
+                    edit_svc->stage_scalar_value(p,
+                        edit->text().toStdString());
+                    char m[128];
+                    std::snprintf(m, sizeof(m),
+                        "\xe2\x9c\x85 %s staged \xe2\x80\x94 review on TUNE tab",
+                        label_str.c_str());
+                    (*tps_status)->setText(QString::fromUtf8(m));
+                } catch (...) {}
+            });
+
+            // Wire capture button.
+            QObject::connect(capture, &QPushButton::clicked,
+                             [edit, ecu_conn, edit_svc, p, label_str, tps_status]() {
+                if (!ecu_conn || !ecu_conn->connected) {
+                    (*tps_status)->setText(QString::fromUtf8(
+                        "\xe2\x84\xb9 Not connected \xe2\x80\x94 connect first to "
+                        "capture"));
+                    return;
+                }
+                auto it = ecu_conn->runtime.find("tpsADC");
+                if (it == ecu_conn->runtime.end()) {
+                    (*tps_status)->setText(QString::fromUtf8(
+                        "\xe2\x9d\x8c tpsADC channel not found in runtime "
+                        "snapshot"));
+                    return;
+                }
+                double raw = it->second;
+                char b[24];
+                std::snprintf(b, sizeof(b), "%.0f", raw);
+                edit->setText(QString::fromUtf8(b));
+                try {
+                    edit_svc->stage_scalar_value(p, b);
+                    char m[160];
+                    std::snprintf(m, sizeof(m),
+                        "\xe2\x9c\x85 Captured %s = %.0f ADC from ECU \xe2\x80\x94 "
+                        "review on TUNE tab",
+                        label_str.c_str(), raw);
+                    (*tps_status)->setText(QString::fromUtf8(m));
+                } catch (...) {}
+            });
+        };
+
+        tps_make_edit_with_capture("tpsMin", "TPS Min (closed, ADC):",
+            "Raw ADC reading with the throttle fully closed. Typical: "
+            "10\xe2\x80\x93" "40 (0 would mean the sensor isn't wired). Press "
+            "\"Capture closed\" with the pedal released.",
+            "Capture closed");
+
+        tps_make_edit_with_capture("tpsMax", "TPS Max (WOT, ADC):",
+            "Raw ADC reading at wide-open throttle. Typical: "
+            "200\xe2\x80\x93" "250. Press \"Capture WOT\" with the pedal pinned "
+            "to the floor. Engine must be OFF for safety.",
+            "Capture WOT");
+
+        tv->addWidget(*tps_status);
+        layout->addWidget(tps_card);
+    }
+
+    // ---- Hardware Outputs — IAC + Fan quick setup ------------------
+    // Addresses #14 on the bug list: "Guided hardware setup would be
+    // nice (IAC, fan, etc)". The scalar editors on the TUNE tab expose
+    // every bit/scalar individually, but the operator has to hunt
+    // across several pages to find iacAlgorithm + fanEnable + fanSP +
+    // fanHyster. This card surfaces the four most-common decisions in
+    // one place with short hints per control. Changes stage through
+    // edit_svc the same way a TUNE-tab QComboBox would; the review
+    // chip on the TUNE tab picks them up on next navigation.
+    if (edit_svc) {
+        auto* output_card = new QWidget;
+        auto* oc_layout = new QVBoxLayout(output_card);
+        oc_layout->setContentsMargins(tt::space_md, tt::space_sm,
+                                       tt::space_md, tt::space_sm);
+        oc_layout->setSpacing(tt::space_sm);
+        char ocs[256];
+        std::snprintf(ocs, sizeof(ocs),
+            "background-color: %s; border: 1px solid %s; "
+            "border-left: 3px solid %s; border-radius: %dpx;",
+            tt::bg_elevated, tt::border, tt::accent_warning, tt::radius_md);
+        output_card->setStyleSheet(QString::fromUtf8(ocs));
+
+        auto* oc_title = new QLabel;
+        oc_title->setTextFormat(Qt::RichText);
+        {
+            char t[256];
+            std::snprintf(t, sizeof(t),
+                "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
+                "Hardware Outputs</span>"
+                "<span style='color: %s; font-size: %dpx;'>  \xc2\xb7  "
+                "IAC algorithm, cooling fan \xe2\x80\x94 stage changes here, "
+                "review + burn from the TUNE tab</span>",
+                tt::text_primary, tt::font_label,
+                tt::text_muted, tt::font_small);
+            oc_title->setText(QString::fromUtf8(t));
+            oc_title->setStyleSheet("border: none;");
+        }
+        oc_layout->addWidget(oc_title);
+
+        // Shared status chip — updates when a value is staged so the
+        // operator sees that the change took without having to flip
+        // to the TUNE tab.
+        auto oc_status = std::make_shared<QLabel*>(new QLabel);
+        {
+            char ss[96];
+            std::snprintf(ss, sizeof(ss),
+                "QLabel { color: %s; font-size: %dpx; }",
+                tt::text_dim, tt::font_small);
+            (*oc_status)->setStyleSheet(QString::fromUtf8(ss));
+        }
+
+        auto make_row = [oc_layout](const char* label_text,
+                                    const char* hint_text) -> QHBoxLayout* {
+            auto* outer_col = new QVBoxLayout;
+            outer_col->setContentsMargins(0, 0, 0, 0);
+            outer_col->setSpacing(1);
+            auto* row = new QHBoxLayout;
+            row->setContentsMargins(0, 0, 0, 0);
+            row->setSpacing(tt::space_sm);
+            auto* lbl = new QLabel(QString::fromUtf8(label_text));
+            lbl->setFixedWidth(160);
+            char ls[96];
+            std::snprintf(ls, sizeof(ls),
+                "QLabel { color: %s; font-size: %dpx; }",
+                tt::text_secondary, tt::font_small);
+            lbl->setStyleSheet(QString::fromUtf8(ls));
+            row->addWidget(lbl);
+            outer_col->addLayout(row);
+            if (hint_text && *hint_text) {
+                auto* hint = new QLabel(QString::fromUtf8(hint_text));
+                hint->setWordWrap(true);
+                char hs[96];
+                std::snprintf(hs, sizeof(hs),
+                    "QLabel { color: %s; font-size: %dpx; "
+                    "padding-left: 164px; }",
+                    tt::text_dim, tt::font_micro);
+                hint->setStyleSheet(QString::fromUtf8(hs));
+                outer_col->addWidget(hint);
+            }
+            oc_layout->addLayout(outer_col);
+            return row;
+        };
+
+        // IAC algorithm combo.
+        auto* iac_row = make_row("IAC Algorithm:",
+            "Controls how the firmware commands idle air. PWM Closed "
+            "loop uses a 2-wire valve and an RPM target; "
+            "Stepper Open Loop drives a 4-wire stepper without "
+            "feedback.");
+        auto* iac_combo = new QComboBox;
+        char combo_style[256];
+        std::snprintf(combo_style, sizeof(combo_style),
+            "QComboBox { background: %s; color: %s; border: 1px solid %s; "
+            "border-radius: %dpx; padding: 2px 8px; font-size: %dpx; }",
+            tt::bg_elevated, tt::text_primary, tt::border,
+            tt::radius_sm, tt::font_small);
+        iac_combo->setStyleSheet(QString::fromUtf8(combo_style));
+        static const char* iac_options[] = {
+            "None", "On/Off", "PWM Open loop", "PWM Closed loop",
+            "Stepper Open Loop", "Stepper Closed Loop",
+            "PWM Closed+Open loop", "Stepper Closed+Open loop",
+        };
+        for (const char* o : iac_options)
+            iac_combo->addItem(QString::fromUtf8(o));
+        // Restore current value from edit_svc.
+        if (auto* tv = edit_svc->get_value("iacAlgorithm")) {
+            std::string cur;
+            if (std::holds_alternative<std::string>(tv->value))
+                cur = std::get<std::string>(tv->value);
+            int idx = iac_combo->findText(QString::fromUtf8(cur.c_str()));
+            if (idx >= 0) iac_combo->setCurrentIndex(idx);
+        }
+        iac_row->addWidget(iac_combo, 1);
+        QObject::connect(iac_combo,
+            static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            [edit_svc, iac_combo, oc_status](int) {
+                try {
+                    edit_svc->stage_scalar_value("iacAlgorithm",
+                        iac_combo->currentText().toStdString());
+                    (*oc_status)->setText(QString::fromUtf8(
+                        "\xe2\x9c\x85 IAC Algorithm staged \xe2\x80\x94 review on TUNE tab"));
+                } catch (...) {
+                    (*oc_status)->setText(QString::fromUtf8(
+                        "\xe2\x9d\x8c Failed to stage IAC Algorithm"));
+                }
+            });
+
+        // Fan mode combo.
+        auto* fan_row = make_row("Fan Mode:",
+            "Off disables the fan output. On/Off toggles at the set "
+            "temperature with hysteresis. PWM drives a variable-speed "
+            "fan via the fan PWM curve.");
+        auto* fan_combo = new QComboBox;
+        fan_combo->setStyleSheet(QString::fromUtf8(combo_style));
+        static const char* fan_options[] = {"Off", "On/Off", "PWM"};
+        for (const char* o : fan_options)
+            fan_combo->addItem(QString::fromUtf8(o));
+        if (auto* tv = edit_svc->get_value("fanEnable")) {
+            std::string cur;
+            if (std::holds_alternative<std::string>(tv->value))
+                cur = std::get<std::string>(tv->value);
+            int idx = fan_combo->findText(QString::fromUtf8(cur.c_str()));
+            if (idx >= 0) fan_combo->setCurrentIndex(idx);
+        }
+        fan_row->addWidget(fan_combo, 1);
+        QObject::connect(fan_combo,
+            static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            [edit_svc, fan_combo, oc_status](int) {
+                try {
+                    edit_svc->stage_scalar_value("fanEnable",
+                        fan_combo->currentText().toStdString());
+                    (*oc_status)->setText(QString::fromUtf8(
+                        "\xe2\x9c\x85 Fan Mode staged \xe2\x80\x94 review on TUNE tab"));
+                } catch (...) {
+                    (*oc_status)->setText(QString::fromUtf8(
+                        "\xe2\x9d\x8c Failed to stage Fan Mode"));
+                }
+            });
+
+        // Fan on-temperature + hysteresis (both °C).
+        auto make_temp_edit = [edit_svc, oc_status, combo_style](
+                const char* param, const char* display_label) {
+            auto* edit = new QLineEdit;
+            edit->setFixedWidth(100);
+            char es[256];
+            std::snprintf(es, sizeof(es),
+                "QLineEdit { background: %s; color: %s; "
+                "border: 1px solid %s; border-radius: %dpx; "
+                "padding: 2px 6px; font-size: %dpx; }",
+                tt::bg_elevated, tt::text_primary, tt::border,
+                tt::radius_sm, tt::font_small);
+            edit->setStyleSheet(QString::fromUtf8(es));
+            if (auto* tv = edit_svc->get_value(param)) {
+                if (std::holds_alternative<double>(tv->value)) {
+                    char b[24];
+                    std::snprintf(b, sizeof(b), "%.4g",
+                        std::get<double>(tv->value));
+                    edit->setText(QString::fromUtf8(b));
+                }
+            }
+            std::string p = param;
+            std::string dl = display_label;
+            QObject::connect(edit, &QLineEdit::editingFinished,
+                             [edit, edit_svc, p, dl, oc_status]() {
+                try {
+                    edit_svc->stage_scalar_value(p,
+                        edit->text().toStdString());
+                    char m[128];
+                    std::snprintf(m, sizeof(m),
+                        "\xe2\x9c\x85 %s staged \xe2\x80\x94 review on TUNE tab",
+                        dl.c_str());
+                    (*oc_status)->setText(QString::fromUtf8(m));
+                } catch (...) {
+                    char m[128];
+                    std::snprintf(m, sizeof(m),
+                        "\xe2\x9d\x8c Failed to stage %s", dl.c_str());
+                    (*oc_status)->setText(QString::fromUtf8(m));
+                }
+            });
+            (void)combo_style;
+            return edit;
+        };
+
+        auto* fsp_row = make_row("Fan On Temp (\xc2\xb0""C):",
+            "Engine-coolant temperature at which the fan activates. "
+            "Typical: 90\xe2\x80\x93" "95\xc2\xb0""C for a street build, lower "
+            "for performance use.");
+        fsp_row->addWidget(make_temp_edit("fanSP", "Fan On Temp"), 0);
+        fsp_row->addStretch(1);
+
+        auto* hys_row = make_row("Fan Hysteresis (\xc2\xb0""C):",
+            "Temperature drop below the set-point before the fan turns "
+            "off. 5\xe2\x80\x93" "8\xc2\xb0""C keeps the fan from cycling rapidly.");
+        hys_row->addWidget(make_temp_edit("fanHyster", "Fan Hysteresis"), 0);
+        hys_row->addStretch(1);
+
+        oc_layout->addWidget(*oc_status);
+        layout->addWidget(output_card);
+    }
+
+    // ---- Flex Fuel sensor — guided setup ---------------------------
+    // Closes another gap against the legacy Python wizard's Sensor
+    // tab. Flex-fuel setups (E85 / dual-fuel) need three fields —
+    // enable + low-freq (E0) + high-freq (E100). The Python wizard
+    // had frequency presets for the GM / Continental sensor; we
+    // surface the two most common presets inline for parity.
+    if (edit_svc) {
+        auto* flex_card = new QWidget;
+        auto* fc_layout = new QVBoxLayout(flex_card);
+        fc_layout->setContentsMargins(tt::space_md, tt::space_sm,
+                                       tt::space_md, tt::space_sm);
+        fc_layout->setSpacing(tt::space_sm);
+        {
+            char fs[256];
+            std::snprintf(fs, sizeof(fs),
+                "background-color: %s; border: 1px solid %s; "
+                "border-left: 3px solid %s; border-radius: %dpx;",
+                tt::bg_elevated, tt::border, tt::accent_special, tt::radius_md);
+            flex_card->setStyleSheet(QString::fromUtf8(fs));
+        }
+
+        auto* fc_title = new QLabel;
+        fc_title->setTextFormat(Qt::RichText);
+        {
+            char t[256];
+            std::snprintf(t, sizeof(t),
+                "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
+                "Flex Fuel Sensor</span>"
+                "<span style='color: %s; font-size: %dpx;'>  \xc2\xb7  "
+                "Ethanol-content sensor calibration for E85 / dual-fuel "
+                "builds</span>",
+                tt::text_primary, tt::font_label,
+                tt::text_muted, tt::font_small);
+            fc_title->setText(QString::fromUtf8(t));
+            fc_title->setStyleSheet("border: none;");
+        }
+        fc_layout->addWidget(fc_title);
+
+        auto fc_status = std::make_shared<QLabel*>(new QLabel);
+        {
+            char ss[96];
+            std::snprintf(ss, sizeof(ss),
+                "QLabel { color: %s; font-size: %dpx; }",
+                tt::text_dim, tt::font_small);
+            (*fc_status)->setStyleSheet(QString::fromUtf8(ss));
+        }
+
+        auto fc_make_row = [fc_layout](const char* label_text,
+                                        const char* hint_text) -> QHBoxLayout* {
+            auto* col = new QVBoxLayout;
+            col->setContentsMargins(0, 0, 0, 0);
+            col->setSpacing(1);
+            auto* row = new QHBoxLayout;
+            row->setContentsMargins(0, 0, 0, 0);
+            row->setSpacing(tt::space_sm);
+            auto* lbl = new QLabel(QString::fromUtf8(label_text));
+            lbl->setFixedWidth(180);
+            char ls[96];
+            std::snprintf(ls, sizeof(ls),
+                "QLabel { color: %s; font-size: %dpx; }",
+                tt::text_secondary, tt::font_small);
+            lbl->setStyleSheet(QString::fromUtf8(ls));
+            row->addWidget(lbl);
+            col->addLayout(row);
+            if (hint_text && *hint_text) {
+                auto* hint = new QLabel(QString::fromUtf8(hint_text));
+                hint->setWordWrap(true);
+                char hs[128];
+                std::snprintf(hs, sizeof(hs),
+                    "QLabel { color: %s; font-size: %dpx; "
+                    "padding-left: 184px; }",
+                    tt::text_dim, tt::font_micro);
+                hint->setStyleSheet(QString::fromUtf8(hs));
+                col->addWidget(hint);
+            }
+            fc_layout->addLayout(col);
+            return row;
+        };
+
+        // Enable combo.
+        auto* flex_en_row = fc_make_row("Flex Fuel Sensor:",
+            "Turns on readings from the Flex sensor and enables fuel "
+            "+ timing adjustments based on ethanol content.");
+        auto* flex_en_combo = new QComboBox;
+        char flex_combo_style[256];
+        std::snprintf(flex_combo_style, sizeof(flex_combo_style),
+            "QComboBox { background: %s; color: %s; border: 1px solid %s; "
+            "border-radius: %dpx; padding: 2px 8px; font-size: %dpx; }",
+            tt::bg_elevated, tt::text_primary, tt::border,
+            tt::radius_sm, tt::font_small);
+        flex_en_combo->setStyleSheet(QString::fromUtf8(flex_combo_style));
+        flex_en_combo->addItem("Off");
+        flex_en_combo->addItem("On");
+        if (auto* tv = edit_svc->get_value("flexEnabled")) {
+            std::string cur;
+            if (std::holds_alternative<std::string>(tv->value))
+                cur = std::get<std::string>(tv->value);
+            int idx = flex_en_combo->findText(QString::fromUtf8(cur.c_str()));
+            if (idx >= 0) flex_en_combo->setCurrentIndex(idx);
+        }
+        flex_en_row->addWidget(flex_en_combo, 1);
+        QObject::connect(flex_en_combo,
+            static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            [edit_svc, flex_en_combo, fc_status](int) {
+                try {
+                    edit_svc->stage_scalar_value("flexEnabled",
+                        flex_en_combo->currentText().toStdString());
+                    (*fc_status)->setText(QString::fromUtf8(
+                        "\xe2\x9c\x85 Flex Fuel Sensor staged \xe2\x80\x94 review on TUNE tab"));
+                } catch (...) {}
+            });
+
+        // Frequency line edits + GM/Continental preset.
+        auto fc_make_edit = [edit_svc, fc_status](
+                const char* param, const char* label) {
+            auto* edit = new QLineEdit;
+            edit->setFixedWidth(100);
+            char es[256];
+            std::snprintf(es, sizeof(es),
+                "QLineEdit { background: %s; color: %s; "
+                "border: 1px solid %s; border-radius: %dpx; "
+                "padding: 2px 6px; font-size: %dpx; }",
+                tt::bg_elevated, tt::text_primary, tt::border,
+                tt::radius_sm, tt::font_small);
+            edit->setStyleSheet(QString::fromUtf8(es));
+            if (auto* tv = edit_svc->get_value(param)) {
+                if (std::holds_alternative<double>(tv->value)) {
+                    char b[24];
+                    std::snprintf(b, sizeof(b), "%.4g",
+                        std::get<double>(tv->value));
+                    edit->setText(QString::fromUtf8(b));
+                }
+            }
+            std::string p = param;
+            std::string lbl = label;
+            QObject::connect(edit, &QLineEdit::editingFinished,
+                             [edit, edit_svc, p, lbl, fc_status]() {
+                try {
+                    edit_svc->stage_scalar_value(p,
+                        edit->text().toStdString());
+                    char m[128];
+                    std::snprintf(m, sizeof(m),
+                        "\xe2\x9c\x85 %s staged \xe2\x80\x94 review on TUNE tab",
+                        lbl.c_str());
+                    (*fc_status)->setText(QString::fromUtf8(m));
+                } catch (...) {}
+            });
+            return edit;
+        };
+
+        auto* freq_low_row = fc_make_row("Low Frequency (E0, Hz):",
+            "Frequency the sensor outputs at 0% ethanol. GM / "
+            "Continental sensor: 50 Hz.");
+        auto* freq_low_edit = fc_make_edit("flexFreqLow", "Flex Low Freq");
+        freq_low_row->addWidget(freq_low_edit, 0);
+        freq_low_row->addStretch(1);
+
+        auto* freq_hi_row = fc_make_row("High Frequency (E100, Hz):",
+            "Frequency the sensor outputs at 100% ethanol. GM / "
+            "Continental sensor: 150 Hz.");
+        auto* freq_hi_edit = fc_make_edit("flexFreqHigh", "Flex High Freq");
+        freq_hi_row->addWidget(freq_hi_edit, 0);
+        freq_hi_row->addStretch(1);
+
+        auto* preset_row = new QHBoxLayout;
+        preset_row->setContentsMargins(184, 0, 0, 0);
+        preset_row->setSpacing(tt::space_sm);
+        auto* preset_btn = new QPushButton(QString::fromUtf8(
+            "Apply GM / Continental preset (50 / 150 Hz)"));
+        preset_btn->setCursor(Qt::PointingHandCursor);
+        {
+            char ps[384];
+            std::snprintf(ps, sizeof(ps),
+                "QPushButton { background: %s; color: %s; border: 1px solid %s; "
+                "border-radius: %dpx; padding: 2px %dpx; font-size: %dpx; } "
+                "QPushButton:hover { border-color: %s; }",
+                tt::bg_elevated, tt::text_secondary, tt::border,
+                tt::radius_sm, tt::space_md, tt::font_small,
+                tt::accent_special);
+            preset_btn->setStyleSheet(QString::fromUtf8(ps));
+        }
+        preset_row->addWidget(preset_btn);
+        preset_row->addStretch(1);
+        fc_layout->addLayout(preset_row);
+
+        QObject::connect(preset_btn, &QPushButton::clicked,
+                         [edit_svc, freq_low_edit, freq_hi_edit, fc_status]() {
+            freq_low_edit->setText("50");
+            freq_hi_edit->setText("150");
+            try {
+                edit_svc->stage_scalar_value("flexFreqLow", "50");
+                edit_svc->stage_scalar_value("flexFreqHigh", "150");
+                (*fc_status)->setText(QString::fromUtf8(
+                    "\xe2\x9c\x85 GM / Continental preset applied \xe2\x80\x94 "
+                    "review on TUNE tab"));
+            } catch (...) {}
+        });
+
+        fc_layout->addWidget(*fc_status);
+        layout->addWidget(flex_card);
+    }
+
+    // ---- Safety & Protection — knock + AFR protection --------------
+    // Closes the knock_mode + AFR-protection half of the Python wizard's
+    // Sensor tab gap. AFR protection full parity needs 9 fields; this
+    // card ships the operator-most-important 5 (enable + deviation +
+    // cut-time for AFR, mode + threshold for knock). The three trigger
+    // thresholds (min MAP / min RPM / min TPS) remain on the raw scalar
+    // pages on the TUNE tab — a future slice can fold them in.
+    if (edit_svc) {
+        auto* safety_card = new QWidget;
+        auto* sf_layout = new QVBoxLayout(safety_card);
+        sf_layout->setContentsMargins(tt::space_md, tt::space_sm,
+                                       tt::space_md, tt::space_sm);
+        sf_layout->setSpacing(tt::space_sm);
+        {
+            char sf[256];
+            std::snprintf(sf, sizeof(sf),
+                "background-color: %s; border: 1px solid %s; "
+                "border-left: 3px solid %s; border-radius: %dpx;",
+                tt::bg_elevated, tt::border, tt::accent_danger, tt::radius_md);
+            safety_card->setStyleSheet(QString::fromUtf8(sf));
+        }
+
+        auto* sf_title = new QLabel;
+        sf_title->setTextFormat(Qt::RichText);
+        {
+            char t[320];
+            std::snprintf(t, sizeof(t),
+                "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
+                "Safety &amp; Protection</span>"
+                "<span style='color: %s; font-size: %dpx;'>  \xc2\xb7  "
+                "Knock detection and AFR-deviation fuel cut \xe2\x80\x94 "
+                "review carefully before enabling on a running engine"
+                "</span>",
+                tt::text_primary, tt::font_label,
+                tt::text_muted, tt::font_small);
+            sf_title->setText(QString::fromUtf8(t));
+            sf_title->setStyleSheet("border: none;");
+        }
+        sf_layout->addWidget(sf_title);
+
+        auto sf_status = std::make_shared<QLabel*>(new QLabel);
+        {
+            char ss[96];
+            std::snprintf(ss, sizeof(ss),
+                "QLabel { color: %s; font-size: %dpx; }",
+                tt::text_dim, tt::font_small);
+            (*sf_status)->setStyleSheet(QString::fromUtf8(ss));
+        }
+
+        auto sf_make_row = [sf_layout](const char* label_text,
+                                        const char* hint_text) -> QHBoxLayout* {
+            auto* col = new QVBoxLayout;
+            col->setContentsMargins(0, 0, 0, 0);
+            col->setSpacing(1);
+            auto* row = new QHBoxLayout;
+            row->setContentsMargins(0, 0, 0, 0);
+            row->setSpacing(tt::space_sm);
+            auto* lbl = new QLabel(QString::fromUtf8(label_text));
+            lbl->setFixedWidth(200);
+            char ls[96];
+            std::snprintf(ls, sizeof(ls),
+                "QLabel { color: %s; font-size: %dpx; }",
+                tt::text_secondary, tt::font_small);
+            lbl->setStyleSheet(QString::fromUtf8(ls));
+            row->addWidget(lbl);
+            col->addLayout(row);
+            if (hint_text && *hint_text) {
+                auto* hint = new QLabel(QString::fromUtf8(hint_text));
+                hint->setWordWrap(true);
+                char hs[128];
+                std::snprintf(hs, sizeof(hs),
+                    "QLabel { color: %s; font-size: %dpx; "
+                    "padding-left: 204px; }",
+                    tt::text_dim, tt::font_micro);
+                hint->setStyleSheet(QString::fromUtf8(hs));
+                col->addWidget(hint);
+            }
+            sf_layout->addLayout(col);
+            return row;
+        };
+
+        char sf_combo_style[256];
+        std::snprintf(sf_combo_style, sizeof(sf_combo_style),
+            "QComboBox { background: %s; color: %s; border: 1px solid %s; "
+            "border-radius: %dpx; padding: 2px 8px; font-size: %dpx; }",
+            tt::bg_elevated, tt::text_primary, tt::border,
+            tt::radius_sm, tt::font_small);
+
+        // Helper: combo bound to an enum scalar.
+        auto sf_make_combo = [edit_svc, sf_status, sf_combo_style](
+                const char* param, const char* label,
+                std::initializer_list<const char*> options) {
+            auto* combo = new QComboBox;
+            combo->setStyleSheet(QString::fromUtf8(sf_combo_style));
+            for (auto* o : options) combo->addItem(QString::fromUtf8(o));
+            if (auto* tv = edit_svc->get_value(param)) {
+                std::string cur;
+                if (std::holds_alternative<std::string>(tv->value))
+                    cur = std::get<std::string>(tv->value);
+                int idx = combo->findText(QString::fromUtf8(cur.c_str()));
+                if (idx >= 0) combo->setCurrentIndex(idx);
+            }
+            std::string p = param;
+            std::string lbl = label;
+            QObject::connect(combo,
+                static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+                [edit_svc, combo, p, lbl, sf_status](int) {
+                    try {
+                        edit_svc->stage_scalar_value(p,
+                            combo->currentText().toStdString());
+                        char m[128];
+                        std::snprintf(m, sizeof(m),
+                            "\xe2\x9c\x85 %s staged \xe2\x80\x94 review on TUNE tab",
+                            lbl.c_str());
+                        (*sf_status)->setText(QString::fromUtf8(m));
+                    } catch (...) {}
+                });
+            return combo;
+        };
+
+        // Helper: scalar QLineEdit.
+        auto sf_make_edit = [edit_svc, sf_status](
+                const char* param, const char* label) {
+            auto* edit = new QLineEdit;
+            edit->setFixedWidth(100);
+            char es[256];
+            std::snprintf(es, sizeof(es),
+                "QLineEdit { background: %s; color: %s; "
+                "border: 1px solid %s; border-radius: %dpx; "
+                "padding: 2px 6px; font-size: %dpx; }",
+                tt::bg_elevated, tt::text_primary, tt::border,
+                tt::radius_sm, tt::font_small);
+            edit->setStyleSheet(QString::fromUtf8(es));
+            if (auto* tv = edit_svc->get_value(param)) {
+                if (std::holds_alternative<double>(tv->value)) {
+                    char b[24];
+                    std::snprintf(b, sizeof(b), "%.4g",
+                        std::get<double>(tv->value));
+                    edit->setText(QString::fromUtf8(b));
+                }
+            }
+            std::string p = param;
+            std::string lbl = label;
+            QObject::connect(edit, &QLineEdit::editingFinished,
+                             [edit, edit_svc, p, lbl, sf_status]() {
+                try {
+                    edit_svc->stage_scalar_value(p,
+                        edit->text().toStdString());
+                    char m[128];
+                    std::snprintf(m, sizeof(m),
+                        "\xe2\x9c\x85 %s staged \xe2\x80\x94 review on TUNE tab",
+                        lbl.c_str());
+                    (*sf_status)->setText(QString::fromUtf8(m));
+                } catch (...) {}
+            });
+            return edit;
+        };
+
+        // --- Knock detection ---
+        auto* knock_mode_row = sf_make_row("Knock Detection Mode:",
+            "Digital: accepts a pre-conditioned knock pulse (Bosch-style "
+            "sensor with external window comparator). Analog: raw audio "
+            "into the ECU ADC. Leave Off until the sensor is wired + "
+            "verified on a dyno.");
+        knock_mode_row->addWidget(
+            sf_make_combo("knock_mode", "Knock Mode",
+                {"Off", "Digital", "Analog"}),
+            1);
+
+        auto* knock_thresh_row = sf_make_row("Knock Threshold (V):",
+            "Voltage above which the firmware registers a knock event. "
+            "Tune on a dyno; too low = false positives from mechanical "
+            "noise, too high = no protection.");
+        knock_thresh_row->addWidget(
+            sf_make_edit("knock_threshold", "Knock Threshold"), 0);
+        knock_thresh_row->addStretch(1);
+
+        // --- AFR protection ---
+        auto* afrp_mode_row = sf_make_row("AFR Protection:",
+            "Fuel cut triggered when measured AFR drifts leaner than "
+            "target by the deviation below. Fixed mode uses one AFR "
+            "deviation; Table mode uses afrProtectDeviationLambda "
+            "(edit on the TUNE tab).");
+        afrp_mode_row->addWidget(
+            sf_make_combo("afrProtectEnabled", "AFR Protection",
+                {"Off", "Fixed mode", "Table mode"}),
+            1);
+
+        auto* afrp_dev_row = sf_make_row("AFR Deviation (AFR):",
+            "Maximum lean deviation allowed before fuel is cut. "
+            "Typical: 1.0–2.0 AFR (e.g. target 12.5, cut at 13.5–14.5). "
+            "Edit trigger thresholds (min MAP / RPM / TPS) on the TUNE "
+            "tab's protection page.");
+        afrp_dev_row->addWidget(
+            sf_make_edit("afrProtectDeviation", "AFR Deviation"), 0);
+        afrp_dev_row->addStretch(1);
+
+        auto* afrp_cut_row = sf_make_row("Cut Delay (seconds):",
+            "Time the AFR must remain outside the deviation window "
+            "before the cut fires. 0.5\xe2\x80\x93" "1.0 s suppresses one-shot "
+            "spikes; too long defeats the safety.");
+        afrp_cut_row->addWidget(
+            sf_make_edit("afrProtectCutTime", "Cut Delay"), 0);
+        afrp_cut_row->addStretch(1);
+
+        // --- AFR protection trigger thresholds ---
+        // Fuel cut is gated by MAP / RPM / TPS — protection only fires
+        // when the engine is actually loaded. Below these thresholds
+        // (idle, cruise, coastdown) the protection sits dormant so a
+        // deliberately-rich startup or DFCO event doesn't trip the cut.
+        auto* afrp_map_row = sf_make_row("Min MAP (kPa) to arm:",
+            "Protection arms only when MAP exceeds this. Typical: "
+            "100\xe2\x80\x93" "120 kPa so cruise / overrun don't trigger.");
+        afrp_map_row->addWidget(
+            sf_make_edit("afrProtectMAP", "Min MAP"), 0);
+        afrp_map_row->addStretch(1);
+
+        auto* afrp_rpm_row = sf_make_row("Min RPM to arm:",
+            "Protection arms only above this RPM. Typical: "
+            "2500\xe2\x80\x93" "3500 RPM so it never fires during cranking or "
+            "idle.");
+        afrp_rpm_row->addWidget(
+            sf_make_edit("afrProtectRPM", "Min RPM"), 0);
+        afrp_rpm_row->addStretch(1);
+
+        auto* afrp_tps_row = sf_make_row("Min TPS (%) to arm:",
+            "Protection arms only above this throttle position. "
+            "Typical: 50\xe2\x80\x93" "70% so only heavy-load events can cut.");
+        afrp_tps_row->addWidget(
+            sf_make_edit("afrProtectTPS", "Min TPS"), 0);
+        afrp_tps_row->addStretch(1);
+
+        auto* afrp_react_row = sf_make_row("Reactivation TPS (%):",
+            "After a cut, fuel resumes only when the throttle drops "
+            "below this. Set lower than Min TPS above so the operator "
+            "must fully back off before fueling returns.");
+        afrp_react_row->addWidget(
+            sf_make_edit("afrProtectReactivationTPS", "Reactivation TPS"), 0);
+        afrp_react_row->addStretch(1);
+
+        sf_layout->addWidget(*sf_status);
+        layout->addWidget(safety_card);
+    }
+
+    // ---- Advanced Turbo Parameters — feeds compressor-map modeling -
+    // The compressor map below was previously modeling against
+    // hardcoded "generic mid-frame turbo" numbers regardless of what
+    // turbo the operator actually has. This card persists per-turbo
+    // datasheet values into QSettings so the map reflects the real
+    // envelope. Only wired when the engine has forced induction
+    // (boostEnabled = On) — an NA build has nothing to model.
+    if (is_forced_induction) {
+        auto* turbo_card = new QWidget;
+        auto* tl = new QVBoxLayout(turbo_card);
+        tl->setContentsMargins(tt::space_md, tt::space_sm,
+                                tt::space_md, tt::space_sm);
+        tl->setSpacing(tt::space_sm);
+        {
+            char ts[256];
+            std::snprintf(ts, sizeof(ts),
+                "background-color: %s; border: 1px solid %s; "
+                "border-left: 3px solid %s; border-radius: %dpx;",
+                tt::bg_elevated, tt::border, tt::accent_primary, tt::radius_md);
+            turbo_card->setStyleSheet(QString::fromUtf8(ts));
+        }
+
+        auto* t_title = new QLabel;
+        t_title->setTextFormat(Qt::RichText);
+        {
+            char t[256];
+            std::snprintf(t, sizeof(t),
+                "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
+                "Advanced Turbo Parameters</span>"
+                "<span style='color: %s; font-size: %dpx;'>  \xc2\xb7  "
+                "Compressor datasheet inputs \xe2\x80\x94 feeds the map below"
+                "</span>",
+                tt::text_primary, tt::font_label,
+                tt::text_muted, tt::font_small);
+            t_title->setText(QString::fromUtf8(t));
+            t_title->setStyleSheet("border: none;");
+        }
+        tl->addWidget(t_title);
+
+        auto t_status = std::make_shared<QLabel*>(new QLabel(QString::fromUtf8(
+            "Edit any field, then revisit the Setup tab to see the "
+            "compressor map recompute against the new envelope.")));
+        {
+            char ss[96];
+            std::snprintf(ss, sizeof(ss),
+                "QLabel { color: %s; font-size: %dpx; }",
+                tt::text_dim, tt::font_small);
+            (*t_status)->setStyleSheet(QString::fromUtf8(ss));
+        }
+
+        auto t_make_row = [tl](const char* label_text,
+                                const char* hint_text) -> QHBoxLayout* {
+            auto* col = new QVBoxLayout;
+            col->setContentsMargins(0, 0, 0, 0);
+            col->setSpacing(1);
+            auto* row = new QHBoxLayout;
+            row->setContentsMargins(0, 0, 0, 0);
+            row->setSpacing(tt::space_sm);
+            auto* lbl = new QLabel(QString::fromUtf8(label_text));
+            lbl->setFixedWidth(220);
+            char ls[96];
+            std::snprintf(ls, sizeof(ls),
+                "QLabel { color: %s; font-size: %dpx; }",
+                tt::text_secondary, tt::font_small);
+            lbl->setStyleSheet(QString::fromUtf8(ls));
+            row->addWidget(lbl);
+            col->addLayout(row);
+            if (hint_text && *hint_text) {
+                auto* hint = new QLabel(QString::fromUtf8(hint_text));
+                hint->setWordWrap(true);
+                char hs[128];
+                std::snprintf(hs, sizeof(hs),
+                    "QLabel { color: %s; font-size: %dpx; "
+                    "padding-left: 224px; }",
+                    tt::text_dim, tt::font_micro);
+                hint->setStyleSheet(QString::fromUtf8(hs));
+                col->addWidget(hint);
+            }
+            tl->addLayout(col);
+            return row;
+        };
+
+        auto t_make_edit = [t_status](
+                const char* qs_key, double def, const char* label) {
+            QSettings qs;
+            double cur = qs.value(qs_key, def).toDouble();
+            auto* edit = new QLineEdit;
+            edit->setFixedWidth(100);
+            char es[256];
+            std::snprintf(es, sizeof(es),
+                "QLineEdit { background: %s; color: %s; "
+                "border: 1px solid %s; border-radius: %dpx; "
+                "padding: 2px 6px; font-size: %dpx; }",
+                tt::bg_elevated, tt::text_primary, tt::border,
+                tt::radius_sm, tt::font_small);
+            edit->setStyleSheet(QString::fromUtf8(es));
+            char b[24];
+            std::snprintf(b, sizeof(b), "%.4g", cur);
+            edit->setText(QString::fromUtf8(b));
+            std::string k = qs_key;
+            std::string lbl = label;
+            QObject::connect(edit, &QLineEdit::editingFinished,
+                             [edit, k, lbl, t_status]() {
+                bool ok = false;
+                double v = edit->text().toDouble(&ok);
+                if (!ok) return;
+                QSettings().setValue(QString::fromUtf8(k.c_str()), v);
+                char m[128];
+                std::snprintf(m, sizeof(m),
+                    "\xe2\x9c\x85 %s saved \xe2\x80\x94 revisit Setup tab to "
+                    "refresh the compressor map",
+                    lbl.c_str());
+                (*t_status)->setText(QString::fromUtf8(m));
+            });
+            return edit;
+        };
+
+        auto* sf_row = t_make_row("Compressor Surge Flow (lb/min):",
+            "Minimum safe flow from the compressor datasheet surge "
+            "line. GT28-class: ~8\xe2\x80\x93" "12 lb/min. GT30-class: "
+            "~10\xe2\x80\x93" "15 lb/min.");
+        sf_row->addWidget(
+            t_make_edit("setup/turbo/surge_flow_lbmin", 10.0,
+                        "Surge flow"), 0);
+        sf_row->addStretch(1);
+
+        auto* cf_row = t_make_row("Compressor Choke Flow (lb/min):",
+            "Peak flow before compressor stalls. GT28: ~40\xe2\x80\x93" "50 "
+            "lb/min. GT30: ~50\xe2\x80\x93" "65 lb/min. Read from the map's "
+            "rightmost efficiency island.");
+        cf_row->addWidget(
+            t_make_edit("setup/turbo/choke_flow_lbmin", 50.0,
+                        "Choke flow"), 0);
+        cf_row->addStretch(1);
+
+        auto* pr_row = t_make_row("Max Pressure Ratio (PR):",
+            "Peak PR before compressor efficiency collapses. Most "
+            "journal-bearing turbos: 2.8\xe2\x80\x93" "3.2. Ball-bearing "
+            "precision units: 3.5\xe2\x80\x93" "4.0.");
+        pr_row->addWidget(
+            t_make_edit("setup/turbo/max_pr", 3.2, "Max PR"), 0);
+        pr_row->addStretch(1);
+
+        auto* ar_row = t_make_row("Turbine A/R Ratio:",
+            "Informational. Smaller A/R = faster spool but lower top-"
+            "end. GT28: 0.64. GT30: 0.82\xe2\x80\x93" "1.06. Not used by the "
+            "compressor-map math but worth recording here.");
+        ar_row->addWidget(
+            t_make_edit("setup/turbo/ar_ratio", 0.63, "A/R Ratio"), 0);
+        ar_row->addStretch(1);
+
+        tl->addWidget(*t_status);
+        layout->addWidget(turbo_card);
+    }
 
     // ---- Compressor-map modeling (Phase 15 #10) ----
     // Projects the engine's airflow demand across the RPM sweep onto
     // the compressor-map coordinate system (mass flow × pressure
     // ratio) and flags surge / choke / off-map risk against the
-    // supplied envelope. The envelope defaults below correspond to a
-    // generic mid-frame turbo (think GT30-class) — a later slice can
-    // wire this to per-turbo presets or operator-supplied datasheet
-    // numbers.
+    // supplied envelope. Envelope reads from QSettings now, populated
+    // by the Advanced Turbo Parameters card above so the map reflects
+    // the operator's actual turbo instead of hardcoded defaults.
     {
         namespace cmm = tuner_core::compressor_map_modeling;
         cmm::Context cm_ctx;
@@ -12529,9 +14657,13 @@ QWidget* build_setup_tab(
         cm_ctx.cylinder_count = ncyl;
         cm_ctx.baro_kpa = 101.3;
         cm_ctx.intake_temp_c = 30.0;
-        cm_ctx.surge_flow_lbmin  = 10.0;
-        cm_ctx.choke_flow_lbmin  = 50.0;
-        cm_ctx.max_pressure_ratio = 3.2;
+        QSettings cm_qs;
+        cm_ctx.surge_flow_lbmin =
+            cm_qs.value("setup/turbo/surge_flow_lbmin", 10.0).toDouble();
+        cm_ctx.choke_flow_lbmin =
+            cm_qs.value("setup/turbo/choke_flow_lbmin", 50.0).toDouble();
+        cm_ctx.max_pressure_ratio =
+            cm_qs.value("setup/turbo/max_pr", 3.2).toDouble();
         cm_ctx.surge_margin_pct = 10.0;
 
         // Sweep: 1500 → 7500 RPM at the wizard's target boost + 30 C IAT.
@@ -13146,12 +15278,15 @@ QWidget* build_triggers_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
     });
     conn_check->start(1000);
 
-    // Results container — rebuilt on each import.
+    // Results container — rebuilt on each import. Claims vertical
+    // stretch so trigger viz + analysis cards fill the window in
+    // maximized mode instead of clustering near the top. Removes the
+    // need for a trailing addStretch(1) at the end of the tab.
     auto* results_widget = new QWidget;
     auto* results_layout = new QVBoxLayout(results_widget);
     results_layout->setContentsMargins(0, 0, 0, 0);
     results_layout->setSpacing(tt::space_sm + 2);
-    outer->addWidget(results_widget);
+    outer->addWidget(results_widget, 1);
 
     // Helper: parse CSV text into rows + column names.
     auto parse_csv_text = [](const std::string& text,
@@ -13463,7 +15598,6 @@ QWidget* build_triggers_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
         capture_btn->setEnabled(true);
     });
 
-    outer->addStretch(1);
     scroll->setWidget(container);
     return scroll;
 }
@@ -13855,10 +15989,16 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
     }
     layout->addWidget(channel_info);
 
+    // Forward-declared rebuild hook — populated by the channel-list
+    // section below. The profile-switch handler calls it so a new
+    // profile's enabled-channel state lands in the checkbox list.
+    auto rebuild_channel_list = std::make_shared<std::function<void()>>();
+
     // Switch profile.
     QObject::connect(profile_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
                      [profile_combo, all_profiles, active_name, profile,
-                      profile_channel_names, channel_info, save_profiles](int idx) {
+                      profile_channel_names, channel_info, save_profiles,
+                      rebuild_channel_list](int idx) {
         if (idx < 0 || idx >= static_cast<int>(all_profiles->size())) return;
         *profile = (*all_profiles)[idx];
         *active_name = profile->name;
@@ -13872,6 +16012,7 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
             static_cast<int>(profile->enabled_channels().size()));
         channel_info->setText(QString::fromUtf8(ci));
         save_profiles();
+        if (*rebuild_channel_list) (*rebuild_channel_list)();
     });
 
     // Add new profile (duplicate current).
@@ -13912,34 +16053,142 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
         save_profiles();
     });
 
-    // Legacy channel display — show first few channels.
+    // Channel picker — scrollable list of checkboxes that toggles
+    // `profile->channels[i].enabled` for the active profile and
+    // persists the change. Replaces a prior read-only info card that
+    // let operators see which channels were on but gave them no way
+    // to change it. The list rebuilds when the profile switches.
+    auto* ch_card = new QWidget;
+    auto* ch_card_layout = new QVBoxLayout(ch_card);
+    ch_card_layout->setContentsMargins(tt::space_md, tt::space_sm, tt::space_md, tt::space_sm);
+    ch_card_layout->setSpacing(tt::space_xs);
+    ch_card->setStyleSheet(QString::fromUtf8(tt::card_style().c_str()));
+
+    auto* ch_title = new QLabel;
+    ch_title->setTextFormat(Qt::RichText);
     {
-        char ch_buf[2048]; int coff = 0;
-        int shown = std::min(static_cast<int>(profile->channels.size()), 24);
-        for (int i = 0; i < shown; ++i) {
-            auto& ch = profile->channels[i];
-            const char* dot = (i < 6) ? "\xf0\x9f\x9f\xa2" : (i < 12) ? "\xf0\x9f\x94\xb5" : "\xe2\x9a\xaa";
-            coff += std::snprintf(ch_buf + coff, sizeof(ch_buf) - coff,
-                "%s %s%s%s%s", dot, ch.label.c_str(),
-                ch.units.empty() ? "" : " (",
-                ch.units.empty() ? "" : ch.units.c_str(),
-                ch.units.empty() ? "" : ")");
-            if (i < shown - 1) coff += std::snprintf(ch_buf + coff, sizeof(ch_buf) - coff, "\n");
-            if (coff >= static_cast<int>(sizeof(ch_buf) - 1)) break;
-        }
-        if (static_cast<int>(profile->channels.size()) > shown) {
-            coff += std::snprintf(ch_buf + coff, sizeof(ch_buf) - coff,
-                "\n... and %d more channels",
-                static_cast<int>(profile->channels.size()) - shown);
-        }
         bool has_def = !find_native_definition().empty() || !find_production_ini().empty();
-        char title[128];
-        std::snprintf(title, sizeof(title),
-            "Logging Profile \xe2\x80\x94 %d channels from %s",
-            static_cast<int>(profile->channels.size()),
+        char t[160];
+        std::snprintf(t, sizeof(t),
+            "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
+            "Channels</span>"
+            "<span style='color: %s; font-size: %dpx;'>  \xc2\xb7  "
+            "from %s  \xc2\xb7  tick to include in datalog</span>",
+            tt::text_primary, tt::font_label,
+            tt::text_muted, tt::font_small,
             has_def ? "loaded definition" : "defaults");
-        layout->addWidget(make_info_card(title, ch_buf, tt::accent_primary));
+        ch_title->setText(QString::fromUtf8(t));
     }
+    ch_title->setStyleSheet("border: none;");
+    ch_card_layout->addWidget(ch_title);
+
+    // All / None helpers — batch toggle for large channel sets.
+    auto* batch_row = new QHBoxLayout;
+    batch_row->setContentsMargins(0, 0, 0, 0);
+    batch_row->setSpacing(tt::space_sm);
+    auto* all_btn = new QPushButton(QString::fromUtf8("All"));
+    auto* none_btn = new QPushButton(QString::fromUtf8("None"));
+    for (auto* b : {all_btn, none_btn}) {
+        b->setFixedHeight(22);
+        char bs[256];
+        std::snprintf(bs, sizeof(bs),
+            "QPushButton { background: %s; color: %s; border: 1px solid %s; "
+            "border-radius: %dpx; padding: 1px %dpx; font-size: %dpx; }"
+            "QPushButton:hover { background: %s; }",
+            tt::bg_elevated, tt::text_secondary, tt::border,
+            tt::radius_sm, tt::space_sm, tt::font_small,
+            tt::fill_primary_mid);
+        b->setStyleSheet(QString::fromUtf8(bs));
+    }
+    batch_row->addWidget(all_btn);
+    batch_row->addWidget(none_btn);
+    batch_row->addStretch(1);
+    ch_card_layout->addLayout(batch_row);
+
+    auto* ch_scroll = new QScrollArea;
+    ch_scroll->setWidgetResizable(true);
+    ch_scroll->setFixedHeight(220);
+    ch_scroll->setStyleSheet("QScrollArea { border: none; background: transparent; }");
+    auto* ch_inner = new QWidget;
+    auto* ch_inner_layout = new QVBoxLayout(ch_inner);
+    ch_inner_layout->setContentsMargins(0, 0, 0, 0);
+    ch_inner_layout->setSpacing(0);
+    ch_scroll->setWidget(ch_inner);
+    ch_card_layout->addWidget(ch_scroll);
+    layout->addWidget(ch_card);
+
+    *rebuild_channel_list = [ch_inner_layout, profile, all_profiles, active_name,
+                             profile_channel_names, channel_info,
+                             save_profiles]() {
+        // Clear existing rows.
+        QLayoutItem* item;
+        while ((item = ch_inner_layout->takeAt(0)) != nullptr) {
+            if (auto* w = item->widget()) w->deleteLater();
+            delete item;
+        }
+
+        for (std::size_t i = 0; i < profile->channels.size(); ++i) {
+            const auto& ch = profile->channels[i];
+            std::string label = ch.label;
+            if (!ch.units.empty()) label += "  (" + ch.units + ")";
+            auto* cb = new QCheckBox(QString::fromUtf8(label.c_str()));
+            cb->setChecked(ch.enabled);
+            char cs[192];
+            std::snprintf(cs, sizeof(cs),
+                "QCheckBox { color: %s; font-size: %dpx; padding: 2px 0px; }"
+                "QCheckBox::indicator { width: 14px; height: 14px; }",
+                tt::text_primary, tt::font_small);
+            cb->setStyleSheet(QString::fromUtf8(cs));
+            QObject::connect(cb, &QCheckBox::toggled,
+                             [i, profile, all_profiles, active_name,
+                              profile_channel_names, channel_info,
+                              save_profiles](bool on) {
+                if (i >= profile->channels.size()) return;
+                profile->channels[i].enabled = on;
+                // Mirror into the owning collection slot.
+                for (auto& p : *all_profiles) {
+                    if (p.name == *active_name) { p = *profile; break; }
+                }
+                // Refresh derived state.
+                profile_channel_names->clear();
+                for (const auto& c : profile->enabled_channels())
+                    profile_channel_names->push_back(c.name);
+                char ci[128];
+                std::snprintf(ci, sizeof(ci),
+                    "<span style='color: %s; font-size: %dpx;'>%d channels enabled</span>",
+                    tt::text_muted, tt::font_small,
+                    static_cast<int>(profile->enabled_channels().size()));
+                channel_info->setText(QString::fromUtf8(ci));
+                save_profiles();
+            });
+            ch_inner_layout->addWidget(cb);
+        }
+        ch_inner_layout->addStretch(1);
+    };
+    (*rebuild_channel_list)();
+
+    // Batch All/None — flip every channel and rebuild list.
+    auto batch_set = [profile, all_profiles, active_name,
+                      profile_channel_names, channel_info,
+                      save_profiles, rebuild_channel_list](bool on) {
+        for (auto& c : profile->channels) c.enabled = on;
+        for (auto& p : *all_profiles) {
+            if (p.name == *active_name) { p = *profile; break; }
+        }
+        profile_channel_names->clear();
+        for (const auto& c : profile->enabled_channels())
+            profile_channel_names->push_back(c.name);
+        char ci[128];
+        std::snprintf(ci, sizeof(ci),
+            "<span style='color: %s; font-size: %dpx;'>%d channels enabled</span>",
+            tt::text_muted, tt::font_small,
+            static_cast<int>(profile->enabled_channels().size()));
+        channel_info->setText(QString::fromUtf8(ci));
+        save_profiles();
+        (*rebuild_channel_list)();
+    };
+    QObject::connect(all_btn, &QPushButton::clicked, [batch_set]() { batch_set(true); });
+    QObject::connect(none_btn, &QPushButton::clicked, [batch_set]() { batch_set(false); });
 
     // ---- Import + Replay section ----
     namespace dli = tuner_core::datalog_import;
@@ -14135,7 +16384,11 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
         // stays in sync.
         auto* timeline = new LogTimelineWidget;
         timeline->hide();
-        layout->addWidget(timeline);
+        // Claim vertical stretch so the timeline grows with the window
+        // after a CSV import. Before this, the tab's trailing
+        // addStretch(1) absorbed all extra space and the timeline
+        // stayed at its natural (~240px) height even when maximized.
+        layout->addWidget(timeline, 1);
 
         QObject::connect(reset_zoom_btn, &QPushButton::clicked,
             [timeline]() { timeline->reset_zoom(); });
@@ -14716,7 +16969,6 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
             });
     }
 
-    layout->addStretch(1);
     scroll->setWidget(container);
     return scroll;
 }
@@ -15164,12 +17416,25 @@ public:
             }
             auto json = ntw::export_json(tune);
 
-            // Determine file path — reuse last path or ask.
+            // Determine file path — reuse last path or ask. When asking,
+            // default the dialog to the active project's directory with
+            // a sensible `.tuner` filename so Save Tune lands next to
+            // the project by default instead of in the OS default dir.
             std::string path = *save_path;
             if (path.empty()) {
+                QString default_path;
+                auto proj = active_project();
+                if (!proj.msq_path.empty()) {
+                    auto p = std::filesystem::path(proj.msq_path);
+                    auto dir = p.parent_path();
+                    auto stem = p.stem().string();
+                    if (stem.empty()) stem = "tune";
+                    default_path = QString::fromUtf8(
+                        (dir / (stem + ".tuner")).string().c_str());
+                }
                 QString qpath = QFileDialog::getSaveFileName(
                     this, "Save Tune",
-                    QString(), "Native Tune (*.tuner);;All Files (*)");
+                    default_path, "Native Tune (*.tuner);;All Files (*)");
                 if (qpath.isEmpty()) return;
                 path = qpath.toStdString();
             }
@@ -15808,22 +18073,40 @@ public:
                 namespace pf = tuner_core::project_file;
                 auto proj = active_project();
 
-                // Pick a destination. Default to `<projectname>.tunerproj`
-                // next to the tune file if we have one; else ask.
+                // Pick a destination, falling through a priority chain
+                // so the dialog doesn't start at the OS default when
+                // the operator has a "in this folder" expectation:
+                //   1. next to the current tune file (most specific)
+                //   2. the project's on-disk directory from New Project
+                //   3. the last-used Save-Project directory
+                //   4. ~/Documents (last resort; only on first run)
                 QString default_path;
+                std::string sanitized_name = proj.name.empty()
+                    ? std::string("project") : proj.name;
+                for (auto& c : sanitized_name)
+                    if (c == '/' || c == '\\' || c == ':' || c == '*' ||
+                        c == '?' || c == '"' || c == '<' || c == '>' ||
+                        c == '|') c = '_';
+
+                QSettings qs_dirs;
+                auto project_dir =
+                    qs_dirs.value(kCurrentProjectDirKey, "").toString().toStdString();
+                auto last_tunerproj_dir =
+                    qs_dirs.value(kLastTunerprojDirKey, "").toString().toStdString();
+
+                std::filesystem::path chosen_dir;
                 if (!proj.msq_path.empty()) {
-                    auto p = std::filesystem::path(proj.msq_path);
-                    auto dir = p.parent_path();
-                    std::string name = proj.name.empty()
-                        ? std::string("project") : proj.name;
-                    // Sanitize name for filesystem.
-                    for (auto& c : name)
-                        if (c == '/' || c == '\\' || c == ':' || c == '*' ||
-                            c == '?' || c == '"' || c == '<' || c == '>' ||
-                            c == '|') c = '_';
-                    default_path = QString::fromUtf8(
-                        (dir / (name + ".tunerproj")).string().c_str());
+                    chosen_dir = std::filesystem::path(proj.msq_path).parent_path();
+                } else if (!project_dir.empty()) {
+                    chosen_dir = project_dir;
+                } else if (!last_tunerproj_dir.empty()) {
+                    chosen_dir = last_tunerproj_dir;
+                } else {
+                    chosen_dir = QDir::homePath().toStdString();
                 }
+                default_path = QString::fromUtf8(
+                    (chosen_dir / (sanitized_name + ".tunerproj")).string().c_str());
+
                 QString qpath = QFileDialog::getSaveFileName(
                     this, "Save Project",
                     default_path,
@@ -15869,6 +18152,15 @@ public:
 
                 auto fname = std::filesystem::path(
                     qpath.toStdString()).filename().string();
+                // Remember where the operator saved so the next Save
+                // Project lands there too (addresses #25 — "does not
+                // default to the last folder the project was saved in").
+                auto saved_dir = std::filesystem::path(
+                    qpath.toStdString()).parent_path().string();
+                if (!saved_dir.empty()) {
+                    QSettings().setValue(kLastTunerprojDirKey,
+                        QString::fromUtf8(saved_dir.c_str()));
+                }
                 statusBar()->showMessage(
                     QString::fromUtf8(("\xe2\x9c\x85 Saved project: " + fname).c_str()),
                     5000);
@@ -16083,6 +18375,11 @@ public:
                     QSettings settings;
                     settings.setValue(kCurrentProjectNameKey,
                         QString::fromUtf8(name.c_str()));
+                    // Remember the on-disk project directory — Save
+                    // Project falls back to this when msq_path is
+                    // empty (e.g. "(create empty)" tune selection).
+                    settings.setValue(kCurrentProjectDirKey,
+                        QString::fromUtf8(proj_dir.string().c_str()));
 
                     // Detect if the definition is native (.tunerdef) or
                     // legacy INI and save to the appropriate QSettings key.
@@ -16110,11 +18407,31 @@ public:
                         settings.setValue("projects/current/tunerdef", QString());
                     }
                     // Set tune path if user selected one, clear if empty.
-                    if (!tune.empty() && tune != "(create empty)")
+                    // If the selected tune sits outside the new project
+                    // directory (bundled fixture, tune from another
+                    // project, etc.), copy it into the project dir as
+                    // `<name>.tuner` so Save Tune lands in the project
+                    // instead of silently overwriting the source file.
+                    if (!tune.empty() && tune != "(create empty)") {
+                        std::string effective_tune = tune;
+                        std::error_code ec;
+                        std::filesystem::path src(tune);
+                        auto src_canon = std::filesystem::weakly_canonical(src, ec);
+                        auto dir_canon = std::filesystem::weakly_canonical(proj_dir, ec);
+                        bool inside_project = !ec &&
+                            src_canon.string().rfind(dir_canon.string(), 0) == 0;
+                        if (!inside_project && std::filesystem::exists(src, ec)) {
+                            auto dst = proj_dir / (name + ".tuner");
+                            std::filesystem::copy_file(
+                                src, dst,
+                                std::filesystem::copy_options::overwrite_existing, ec);
+                            if (!ec) effective_tune = dst.string();
+                        }
                         settings.setValue(kCurrentProjectTuneKey,
-                            QString::fromUtf8(tune.c_str()));
-                    else
+                            QString::fromUtf8(effective_tune.c_str()));
+                    } else {
                         settings.setValue(kCurrentProjectTuneKey, QString());
+                    }
                     settings.setValue(kCurrentProjectSigKey, QString());
 
                     dlg->accept();
