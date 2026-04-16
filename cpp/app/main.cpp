@@ -14467,6 +14467,29 @@ QWidget* build_setup_tab(
             sf_make_edit("knock_threshold", "Knock Threshold"), 0);
         knock_thresh_row->addStretch(1);
 
+        // --- Engine protection (rev-limit cut) ---
+        // A separate safety from AFR protection but the Python wizard
+        // grouped them on the same form since both are "engine cut"
+        // concepts. engineProtectType selects what the firmware cuts
+        // (spark, fuel, both) when the rev limit is exceeded;
+        // engineProtectMaxRPM is the RPM at which the cut arms.
+        auto* ep_mode_row = sf_make_row("Engine Protection:",
+            "What the firmware cuts to enforce the rev limit. Fuel "
+            "Only is gentlest on the driveline; Both is safest for "
+            "the engine.");
+        ep_mode_row->addWidget(
+            sf_make_combo("engineProtectType", "Engine Protection",
+                {"Off", "Spark Only", "Fuel Only", "Both"}),
+            1);
+
+        auto* ep_rpm_row = sf_make_row("Protection Max RPM:",
+            "RPM ceiling for the protection cut. Set ~200\xe2\x80\x93" "500 "
+            "RPM above your intended rev limit so the soft limiter "
+            "catches the over-rev first.");
+        ep_rpm_row->addWidget(
+            sf_make_edit("engineProtectMaxRPM", "Protection Max RPM"), 0);
+        ep_rpm_row->addStretch(1);
+
         // --- AFR protection ---
         auto* afrp_mode_row = sf_make_row("AFR Protection:",
             "Fuel cut triggered when measured AFR drifts leaner than "
@@ -18509,6 +18532,32 @@ public:
                     }
                     settings.setValue(kCurrentProjectSigKey, QString());
 
+                    // Push the newly-created project onto the recent-
+                    // projects list so the next launch's Startup picker
+                    // finds it. The tune-load path in build_tune_tab
+                    // ALSO pushes on successful load, but that branch
+                    // never fires when the operator picks "(create
+                    // empty)" — the tune file doesn't exist, so the
+                    // loader bails before the push. That left fresh
+                    // projects invisible on relaunch.
+                    // Read back the tune path we actually persisted
+                    // (effective_tune after any copy-into-project), not
+                    // the raw input — that way the recent list points
+                    // at the project-local copy, not the external
+                    // source.
+                    {
+                        RecentProject new_rp;
+                        new_rp.name = name;
+                        new_rp.ini_path = def_path != "(create empty)"
+                            ? def_path : std::string();
+                        new_rp.msq_path = settings.value(
+                            kCurrentProjectTuneKey, "").toString().toStdString();
+                        new_rp.signature = "";
+                        new_rp.last_opened = today_iso();
+                        if (!new_rp.name.empty())
+                            push_recent_project(new_rp);
+                    }
+
                     dlg->accept();
                 });
 
@@ -20123,6 +20172,26 @@ int main(int argc, char* argv[]) {
         // disclosure: hero title → tagline → recent project chip →
         // action buttons → dismissable hint.
         {
+            // Self-heal: if kCurrentProjectNameKey is set but the
+            // recent-projects list doesn't contain it, push it in
+            // first. Covers older installs + pre-fix New Project
+            // runs that never populated the recents sidecar.
+            {
+                auto cur = load_current_project();
+                if (!cur.name.empty()) {
+                    auto existing = load_recent_projects();
+                    bool found = false;
+                    for (const auto& rp : existing) {
+                        if (rp.msq_path == cur.msq_path
+                            && !cur.msq_path.empty()) { found = true; break; }
+                        if (rp.name == cur.name) { found = true; break; }
+                    }
+                    if (!found) {
+                        if (cur.last_opened.empty()) cur.last_opened = today_iso();
+                        push_recent_project(cur);
+                    }
+                }
+            }
             auto recent_proj = load_recent_project();
             auto* startup = new QDialog;
             startup->setWindowTitle("Tuner \xe2\x80\x94 Welcome");
