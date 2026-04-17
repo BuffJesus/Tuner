@@ -2024,6 +2024,7 @@ public:
         : QWidget(parent) {
         setMouseTracking(true);
         setFocusPolicy(Qt::StrongFocus);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     }
 
     void set_grid(int rows, int cols,
@@ -2067,7 +2068,8 @@ public:
     }
     void clear_selection() { sel_r0_ = sel_c0_ = sel_r1_ = sel_c1_ = -1; update(); }
     QRect cell_rect(int r, int c) const {
-        return QRect(axis_w() + c * cell_w_, axis_h() + r * cell_h_, cell_w_, cell_h_);
+        auto [cw, ch] = live_cell_size();
+        return QRect(axis_w() + c * cw, axis_h() + r * ch, cw, ch);
     }
 
     int rows_ = 0, cols_ = 0;
@@ -2083,37 +2085,41 @@ protected:
         p.setRenderHint(QPainter::Antialiasing, false);
         p.fillRect(rect(), QColor(QString::fromUtf8(tt::bg_elevated)));
         int aw = axis_w(), ah = axis_h();
+        auto [cw, ch] = live_cell_size();
+        // Scale font with cell height so text stays readable at any size.
+        int live_cell_font = std::clamp(ch * 2 / 3, cell_font_px_, 16);
+        int live_axis_font = std::clamp(ch / 2, axis_font_px_, 14);
         // X-axis
         if (!x_labels_.empty()) {
-            QFont af; af.setFamily("monospace"); af.setBold(true); af.setPixelSize(axis_font_px_);
+            QFont af; af.setFamily("monospace"); af.setBold(true); af.setPixelSize(live_axis_font);
             p.setFont(af); p.setPen(QColor(QString::fromUtf8(tt::text_muted)));
             for (int c = 0; c < std::min(static_cast<int>(x_labels_.size()), cols_); ++c)
-                p.drawText(QRect(aw + c * cell_w_, 0, cell_w_, ah), Qt::AlignCenter, QString::fromUtf8(x_labels_[c].c_str()));
+                p.drawText(QRect(aw + c * cw, 0, cw, ah), Qt::AlignCenter, QString::fromUtf8(x_labels_[c].c_str()));
         }
         // Y-axis (inverted)
         if (!y_labels_.empty()) {
-            QFont af; af.setFamily("monospace"); af.setBold(true); af.setPixelSize(axis_font_px_);
+            QFont af; af.setFamily("monospace"); af.setBold(true); af.setPixelSize(live_axis_font);
             p.setFont(af); p.setPen(QColor(QString::fromUtf8(tt::text_muted)));
             int yl = std::min(static_cast<int>(y_labels_.size()), rows_);
             for (int r = 0; r < yl; ++r) {
                 int inv = yl - 1 - r;
-                p.drawText(QRect(0, ah + r * cell_h_, aw - 4, cell_h_), Qt::AlignRight | Qt::AlignVCenter,
+                p.drawText(QRect(0, ah + r * ch, aw - 4, ch), Qt::AlignRight | Qt::AlignVCenter,
                     QString::fromUtf8(y_labels_[inv < static_cast<int>(y_labels_.size()) ? inv : 0].c_str()));
             }
         }
         // Cells
-        QFont cf; cf.setFamily("monospace"); cf.setPixelSize(cell_font_px_); p.setFont(cf);
+        QFont cf; cf.setFamily("monospace"); cf.setPixelSize(live_cell_font); p.setFont(cf);
         for (int r = 0; r < rows_; ++r)
             for (int c = 0; c < cols_; ++c) {
-                QRect cr(aw + c * cell_w_, ah + r * cell_h_, cell_w_, cell_h_);
+                QRect cr(aw + c * cw, ah + r * ch, cw, ch);
                 p.fillRect(cr, cells_[r][c].bg); p.setPen(cells_[r][c].fg);
                 p.drawText(cr, Qt::AlignCenter, QString::fromUtf8(cells_[r][c].text.c_str()));
             }
         // Selection
         if (sel_r0_ >= 0) {
             p.setPen(QPen(QColor(QString::fromUtf8(tt::accent_primary)), 2)); p.setBrush(Qt::NoBrush);
-            p.drawRect(QRect(aw + sel_c0_ * cell_w_, ah + sel_r0_ * cell_h_,
-                (sel_c1_ - sel_c0_ + 1) * cell_w_, (sel_r1_ - sel_r0_ + 1) * cell_h_));
+            p.drawRect(QRect(aw + sel_c0_ * cw, ah + sel_r0_ * ch,
+                (sel_c1_ - sel_c0_ + 1) * cw, (sel_r1_ - sel_r0_ + 1) * ch));
         }
         // Crosshair
         if (highlight_row_ >= 0 && highlight_col_ >= 0) {
@@ -2145,10 +2151,21 @@ protected:
 private:
     int axis_w() const { return y_labels_.empty() ? 0 : 40; }
     int axis_h() const { return x_labels_.empty() ? 0 : 16; }
+    // Compute cell dimensions from actual widget size so the heatmap
+    // fills available space instead of sitting at the fixed minimum.
+    std::pair<int, int> live_cell_size() const {
+        if (rows_ == 0 || cols_ == 0) return {cell_w_, cell_h_};
+        int avail_w = width() - axis_w() - 2;
+        int avail_h = height() - axis_h() - 2;
+        int cw = std::max(cell_w_, avail_w / cols_);
+        int ch = std::max(cell_h_, avail_h / rows_);
+        return {cw, ch};
+    }
     std::pair<int, int> pixel_to_cell(QPointF pos) const {
         if (rows_ == 0 || cols_ == 0) return {-1, -1};
-        int c = static_cast<int>((pos.x() - axis_w()) / cell_w_);
-        int r = static_cast<int>((pos.y() - axis_h()) / cell_h_);
+        auto [cw, ch] = live_cell_size();
+        int c = static_cast<int>((pos.x() - axis_w()) / cw);
+        int r = static_cast<int>((pos.y() - axis_h()) / ch);
         return (r < 0 || r >= rows_ || c < 0 || c >= cols_) ? std::pair{-1, -1} : std::pair{r, c};
     }
     std::vector<std::string> x_labels_, y_labels_;
