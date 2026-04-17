@@ -1633,6 +1633,46 @@ double convert_to_internal(double display, const UnitConversion& conv) {
     return (display + conv.offset_internal) * conv.to_internal;
 }
 
+std::string humanize_name(const std::string& raw) {
+    static const std::vector<std::pair<std::string, std::string>> known = {
+        {"veTable", "VE Table"}, {"afrTable", "AFR Target Table"},
+        {"lambdaTable", "Lambda Target Table"},
+        {"advanceTable", "Spark Advance Table"},
+        {"boostTable", "Boost Target Table"},
+        {"boostDutyTable", "Boost Duty Table"},
+        {"vvtTable", "VVT Target Table"},
+        {"fuelTable2", "VE Table 2"}, {"sparkTable2", "Spark Table 2"},
+        {"wueAFR", "Warmup Enrichment"}, {"crankRPM", "Cranking Enrichment"},
+        {"iacCLValues", "Idle RPM Targets"},
+        {"fuelTrim1Table", "Fuel Trim 1"}, {"fuelTrim2Table", "Fuel Trim 2"},
+        {"fuelTrim3Table", "Fuel Trim 3"}, {"fuelTrim4Table", "Fuel Trim 4"},
+        {"nCylinders", "Cylinders"}, {"nInjectors", "Injector Count"},
+        {"injFlow1", "Injector Flow Rate"}, {"injOpen", "Injector Dead Time"},
+        {"reqFuel", "Required Fuel"}, {"stoich", "Stoichiometric AFR"},
+        {"dwellRun", "Running Dwell"}, {"dwellcrank", "Cranking Dwell"},
+        {"boostEnabled", "Boost Control"},
+        {"mapMin", "MAP Minimum"}, {"mapMax", "MAP Maximum"},
+        {"egoType", "O2 Sensor Type"}, {"TrigPattern", "Trigger Pattern"},
+        {"nTeeth", "Trigger Teeth"}, {"missingTeeth", "Missing Teeth"},
+        {"sparkMode", "Spark Mode"}, {"algorithm", "Load Algorithm"},
+        {"injLayout", "Injection Layout"}, {"flexEnabled", "Flex Fuel"},
+    };
+    for (const auto& [key, human] : known)
+        if (raw.find(key) != std::string::npos) return human;
+    std::string result;
+    for (size_t i = 0; i < raw.size(); ++i) {
+        char c = raw[i];
+        if (c == '_') { result += ' '; continue; }
+        if (i > 0 && std::isupper(static_cast<unsigned char>(c))
+            && std::islower(static_cast<unsigned char>(raw[i-1])))
+            result += ' ';
+        result += c;
+    }
+    if (!result.empty())
+        result[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(result[0])));
+    return result;
+}
+
 // ---------------------------------------------------------------------------
 // Tune tab — collapsible tree + search filter + selection feedback
 // ---------------------------------------------------------------------------
@@ -20851,13 +20891,14 @@ public:
 
                                     for (const auto& d : diffs) {
                                         char row[512];
+                                        auto human = humanize_name(d.name);
                                         if (d.is_table) {
                                             std::snprintf(row, sizeof(row),
                                                 "<span style='color: %s; font-size: %dpx;'>"
                                                 "<b>%s</b></span>"
                                                 "<span style='color: %s; font-size: %dpx;'>"
                                                 "  %s</span>",
-                                                tt::text_primary, tt::font_body, d.name.c_str(),
+                                                tt::text_primary, tt::font_body, human.c_str(),
                                                 tt::accent_warning, tt::font_small,
                                                 d.units.c_str());
                                         } else {
@@ -20867,7 +20908,7 @@ public:
                                                 "<span style='color: %s; font-size: %dpx;'>"
                                                 "  ECU: <b>%.4g</b>  Project: <b>%.4g</b>"
                                                 "  %s</span>",
-                                                tt::text_primary, tt::font_body, d.name.c_str(),
+                                                tt::text_primary, tt::font_body, human.c_str(),
                                                 tt::text_secondary, tt::font_small,
                                                 d.ecu_val, d.project_val, d.units.c_str());
                                         }
