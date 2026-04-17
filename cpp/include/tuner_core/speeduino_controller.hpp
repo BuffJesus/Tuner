@@ -65,10 +65,12 @@ public:
     // Read the firmware signature.
     std::string read_signature(char cmd = 'Q', double timeout_s = 1.5);
 
-    // Read a page region from the ECU.
+    // Read a page region from the ECU. Uses the legacy 'p' command
+    // which works on both serial and framed (TCP) paths. The 'r'
+    // command is for output channels (runtime data), not page reads.
     std::vector<std::uint8_t> read_page(
         std::uint8_t page, std::uint16_t offset, std::uint16_t length,
-        char cmd = 'r');
+        char cmd = 'p');
 
     // Write a parameter value to ECU RAM.
     void write_parameter(

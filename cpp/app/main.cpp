@@ -560,16 +560,17 @@ struct EcuConnection {
                 double pms = std::chrono::duration<double, std::milli>(pt1 - pt0).count();
                 std::printf("PERF   page %d: %d bytes in %.0f ms (%.0f KB/s)\n",
                     page, size, pms,
-                    pms > 0 ? (size / 1024.0) / (pms / 1000.0) : 0);
+                    pms > 0 ? (size / 1024.0) / (pms / 1000.0) : 0.0);
                 std::fflush(stdout);
                 if (!data.empty()) {
                     page_cache[page] = std::move(data);
                     read_count++;
                 }
             } catch (const std::exception& ex) {
-                std::printf("PERF   page %d: FAILED (%s)\n", page, ex.what());
+                std::printf("PERF   page %d (%d bytes): FAILED [%s]\n",
+                    page, size, ex.what());
                 std::fflush(stdout);
-                break;
+                continue;
             }
         }
         auto elapsed = std::chrono::duration<double, std::milli>(
@@ -20659,15 +20660,45 @@ public:
                         // differ so the operator can decide which to keep.
                         if (shared_edit_svc) {
                             auto& def = *def_opt_c;
+                            debug_log("diff_on_connect: scalars=" + std::to_string(def.constants.scalars.size())
+                                + " arrays=" + std::to_string(def.constants.arrays.size())
+                                + " connected=" + std::to_string(ecu_conn->connected)
+                                + " framed=" + std::to_string(ecu_conn->info.framed));
+                            if (!def.constants.scalars.empty()) {
+                                const auto& s0 = def.constants.scalars[0];
+                                debug_log("diff_on_connect: first scalar=" + s0.name
+                                    + " page=" + (s0.page ? std::to_string(*s0.page) : "none")
+                                    + " offset=" + (s0.offset ? std::to_string(*s0.offset) : "none"));
+                            }
                             statusBar()->showMessage(
                                 QString::fromUtf8("Reading ECU pages\xe2\x80\xa6"), 0);
                             QApplication::processEvents();
+
+                            // Flush any stale bytes from connect probes
+                            // and verify the link is alive with a quick
+                            // signature re-read before page reads.
+                            try {
+                                ecu_conn->controller->transport().clear_buffers();
+                                auto sig = ecu_conn->controller->read_signature('Q', 1.0);
+                                debug_log("diff_on_connect: pre-read sig check: " + sig);
+                                ecu_conn->controller->transport().clear_buffers();
+                            } catch (const std::exception& ex) {
+                                debug_log(std::string("diff_on_connect: sig check failed: ") + ex.what());
+                            }
+
                             int pages_read = ecu_conn->read_all_pages(def);
+                            // Log cache state for debugging.
+                            std::string cache_info;
+                            for (const auto& [pg, bytes] : ecu_conn->page_cache) {
+                                if (!cache_info.empty()) cache_info += ", ";
+                                cache_info += "p" + std::to_string(pg) + "=" + std::to_string(bytes.size()) + "B";
+                            }
+                            debug_log("diff_on_connect: read " + std::to_string(pages_read)
+                                + " pages, cache=[" + cache_info + "]");
                             statusBar()->showMessage(
                                 QString::fromUtf8(
                                     (std::string("Read ") + std::to_string(pages_read)
                                      + " pages from ECU").c_str()), 5000);
-                            debug_log("diff_on_connect: read " + std::to_string(pages_read) + " pages");
 
                             if (pages_read > 0) {
                                 namespace spc = tuner_core::speeduino_param_codec;
