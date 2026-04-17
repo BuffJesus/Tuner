@@ -339,64 +339,66 @@ Ordered roughly by leverage:
 - **Operator manual** — first pass landed 2026-04-16 at `docs/operator-manual.md`. Remaining: per-tab deep-dives, screenshots, and pairing with firmware 14H release notes.
 - ~~**Doc drift cleanup**~~ ✅ Audited 2026-04-15.
 
-#### Feature gaps from three-way disparity check (2026-04-16)
+#### Implementation backlog — prioritized (2026-04-16 disparity audit)
 
-Audited against the deleted Python app (git `8dc3d92:src/tuner/`) and decompiled TunerStudio (`C:\Users\Cornelio\Desktop\Decompiled\TunerStudioMS\`). Ordered by operator impact.
+Audited against the deleted Python app (git `8dc3d92:src/tuner/`) and decompiled TunerStudio (`C:\Users\Cornelio\Desktop\Decompiled\TunerStudioMS\`). Numbered in implementation order.
 
-**Significant gaps:**
+**Phase 17 — Workflow & Safety**
 
-- **ECU-vs-project sync prompt** — when connected, if ECU page data doesn't match the saved tune, TunerStudio prompts "Keep controller settings or project settings?" We have page-CRC verification (`SpeeduinoController::verify_page`) but no operator-facing prompt or auto-sync flow. Would need: read all pages → CRC compare → prompt → either write project values to ECU or read ECU values into project.
-- **Tune file-vs-file compare** — load two `.tuner`/`.msq` files and show a per-parameter diff table. The review dialog shows staged-vs-base for the current session but can't compare two independent tune files. TunerStudio has a dedicated compare dialog.
-- **Datalog review summary stats** — Python had `DatalogReviewService` producing per-channel min/max/mean/outlier stats from imported CSVs. C++ imports and replays but doesn't aggregate. Small, self-contained add.
-- **MegaLogViewer equivalent** — TunerStudio bundles a standalone log viewer with timeline scrubbing, scatter plots, and multi-channel trace rendering. Our `LogTimelineWidget` handles timeline + channel tracks but doesn't have scatter plots or the full MLV feature set.
-- **SD card log/tune browse** — TunerStudio has `RemoteFileAccess` for browsing + downloading files from ECU SD cards. C++ has a single-file Airbear download path; multi-file browse is blocked on Airbear firmware G5 + firmware Slice 14D.
-- **Dashboard multiple layout tabs** — TunerStudio lets operators define multiple dashboard tabs. C++ has a single dashboard layout. Store a `vector<Layout>` instead of one, add a tab bar or dropdown.
-- **Continuous IP range scan** — TunerStudio scans an IP range to find ECUs on the network. C++ has mDNS + UDP discovery but no subnet sweep.
+| # | Item | Source | Effort | Status |
+|---|------|--------|--------|--------|
+| 1 | **Diff on Connect** — auto-compare ECU pages vs project tune on connect, "Difference Report" dialog with keep-controller / keep-project resolution | TS `G/an.java` + `U/h.java` | Medium | Not started |
+| 2 | **Auto-save Offline Tune** — periodic auto-save when disconnected, configurable interval, prevent data loss on crash | TS `aP/f.java` `autoSaveOfflineTune` | Small | Not started |
+| 3 | **Automatic Restore Points** — snapshot on close/load/connect, max 10, browsable list with "Compare to Current" + "Load Restore Point" | TS `R/a.java` + `aY/s.java` | Medium | Not started |
+| 4 | **SETUP tab sub-tabs** — split into Generators / Hardware / Turbo / Calibration sections via QTabWidget or collapsible groups | Operator feedback | Small | Not started |
 
-**Minor/niche gaps:**
+**Phase 18 — Analysis & Logging**
 
-- **Output Port Editor** — graphical I/O pin mapping. TunerStudio-only; neither Python nor C++ had it.
-- **Wideband calibration panel** — logic ported (`wideband_calibration.hpp`), SETUP tab has CLT/IAT/O2 write. No dedicated wideband-specific panel with preset selection + verification.
-- **`string` kind constant editing** — INI `string` fields (rare, used for firmware version display). Parser skips them. Low impact.
-- **Built-in calculator** — TunerStudio bundles one. Trivial.
-- **CRC check panel** — manual hex string CRC calculator. Niche debugging tool.
-- **Asymmetric sweep / dashed bar gauge renderers** — cosmetic gauge variants TunerStudio supports.
+| # | Item | Source | Effort | Status |
+|---|------|--------|--------|--------|
+| 5 | **Datalog review summary stats** — per-channel min/max/mean/outlier from imported CSVs | Python `DatalogReviewService` | Small | Not started |
+| 6 | **Tune file-vs-file compare** — load two .tuner/.msq files, per-parameter diff table | TS compare dialog | Medium | Not started |
+| 7 | **Log viewer scatter plots** — X-Y scatter (e.g. RPM vs MAP colored by AFR) in the LOGGING timeline | TS MegaLogViewer | Medium | Not started |
+| 8 | **Dashboard multiple layout tabs** — vector of layouts + tab bar or dropdown | TS multi-dash | Small-Medium | Not started |
 
-**Workflow/UX gaps (from deep TunerStudio decompiled scan, 2026-04-16):**
+**Phase 19 — Connectivity & CAN**
 
-- **Diff on Connect** — TunerStudio's `G/an.java` auto-compares ECU page data against the project tune on every connect. Shows a "Difference Report" dialog (`U/h.java`) with side-by-side comparison and buttons to accept project settings or keep controller settings. Our app has `SpeeduinoController::verify_page` (CRC check) but no operator-facing diff or resolution flow.
-- **Automatic Restore Points** — `R/a.java` defines `saveRestorePointOnProjectClose` / `OnLoad` / `OnConnect` (all default true), `maxRestorePointSpace = 10`, `skipRestorePointWhenNoChange = true`. `aY/s.java` renders a browsable list of restore points with "Compare to Current" and "Load Restore Point" buttons. We have no restore-point or undo-to-snapshot feature.
-- **Auto-save Offline Tune** — `aP/f.java` checks `autoSaveOfflineTune` (default true) and saves the tune periodically when disconnected. We don't auto-save — operator must Ctrl+S manually. An unsaved tune is lost on crash or accidental close.
-- **SETUP tab sub-tabs** — the SETUP tab has grown to 6 guided cards + generator previews + compressor map + sensor calibration + wizard button. Operators report it's "getting pretty busy." Break into sub-tabs or collapsible sections: **Generators** (VE/AFR/Spark/Idle/WUE/Cranking previews) · **Hardware** (IAC/Fan/Flex/Safety/TPS/Engine Advanced) · **Turbo** (Advanced Turbo + Compressor Map) · **Calibration** (CLT/IAT/O2 sensor write).
+| # | Item | Source | Effort | Status |
+|---|------|--------|--------|--------|
+| 9 | **CAN Quick Start card** — SETUP tab: what CAN is, what you need, default True Address | Operator request | Small | Not started |
+| 10 | **Pre-built CAN profiles** — one-click presets for AEM wideband, Haltech dash, OBD2 | Operator request | Small | Not started |
+| 11 | **Continuous IP range scan** — subnet sweep for ECU discovery | TS `ContinuousIpSearchPanel` | Small | Not started |
+| 12 | **Wideband calibration panel** — dedicated preset selector + write + verify | Python `WidebandCalibrationPanel` | Small | Not started |
+
+**Phase 20 — Autotune Improvements (from engine-model reference)**
+
+| # | Item | Source | Effort | Status |
+|---|------|--------|--------|--------|
+| 13 | **Pressure-ratio-aware VE weighting** — wire compressor-map efficiency into VE correction confidence | `engine-model-reference.md` | Medium | Not started |
+| 14 | **Injector flow nonlinearity model** — quadratic correction separates VE error from injector characterization error | `engine-model-reference.md` | Medium | Not started |
+| 15 | **Torque-peak-informed VE anchor** — use Virtual Dyno's torque-peak RPM as VE generator reference | `engine-model-reference.md` | Small | Not started |
+
+**Phase 21 — Infrastructure & Cross-platform**
+
+| # | Item | Source | Effort | Status |
+|---|------|--------|--------|--------|
+| 16 | **G13 embedded Mega2560 flash** — STK500v2 over QSerialPort | Roadmap | Medium | Not started |
+| 17 | **G13 embedded STM32 flash** — DFU 1.1 + libusb | Roadmap | Medium | Not started |
+| 18 | **Teensy HID cross-platform** — hidapi vendoring for Linux/macOS | Roadmap | Medium | Not started |
+| 19 | **XCP workspace integration** — page read/write/burn via XCP transport | Roadmap | Large | Packet layer done |
+| 20 | **SD card log/tune browse** — multi-file remote browse + download | TS `RemoteFileAccess` | Medium | Blocked on Airbear G5 + firmware 14D |
+
+**Minor/niche (unscheduled)**
+
+- Output Port Editor (graphical I/O pin mapping) — TunerStudio-only
+- `string` kind constant editing — rare INI fields
+- Built-in calculator — trivial
+- CRC check panel — niche debugging
+- Asymmetric sweep / dashed bar gauge renderers — cosmetic
 
 **C++ app is AHEAD of both Python and TunerStudio in:**
 
-- 3D rotatable table surface (QPainter wireframe, mouse-drag rotation)
-- Virtual Dyno (torque/HP chart + before/after overlay comparison)
-- Zone-entry alert toasts on dashboard
-- VE/WUE coverage heatmap overlay with per-cell confidence
-- 6 table generators (VE/AFR/Spark/Idle/WUE/Cranking) — TunerStudio has none
-- Compressor map modeling with 6-tier risk classification
-- Command palette (Ctrl+K)
-- F1 keyboard shortcut cheat sheet with contextual tab highlighting
-- EditableCurveChartWidget (click-and-drag line-chart curve editor)
-- PaintedHeatmapWidget (table switch <3ms vs TunerStudio's Swing overhead)
-- Guided SETUP-tab hardware cards (IAC/Fan/Flex/Safety/Turbo/TPS/Engine Advanced)
-- Power-cycle indicator + auto-reboot via cmdstm32reboot
-- Full dark theme with 200+ design tokens
-
-#### Autotuning improvements (from engine-model reference)
-
-These build on the Phase 7 VE Analyze pipeline without requiring firmware changes:
-
-- **Pressure-ratio-aware VE correction weighting** — under boost, intake temperature correction is larger (compressor heating). Wire the compressor-map service's efficiency estimate into the VE correction confidence score so boosted cells get honester weighting.
-- **Injector flow nonlinearity model** — the current root-cause diagnostic flags "injector flow error" for uniform bias but doesn't model dead-time + ballistic-opening nonlinearity. A simple quadratic correction model (calibrated from early drive sessions) would separate "VE is wrong" from "injector characterization is wrong."
-- **Torque-peak-informed VE anchor** — when a WOT pull is logged, the Virtual Dyno's torque-peak RPM is a strong signal for where VE should peak. Currently generators guess from displacement + cam duration; a real anchor from dyno data would tighten the first iteration.
-
-#### CAN Bus operator guidance
-
-- **CAN Quick Start card** — add to SETUP tab: "CAN Bus lets your ECU talk to other modules. You need: a CAN transceiver (MCP2515 for Mega, built-in for Teensy 4.1), two wires (CAN-H + CAN-L), 120Ω termination. Set True Address to 0x100 for most setups."
-- **Pre-built CAN profiles** — one-click presets for common devices: AEM wideband (0x180), Haltech dash (0x360-0x363), generic OBD2 (0x7E8). Each fills the caninput_sel fields automatically.
+3D rotatable table surface · Virtual Dyno with overlay · zone-entry alert toasts · VE/WUE coverage heatmap · 6 table generators · compressor map modeling · command palette (Ctrl+K) · F1 cheat sheet · editable curve charts · PaintedHeatmapWidget (<3ms table switch) · guided SETUP hardware cards · power-cycle indicator + auto-reboot · full dark theme with 200+ tokens
 
 ### Hardware / integration (no code fixes its own blocker)
 
