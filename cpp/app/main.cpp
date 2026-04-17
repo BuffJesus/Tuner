@@ -20568,28 +20568,48 @@ public:
                 QApplication::processEvents();
 
 #ifdef _WIN32
-                auto result = tuner_core::airbear_api::post_firmware(
-                    host.toStdString(), 80, "/updateFWUpload",
-                    filename, bytes, std::chrono::minutes(2));
-                if (result) {
-                    auto body = tuner_core::airbear_api::parse_http_body(*result);
-                    QString msg;
-                    if (body) {
-                        msg = QString::fromUtf8(
-                            ("Upload complete. Response: " + *body).c_str());
-                    } else {
-                        msg = QString::fromUtf8(
-                            "Upload sent. Response was non-2xx or malformed.");
+                debug_log("OTA upload starting: host=" + host.toStdString()
+                    + " file=" + filename + " size=" + std::to_string(bytes.size()));
+
+                // Run the upload in a detached thread so the UI stays
+                // responsive during the ~30s transfer. The status bar
+                // updates via QTimer::singleShot back to the main thread.
+                auto host_str = host.toStdString();
+                auto* self = this;
+                std::thread([host_str, filename, bytes, self]() {
+                    try {
+                        auto result = tuner_core::airbear_api::post_firmware(
+                            host_str, 80, "/updateFWUpload",
+                            filename, bytes, std::chrono::minutes(2));
+                        QTimer::singleShot(0, self, [self, result]() {
+                            if (result) {
+                                debug_log("OTA got response: "
+                                    + result->substr(0, 200));
+                                auto body = tuner_core::airbear_api::parse_http_body(*result);
+                                QString msg = body
+                                    ? QString::fromUtf8(("Upload complete.\n" + *body).c_str())
+                                    : QString::fromUtf8("Upload sent. Airbear is rebooting.");
+                                self->statusBar()->showMessage(msg, 10000);
+                                QMessageBox::information(self, "Airbear OTA", msg);
+                            } else {
+                                debug_log("OTA post_firmware returned nullopt");
+                                self->statusBar()->clearMessage();
+                                QMessageBox::warning(self, "Upload failed",
+                                    QString::fromUtf8(
+                                        "Could not reach Airbear. Try the IP "
+                                        "address instead of the hostname."));
+                            }
+                        });
+                    } catch (const std::exception& ex) {
+                        std::string err = ex.what();
+                        QTimer::singleShot(0, self, [self, err]() {
+                            debug_log("OTA exception: " + err);
+                            self->statusBar()->clearMessage();
+                            QMessageBox::warning(self, "Upload failed",
+                                QString::fromUtf8(err.c_str()));
+                        });
                     }
-                    statusBar()->showMessage(msg, 10000);
-                    QMessageBox::information(this, "Airbear OTA", msg);
-                } else {
-                    statusBar()->clearMessage();
-                    QMessageBox::warning(this, "Upload failed",
-                        QString::fromUtf8(
-                            "Could not reach Airbear at the given host. "
-                            "Check WiFi connectivity and hostname."));
-                }
+                }).detach();
 #else
                 statusBar()->clearMessage();
                 QMessageBox::warning(this, "Unsupported",
@@ -20606,19 +20626,187 @@ public:
             disconnect_action->setEnabled(false);
 
             auto open_connect = [this, ecu_conn, conn_label,
-                                 connect_action, disconnect_action]() {
+                                 connect_action, disconnect_action,
+                                 shared_edit_svc]() {
                 if (open_connect_dialog(this, ecu_conn, conn_label)) {
                     connect_action->setEnabled(false);
                     disconnect_action->setEnabled(true);
                     // Build channel layouts from the active definition
                     // for runtime packet decoding.
-                    {
-                        auto def_opt_c = load_active_definition();
-                        if (def_opt_c.has_value()) {
-                            build_channel_layouts(ecu_conn, &*def_opt_c);
-                            std::printf("[connect] Channel layouts built, "
-                                "page reads deferred to on-demand\n");
-                            std::fflush(stdout);
+                    auto def_opt_c = load_active_definition();
+                    if (def_opt_c.has_value()) {
+                        build_channel_layouts(ecu_conn, &*def_opt_c);
+                        std::printf("[connect] Channel layouts built\n");
+                        std::fflush(stdout);
+
+                        // ---- Diff on Connect ----
+                        // Read all pages from the ECU and compare against
+                        // the project tune. Surface a report if values
+                        // differ so the operator can decide which to keep.
+                        if (shared_edit_svc) {
+                            auto& def = *def_opt_c;
+                            statusBar()->showMessage(
+                                QString::fromUtf8("Reading ECU pages\xe2\x80\xa6"), 0);
+                            QApplication::processEvents();
+                            int pages_read = ecu_conn->read_all_pages(def);
+                            statusBar()->showMessage(
+                                QString::fromUtf8(
+                                    (std::string("Read ") + std::to_string(pages_read)
+                                     + " pages from ECU").c_str()), 5000);
+                            debug_log("diff_on_connect: read " + std::to_string(pages_read) + " pages");
+
+                            if (pages_read > 0) {
+                                namespace spc = tuner_core::speeduino_param_codec;
+                                struct DiffEntry {
+                                    std::string name;
+                                    std::string label;
+                                    double ecu_val;
+                                    double project_val;
+                                    std::string units;
+                                };
+                                std::vector<DiffEntry> diffs;
+
+                                for (const auto& sc : def.constants.scalars) {
+                                    if (!sc.page.has_value() || !sc.offset.has_value()) continue;
+                                    auto cache_it = ecu_conn->page_cache.find(*sc.page);
+                                    if (cache_it == ecu_conn->page_cache.end()) continue;
+                                    const auto& page_bytes = cache_it->second;
+                                    if (static_cast<int>(page_bytes.size()) <= *sc.offset) continue;
+
+                                    // Decode ECU value.
+                                    spc::ScalarLayout layout;
+                                    layout.offset = static_cast<std::size_t>(*sc.offset);
+                                    namespace svc = tuner_core::speeduino_value_codec;
+                                    try { layout.data_type = svc::parse_data_type(sc.data_type); }
+                                    catch (...) { continue; }
+                                    layout.scale = sc.scale;
+                                    layout.translate = sc.translate;
+                                    if (sc.bit_offset.has_value() && sc.bit_length.has_value()) {
+                                        layout.bit_offset = *sc.bit_offset;
+                                        layout.bit_length = *sc.bit_length;
+                                    }
+                                    double ecu_val = 0;
+                                    try {
+                                        ecu_val = spc::decode_scalar(layout,
+                                            std::span<const std::uint8_t>(
+                                                page_bytes.data(), page_bytes.size()));
+                                    } catch (...) { continue; }
+
+                                    // Get project value.
+                                    auto* tv = shared_edit_svc->get_value(sc.name);
+                                    if (!tv || !std::holds_alternative<double>(tv->value)) continue;
+                                    double proj_val = std::get<double>(tv->value);
+
+                                    // Compare with tolerance for floating-point.
+                                    double diff = std::abs(ecu_val - proj_val);
+                                    double mag = std::max(std::abs(ecu_val), std::abs(proj_val));
+                                    bool different = (mag > 0.0001)
+                                        ? (diff / mag > 0.001)
+                                        : (diff > 0.0001);
+                                    if (different) {
+                                        diffs.push_back({sc.name,
+                                            sc.name, ecu_val, proj_val,
+                                            sc.units.value_or("")});
+                                    }
+                                }
+
+                                debug_log("diff_on_connect: " + std::to_string(diffs.size())
+                                    + " scalar differences found");
+
+                                if (!diffs.empty()) {
+                                    auto* dlg = new QDialog(this);
+                                    dlg->setWindowTitle("ECU Difference Report");
+                                    dlg->setMinimumSize(520, 400);
+                                    {
+                                        char ds[256];
+                                        std::snprintf(ds, sizeof(ds),
+                                            "QDialog { background: %s; }"
+                                            "QLabel { color: %s; font-size: %dpx; }",
+                                            tt::bg_base, tt::text_primary, tt::font_body);
+                                        dlg->setStyleSheet(QString::fromUtf8(ds));
+                                    }
+                                    auto* dl = new QVBoxLayout(dlg);
+                                    dl->setContentsMargins(tt::space_lg, tt::space_lg,
+                                                            tt::space_lg, tt::space_lg);
+                                    dl->setSpacing(tt::space_md);
+
+                                    char header[256];
+                                    std::snprintf(header, sizeof(header),
+                                        "<span style='color: %s; font-size: %dpx; font-weight: bold;'>"
+                                        "ECU data differs from project</span><br>"
+                                        "<span style='color: %s; font-size: %dpx;'>"
+                                        "%d parameter%s differ between the ECU and your project tune.</span>",
+                                        tt::text_primary, tt::font_label,
+                                        tt::text_secondary, tt::font_body,
+                                        static_cast<int>(diffs.size()),
+                                        diffs.size() == 1 ? "" : "s");
+                                    auto* h = new QLabel;
+                                    h->setTextFormat(Qt::RichText);
+                                    h->setWordWrap(true);
+                                    h->setText(QString::fromUtf8(header));
+                                    dl->addWidget(h);
+
+                                    // Scrollable diff list.
+                                    auto* scroll = new QScrollArea;
+                                    scroll->setWidgetResizable(true);
+                                    scroll->setStyleSheet("QScrollArea { border: none; }");
+                                    auto* list_w = new QWidget;
+                                    auto* list_l = new QVBoxLayout(list_w);
+                                    list_l->setSpacing(2);
+
+                                    for (const auto& d : diffs) {
+                                        char row[512];
+                                        std::snprintf(row, sizeof(row),
+                                            "<span style='color: %s; font-size: %dpx;'>"
+                                            "<b>%s</b></span>"
+                                            "<span style='color: %s; font-size: %dpx;'>"
+                                            "  ECU: <b>%.4g</b>  Project: <b>%.4g</b>"
+                                            "  %s</span>",
+                                            tt::text_primary, tt::font_body, d.name.c_str(),
+                                            tt::text_secondary, tt::font_small,
+                                            d.ecu_val, d.project_val, d.units.c_str());
+                                        auto* rl = new QLabel;
+                                        rl->setTextFormat(Qt::RichText);
+                                        rl->setText(QString::fromUtf8(row));
+                                        rl->setStyleSheet(QString::fromUtf8(
+                                            tt::card_style().c_str()));
+                                        list_l->addWidget(rl);
+                                    }
+                                    list_l->addStretch(1);
+                                    scroll->setWidget(list_w);
+                                    dl->addWidget(scroll, 1);
+
+                                    // Action buttons.
+                                    auto* btn_row = new QHBoxLayout;
+                                    btn_row->addStretch(1);
+                                    auto* keep_ecu = new QPushButton("Keep ECU Values");
+                                    auto* keep_proj = new QPushButton("Keep Project Values");
+                                    auto* dismiss = new QPushButton("Dismiss");
+                                    btn_row->addWidget(keep_ecu);
+                                    btn_row->addWidget(keep_proj);
+                                    btn_row->addWidget(dismiss);
+                                    dl->addLayout(btn_row);
+
+                                    QObject::connect(dismiss, &QPushButton::clicked,
+                                                     dlg, &QDialog::reject);
+                                    QObject::connect(keep_proj, &QPushButton::clicked,
+                                                     dlg, &QDialog::accept);
+                                    QObject::connect(keep_ecu, &QPushButton::clicked,
+                                        [dlg, diffs, shared_edit_svc]() {
+                                        for (const auto& d : diffs) {
+                                            char buf[32];
+                                            std::snprintf(buf, sizeof(buf), "%.6g", d.ecu_val);
+                                            try {
+                                                shared_edit_svc->stage_scalar_value(d.name, buf);
+                                            } catch (...) {}
+                                        }
+                                        dlg->accept();
+                                    });
+
+                                    dlg->exec();
+                                    dlg->deleteLater();
+                                }
+                            }
                         }
                     }
                 }
