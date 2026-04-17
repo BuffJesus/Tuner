@@ -3870,6 +3870,65 @@ QWidget* build_tune_tab(
                     compiled.erase(it, compiled.end());
                 }
             }
+            // Split oversized pages into chunks so no single page
+            // renders >30 fields. A 434-field CAN Bus page inherited
+            // from the INI's dialog nesting creates 1700+ QWidgets on
+            // one switch — splitting at the definition level means the
+            // app never sees a page that large. This runs on ANY
+            // definition (INI-derived or hand-authored), so even a
+            // badly-structured .tunerdef loads fast.
+            constexpr int kMaxFieldsPerPage = 30;
+            {
+                std::vector<dlns::LayoutPage> split;
+                split.reserve(compiled.size());
+                for (auto& pg : compiled) {
+                    int total = 0;
+                    for (const auto& s : pg.sections)
+                        total += static_cast<int>(s.fields.size());
+                    if (total <= kMaxFieldsPerPage
+                        || !pg.table_editor_id.empty()
+                        || !pg.curve_editor_id.empty()) {
+                        // Small page or table/curve — keep as-is.
+                        split.push_back(std::move(pg));
+                        continue;
+                    }
+                    // Split across sections. Each chunk gets up to
+                    // kMaxFieldsPerPage fields. Sections are never
+                    // broken mid-way — a section's fields stay together.
+                    int page_num = 1;
+                    int chunks = (total + kMaxFieldsPerPage - 1) / kMaxFieldsPerPage;
+                    int field_count = 0;
+                    dlns::LayoutPage chunk;
+                    chunk.target = pg.target + "__1";
+                    chunk.title = pg.title + " (1/" + std::to_string(chunks) + ")";
+                    chunk.group_id = pg.group_id;
+                    chunk.group_title = pg.group_title;
+                    chunk.visibility_expression = pg.visibility_expression;
+                    for (auto& sec : pg.sections) {
+                        int sec_fields = static_cast<int>(sec.fields.size());
+                        if (field_count + sec_fields > kMaxFieldsPerPage
+                            && field_count > 0) {
+                            // Flush current chunk, start a new one.
+                            split.push_back(std::move(chunk));
+                            page_num++;
+                            chunk = {};
+                            chunk.target = pg.target + "__" + std::to_string(page_num);
+                            chunk.title = pg.title + " (" + std::to_string(page_num)
+                                + "/" + std::to_string(chunks) + ")";
+                            chunk.group_id = pg.group_id;
+                            chunk.group_title = pg.group_title;
+                            chunk.visibility_expression = pg.visibility_expression;
+                            field_count = 0;
+                        }
+                        chunk.sections.push_back(std::move(sec));
+                        field_count += sec_fields;
+                    }
+                    if (!chunk.sections.empty())
+                        split.push_back(std::move(chunk));
+                }
+                compiled = std::move(split);
+            }
+
             // Group pages BEFORE moving into the map.
             namespace tpg = tuner_core::tuning_page_grouping;
             auto groups = tpg::group_pages(compiled);
@@ -4878,6 +4937,13 @@ QWidget* build_tune_tab(
         constexpr int kFieldRenderCap = 40;
         int rendered_fields = 0;
         bool capped = total_fields > kFieldRenderCap;
+        if (total_fields > 20) {
+            char dbg[128];
+            std::snprintf(dbg, sizeof(dbg),
+                "PERF page_fields target=%s total=%d capped=%d",
+                target.c_str(), total_fields, capped ? 1 : 0);
+            debug_log(dbg);
+        }
         // Read the per-page "show all" flag — persists across
         // page-switch re-fires so the "Show all" button actually
         // works (prior bug: a local shared_ptr<bool> was recreated
