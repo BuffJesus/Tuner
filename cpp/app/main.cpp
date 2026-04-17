@@ -548,6 +548,7 @@ struct EcuConnection {
         }
 
         int read_count = 0;
+        auto t0 = std::chrono::steady_clock::now();
         for (const auto& [page, size] : page_sizes) {
             if (size <= 0) continue;
             try {
@@ -559,10 +560,14 @@ struct EcuConnection {
                     read_count++;
                 }
             } catch (...) {
-                // Connection may have dropped — stop reading.
                 break;
             }
         }
+        auto elapsed = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t0).count();
+        std::printf("PERF   read_all_pages %d pages in %.0f ms\n",
+                    read_count, elapsed);
+        std::fflush(stdout);
         return read_count;
     }
 

@@ -107,13 +107,17 @@ std::vector<std::uint8_t> SerialTransport::read(std::size_t size, double timeout
     if (!is_open()) throw std::runtime_error("Serial port not open");
     auto h = static_cast<HANDLE>(handle_);
 
-    // Update read timeout to match requested value.
+    // ReadIntervalTimeout: max gap between consecutive bytes before
+    // ReadFile returns. Short value (50ms) detects end-of-packet fast
+    // without waiting for the full total timeout.
+    // ReadTotalTimeoutConstant: overall deadline for the entire read.
     COMMTIMEOUTS timeouts;
     std::memset(&timeouts, 0, sizeof(timeouts));
     auto ms = static_cast<DWORD>(timeout_s * 1000);
     if (ms == 0) ms = 1;
-    timeouts.ReadIntervalTimeout = ms;
+    timeouts.ReadIntervalTimeout = 50;
     timeouts.ReadTotalTimeoutConstant = ms;
+    timeouts.ReadTotalTimeoutMultiplier = 0;
     timeouts.WriteTotalTimeoutConstant = 500;
     SetCommTimeouts(h, &timeouts);
 
@@ -132,7 +136,10 @@ std::size_t SerialTransport::write(const std::uint8_t* data, std::size_t size) {
         throw std::runtime_error("Serial write failed (error "
             + std::to_string(GetLastError()) + ")");
     }
-    FlushFileBuffers(h);
+    // WriteFile with synchronous I/O already blocks until the data is
+    // in the driver buffer. FlushFileBuffers forces a physical drain of
+    // the UART transmit shift register which adds 10-50ms per call on
+    // Windows — removing it cuts page-read round-trip time dramatically.
     return bytes_written;
 }
 
