@@ -220,6 +220,69 @@ std::optional<StatusResponse> fetch_status(std::string_view host,
     }
 }
 
+std::optional<std::string> http_post_form(std::string_view host,
+                                          int port,
+                                          std::string_view path,
+                                          std::string_view form_body,
+                                          std::chrono::milliseconds timeout) {
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET) return std::nullopt;
+
+    DWORD to_ms = static_cast<DWORD>(timeout.count());
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+               reinterpret_cast<const char*>(&to_ms), sizeof(to_ms));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
+               reinterpret_cast<const char*>(&to_ms), sizeof(to_ms));
+
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    std::string host_s(host);
+    std::string port_s = std::to_string(port);
+    addrinfo* res = nullptr;
+    if (getaddrinfo(host_s.c_str(), port_s.c_str(), &hints, &res) != 0 || !res) {
+        closesocket(sock);
+        return std::nullopt;
+    }
+
+    if (connect(sock, res->ai_addr, static_cast<int>(res->ai_addrlen)) != 0) {
+        freeaddrinfo(res);
+        closesocket(sock);
+        return std::nullopt;
+    }
+    freeaddrinfo(res);
+
+    char cl[32];
+    std::snprintf(cl, sizeof(cl), "%zu", form_body.size());
+    std::string req;
+    req += "POST ";
+    req += std::string(path);
+    req += " HTTP/1.1\r\nHost: ";
+    req += host_s;
+    req += "\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: ";
+    req += cl;
+    req += "\r\nConnection: close\r\nUser-Agent: tuner_app/0.1\r\n\r\n";
+    req += std::string(form_body);
+    if (send(sock, req.data(), static_cast<int>(req.size()), 0) < 0) {
+        closesocket(sock);
+        return std::nullopt;
+    }
+
+    std::string response;
+    char buf[2048];
+    while (true) {
+        int n = recv(sock, buf, sizeof(buf), 0);
+        if (n <= 0) break;
+        response.append(buf, static_cast<std::size_t>(n));
+        if (response.size() > 64 * 1024) break;
+    }
+    closesocket(sock);
+    if (response.empty()) return std::nullopt;
+    return response;
+}
+
 #endif  // _WIN32
 
 std::string build_multipart_body(std::string_view boundary,

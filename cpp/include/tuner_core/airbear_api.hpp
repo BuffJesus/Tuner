@@ -106,6 +106,14 @@ std::optional<RealtimeResponse> fetch_realtime(std::string_view host,
 std::optional<StatusResponse> fetch_status(std::string_view host,
                                            int port,
                                            std::chrono::milliseconds timeout);
+
+// Synchronous HTTP POST with application/x-www-form-urlencoded body.
+// Fire-and-forget — returns the response text or nullopt on failure.
+std::optional<std::string> http_post_form(std::string_view host,
+                                          int port,
+                                          std::string_view path,
+                                          std::string_view form_body,
+                                          std::chrono::milliseconds timeout);
 #endif
 
 // Build a multipart/form-data request body for a single file upload.

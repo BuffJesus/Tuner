@@ -2976,20 +2976,51 @@ bool open_connect_dialog(QWidget* parent,
                         bool shown = hint_qs.value(
                             "hints/airbear_dash_echo", false).toBool();
                         if (!shown) {
-                            QMessageBox::information(dlg,
-                                "Airbear Dashboard",
+                            auto answer = QMessageBox::question(dlg,
+                                "Airbear Dashboard Mode",
                                 QString::fromUtf8(
                                     "Tuner is connected via the Airbear WiFi bridge.\n\n"
-                                    "To keep the Airbear\xe2\x80\x99s built-in dashboard "
-                                    "at speeduino.local working while Tuner is connected, "
-                                    "set the Airbear to \xe2\x80\x9c" "Dash + TunerStudio\xe2\x80\x9d"
-                                    " mode:\n\n"
-                                    "  1. Open speeduino.local/config in a browser\n"
-                                    "  2. Change Connection Type to \xe2\x80\x9c"
-                                    "Dash + TunerStudio\xe2\x80\x9d" "\n"
-                                    "  3. Save and reboot the Airbear\n\n"
-                                    "This allows both the dashboard and Tuner to "
-                                    "share the UART connection to the ECU."));
+                                    "The Airbear's built-in dashboard at speeduino.local "
+                                    "needs \"Dash + TunerStudio\" mode to work while "
+                                    "Tuner is connected.\n\n"
+                                    "Switch the Airbear to Dash + TunerStudio mode now?\n\n"
+                                    "(The Airbear will reboot, and Tuner will need to reconnect.)"),
+                                QMessageBox::Yes | QMessageBox::No,
+                                QMessageBox::Yes);
+                            if (answer == QMessageBox::Yes) {
+                                // POST connection_type=4 to /config.
+                                // The Airbear reboots on disconnect after
+                                // processing the POST.
+                                try {
+                                    aa::http_post_form(
+                                        hint_host, 80, "/config",
+                                        "connection_type=4",
+                                        std::chrono::seconds(3));
+                                } catch (...) {}
+                                // The Airbear is rebooting — disconnect our
+                                // TCP transport so the operator can reconnect
+                                // after the bridge comes back up.
+                                ecu_conn->close();
+                                if (conn_label) {
+                                    char ct[256];
+                                    std::snprintf(ct, sizeof(ct),
+                                        "<span style='color: %s;'>"
+                                        "\xe2\x97\x8b</span> "
+                                        "<span style='color: %s;'>"
+                                        "Airbear rebooting\xe2\x80\xa6</span>",
+                                        tt::text_dim, tt::text_muted);
+                                    conn_label->setText(QString::fromUtf8(ct));
+                                }
+                                QMessageBox::information(dlg,
+                                    "Airbear Rebooting",
+                                    QString::fromUtf8(
+                                        "The Airbear is switching to Dash + TunerStudio "
+                                        "mode and rebooting.\n\n"
+                                        "Wait about 10 seconds, then reconnect via "
+                                        "File > Connect to ECU.\n\n"
+                                        "The dashboard at speeduino.local will now work "
+                                        "alongside Tuner."));
+                            }
                             hint_qs.setValue("hints/airbear_dash_echo", true);
                         }
                     }
