@@ -1480,9 +1480,18 @@ void migrate_recent_project_keys() {
                 : canon.parent_path().string();
             // Don't set project dir to a repo fixture path — that
             // would make Ctrl+S overwrite the bundled test fixture.
-            bool looks_like_fixture =
-                parent.find("tests") != std::string::npos
-                && parent.find("fixtures") != std::string::npos;
+            // Check path COMPONENTS not substrings so a user dir
+            // like "D:/my_tests/my_fixtures/" doesn't false-positive.
+            bool looks_like_fixture = false;
+            {
+                bool has_tests = false, has_fixtures = false;
+                for (const auto& part : std::filesystem::path(parent)) {
+                    auto s = part.string();
+                    if (s == "tests") has_tests = true;
+                    if (s == "fixtures") has_fixtures = true;
+                }
+                looks_like_fixture = has_tests && has_fixtures;
+            }
             if (!parent.empty() && !looks_like_fixture)
                 s.setValue(kCurrentProjectDirKey,
                            QString::fromUtf8(parent.c_str()));
@@ -4848,7 +4857,7 @@ QWidget* build_tune_tab(
         }
         const auto& [title_str, target] = info_it->second;
         auto ps_t0 = std::chrono::steady_clock::now();
-        auto ps_lap = [&ps_t0, &target](const char* phase) {
+        auto ps_lap = [&ps_t0, target](const char* phase) {
             auto now = std::chrono::steady_clock::now();
             double ms = std::chrono::duration<double, std::milli>(now - ps_t0).count();
             if (ms > 5.0) {  // only log phases that take >5ms
@@ -5310,22 +5319,19 @@ QWidget* build_tune_tab(
                         combo->setToolTip(QString::fromUtf8(tooltip_text.c_str()));
 
                         const auto& options = sbn_it->second->options;
-                        // Count valid (non-INVALID, non-empty) options.
-                        // CAN address fields expand $CAN_ADDRESS_HEX to
-                        // 2048 entries — 3 of those on the CAN Bus page
-                        // = 6144 addItem calls = 1.2s blocking. For
-                        // fields with >64 valid options, use an editable
-                        // combo (operator types the value, completer
-                        // assists) instead of a full dropdown.
+                        // Count valid (non-INVALID, non-empty) options
+                        // with early exit once we know it's >64.
+                        constexpr int kComboOptionCap = 64;
                         int valid_count = 0;
                         for (const auto& o : options) {
                             if (o.empty()) continue;
                             std::string u = o;
                             for (auto& ch : u) ch = static_cast<char>(
                                 std::toupper(static_cast<unsigned char>(ch)));
-                            if (u != "INVALID") ++valid_count;
+                            if (u != "INVALID" && ++valid_count > kComboOptionCap)
+                                break;
                         }
-                        if (valid_count > 64) {
+                        if (valid_count > kComboOptionCap) {
                             // Large option set — editable line edit
                             // with completer rather than 2048-item combo.
                             combo->setEditable(true);
@@ -9366,26 +9372,26 @@ QWidget* build_live_tab(
                 }
             } else {
                 // Only low-end thresholds resolved (high-end refs like
-                // {rpmwarn} unresolvable). Use channel-aware defaults
-                // so the gauge reads correctly without resolved refs.
+                // {rpmwarn} unresolvable). Use channel-aware defaults.
+                // Match exact channel name (not substring) so "rpmDelta"
+                // or "rpmTarget" don't get tachometer zones.
                 std::string ch = g->channel;
                 for (auto& c : ch) c = static_cast<char>(
                     std::tolower(static_cast<unsigned char>(c)));
-                if (ch.find("rpm") != std::string::npos) {
+                if (ch == "rpm") {
                     w.color_zones = {
                         {0, w.max_value * 0.625, "ok"},         // 0-5000
                         {w.max_value * 0.625, w.max_value * 0.8125, "warning"}, // 5000-6500
                         {w.max_value * 0.8125, w.max_value, "danger"},          // 6500-8000
                     };
-                } else if (ch.find("tps") != std::string::npos
-                        || ch.find("throttle") != std::string::npos) {
+                } else if (ch == "tps" || ch == "throttle") {
                     // TPS: all green — no inherent danger zone.
                     w.color_zones = {{0, w.max_value, "ok"}};
-                } else if (ch.find("clt") != std::string::npos) {
+                } else if (ch == "clt" || ch == "coolant") {
                     w.color_zones = {
                         {0, 80, "ok"}, {80, 100, "warning"}, {100, w.max_value, "danger"},
                     };
-                } else if (ch.find("afr") != std::string::npos) {
+                } else if (ch == "afr" || ch == "lambda") {
                     w.color_zones = {
                         {0, 11, "danger"}, {11, 13, "warning"},
                         {13, 15, "ok"}, {15, 17, "warning"},
