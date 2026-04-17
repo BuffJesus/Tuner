@@ -2085,6 +2085,12 @@ protected:
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing, false);
         p.fillRect(rect(), QColor(QString::fromUtf8(tt::bg_elevated)));
+        // Recompute axis dims from current widget size BEFORE
+        // anything reads axis_w/axis_h. This breaks the recursion
+        // cycle (axis→live_cell_size→axis) by computing axis dims
+        // from an approximate cell height that doesn't depend on
+        // axis dims.
+        const_cast<PaintedHeatmapWidget*>(this)->recompute_axis_dims();
         int aw = axis_w(), ah = axis_h();
         auto [cw, ch] = live_cell_size();
         // Scale font with cell height so text stays readable at any size.
@@ -2151,22 +2157,34 @@ protected:
     }
 
 private:
-    // Axis dimensions based on label content. Must NOT call
-    // live_cell_size() — that method calls axis_w/axis_h back,
-    // creating infinite recursion (caused a crash). Use the stored
-    // axis_font_px_ instead of the dynamic live font.
-    int axis_w() const {
-        if (y_labels_.empty()) return 0;
-        std::size_t max_len = 1;
-        for (const auto& l : y_labels_)
-            if (l.size() > max_len) max_len = l.size();
-        int char_w = axis_font_px_ * 6 / 10;
-        return std::max(40, static_cast<int>(max_len) * char_w + 10);
+    // Axis dims are cached by paintEvent to avoid the recursion
+    // between axis_w→live_cell_size→axis_w that crashed earlier.
+    // paintEvent computes them from the live font + label content,
+    // stores here, and all other callers (cell_rect, pixel_to_cell)
+    // read the cached values.
+    int axis_w() const { return cached_axis_w_; }
+    int axis_h() const { return cached_axis_h_; }
+    void recompute_axis_dims() {
+        if (y_labels_.empty()) { cached_axis_w_ = 0; }
+        else {
+            std::size_t max_len = 1;
+            for (const auto& l : y_labels_)
+                if (l.size() > max_len) max_len = l.size();
+            // Use the LIVE axis font (same one paintEvent uses).
+            int ch_approx = (rows_ > 0) ? std::max(cell_h_, (height() - 30) / rows_) : cell_h_;
+            int font_px = std::clamp(ch_approx / 2, axis_font_px_, std::max(14, ch_approx / 2));
+            int char_w = font_px * 6 / 10;
+            cached_axis_w_ = std::max(40, static_cast<int>(max_len) * char_w + 10);
+        }
+        if (x_labels_.empty()) { cached_axis_h_ = 0; }
+        else {
+            int ch_approx = (rows_ > 0) ? std::max(cell_h_, (height() - 30) / rows_) : cell_h_;
+            int font_px = std::clamp(ch_approx / 2, axis_font_px_, std::max(14, ch_approx / 2));
+            cached_axis_h_ = std::max(22, font_px + 10);
+        }
     }
-    int axis_h() const {
-        if (x_labels_.empty()) return 0;
-        return std::max(22, axis_font_px_ + 10);
-    }
+    mutable int cached_axis_w_ = 40;
+    mutable int cached_axis_h_ = 22;
     // Compute cell dimensions from actual widget size so the heatmap
     // fills available space instead of sitting at the fixed minimum.
     std::pair<int, int> live_cell_size() const {
