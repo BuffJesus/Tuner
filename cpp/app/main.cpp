@@ -3877,6 +3877,21 @@ QWidget* build_tune_tab(
             // app never sees a page that large. This runs on ANY
             // definition (INI-derived or hand-authored), so even a
             // badly-structured .tunerdef loads fast.
+            // Diagnostic: log every compiled page with its field count
+            // so we can see which pages the splitter sees and whether
+            // can_serial3IO actually has >30 fields.
+            for (const auto& pg : compiled) {
+                int fc = 0;
+                for (const auto& s : pg.sections) fc += static_cast<int>(s.fields.size());
+                if (fc > 15) {
+                    char d[192];
+                    std::snprintf(d, sizeof(d),
+                        "PERF compiled_page target=%s fields=%d sections=%d",
+                        pg.target.c_str(), fc, static_cast<int>(pg.sections.size()));
+                    debug_log(d);
+                }
+            }
+
             constexpr int kMaxFieldsPerPage = 30;
             {
                 std::vector<dlns::LayoutPage> split;
@@ -3891,6 +3906,14 @@ QWidget* build_tune_tab(
                         // Small page or table/curve — keep as-is.
                         split.push_back(std::move(pg));
                         continue;
+                    }
+                    {
+                        char dbg[192];
+                        std::snprintf(dbg, sizeof(dbg),
+                            "PERF page_split target=%s total=%d sections=%d",
+                            pg.target.c_str(), total,
+                            static_cast<int>(pg.sections.size()));
+                        debug_log(dbg);
                     }
                     // Split across sections AND within oversized sections.
                     // A section with >kMaxFieldsPerPage fields (CAN Bus
@@ -4824,6 +4847,19 @@ QWidget* build_tune_tab(
             return;
         }
         const auto& [title_str, target] = info_it->second;
+        auto ps_t0 = std::chrono::steady_clock::now();
+        auto ps_lap = [&ps_t0, &target](const char* phase) {
+            auto now = std::chrono::steady_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(now - ps_t0).count();
+            if (ms > 5.0) {  // only log phases that take >5ms
+                char d[192];
+                std::snprintf(d, sizeof(d), "PERF   ps/%s %s %.1f ms",
+                    target.c_str(), phase, ms);
+                debug_log(d);
+            }
+            ps_t0 = now;
+        };
+        debug_log("PERF page_open target=" + target);
         selected_label->setText(QString::fromUtf8(title_str.c_str()));
         (*refresh_page_chip)(target);
         workspace->select_page(target);
@@ -4837,12 +4873,10 @@ QWidget* build_tune_tab(
         // popup's revert handler to reach widgets that are currently
         // on-screen.
         visible_editors->clear();
-        // Detach old params widget. Previously we hid it (never
-        // deleted from signal handlers), but hide() on a 434-widget
-        // tree triggers a full relayout storm (~1.5s). deleteLater()
-        // defers cleanup to the next event-loop tick without blocking.
+        // Detach old params widget.
         auto* old_widget = params_scroll->takeWidget();
         if (old_widget) old_widget->deleteLater();
+        ps_lap("cleanup");
         auto* params_container = new QWidget;
         auto* params_layout = new QVBoxLayout(params_container);
         params_layout->setContentsMargins(0, 0, 0, 0);
@@ -4918,6 +4952,18 @@ QWidget* build_tune_tab(
                     field_count, static_cast<int>(page.sections.size()));
         }
         detail_label->setText(QString::fromUtf8(info));
+        {
+            int fc = 0;
+            for (const auto& s : page.sections) fc += static_cast<int>(s.fields.size());
+            char d2[192];
+            std::snprintf(d2, sizeof(d2),
+                "PERF   page_detail target=%s sections=%d fields=%d table=%s curve=%s",
+                target.c_str(), static_cast<int>(page.sections.size()), fc,
+                page.table_editor_id.empty() ? "no" : page.table_editor_id.c_str(),
+                page.curve_editor_id.empty() ? "no" : page.curve_editor_id.c_str());
+            debug_log(d2);
+        }
+        ps_lap("context_hint");
 
         // Humanize parameter/section names.
         auto humanize_param = [](const std::string& raw) -> std::string {
@@ -5013,6 +5059,7 @@ QWidget* build_tune_tab(
                 if (capped && !show_all_for_page && rendered_fields >= kFieldRenderCap)
                     continue;
                 ++rendered_fields;
+                auto field_t0 = std::chrono::steady_clock::now();
 
                 auto* row = new QHBoxLayout;
                 row->setSpacing(tt::space_sm);
@@ -5260,29 +5307,55 @@ QWidget* build_tune_tab(
                     if (has_options) {
                         // Editable QComboBox dropdown for enum parameters.
                         auto* combo = new QComboBox;
-                        combo->setFixedWidth(160);
-                        combo->setStyleSheet(QString::fromUtf8(
-                            tt::combo_editor_style(tt::EditorState::Default).c_str()));
                         combo->setToolTip(QString::fromUtf8(tooltip_text.c_str()));
 
                         const auto& options = sbn_it->second->options;
-                        int current_idx = -1;
-                        for (int oi = 0; oi < static_cast<int>(options.size()); ++oi) {
-                            if (options[oi].empty()) continue;
-                            // Skip "INVALID" options (matching Python).
-                            std::string upper = options[oi];
-                            for (auto& ch : upper)
-                                ch = static_cast<char>(std::toupper(
-                                    static_cast<unsigned char>(ch)));
-                            if (upper == "INVALID") continue;
-                            combo->addItem(
-                                QString::fromUtf8(options[oi].c_str()),
-                                QString::fromUtf8(options[oi].c_str()));
-                            // Match current value by display text.
-                            if (options[oi] == raw_val)
-                                current_idx = combo->count() - 1;
+                        // Count valid (non-INVALID, non-empty) options.
+                        // CAN address fields expand $CAN_ADDRESS_HEX to
+                        // 2048 entries — 3 of those on the CAN Bus page
+                        // = 6144 addItem calls = 1.2s blocking. For
+                        // fields with >64 valid options, use an editable
+                        // combo (operator types the value, completer
+                        // assists) instead of a full dropdown.
+                        int valid_count = 0;
+                        for (const auto& o : options) {
+                            if (o.empty()) continue;
+                            std::string u = o;
+                            for (auto& ch : u) ch = static_cast<char>(
+                                std::toupper(static_cast<unsigned char>(ch)));
+                            if (u != "INVALID") ++valid_count;
                         }
-                        if (current_idx >= 0) combo->setCurrentIndex(current_idx);
+                        if (valid_count > 64) {
+                            // Large option set — editable line edit
+                            // with completer rather than 2048-item combo.
+                            combo->setEditable(true);
+                            combo->setInsertPolicy(QComboBox::NoInsert);
+                            combo->setFixedWidth(160);
+                            combo->setStyleSheet(QString::fromUtf8(
+                                tt::combo_editor_style(tt::EditorState::Default).c_str()));
+                            // Don't populate the full list — just set
+                            // the current value as editable text.
+                            combo->setEditText(QString::fromUtf8(raw_val.c_str()));
+                        } else {
+                            combo->setFixedWidth(160);
+                            combo->setStyleSheet(QString::fromUtf8(
+                                tt::combo_editor_style(tt::EditorState::Default).c_str()));
+                            int current_idx = -1;
+                            for (int oi = 0; oi < static_cast<int>(options.size()); ++oi) {
+                                if (options[oi].empty()) continue;
+                                std::string upper = options[oi];
+                                for (auto& ch : upper)
+                                    ch = static_cast<char>(std::toupper(
+                                        static_cast<unsigned char>(ch)));
+                                if (upper == "INVALID") continue;
+                                combo->addItem(
+                                    QString::fromUtf8(options[oi].c_str()),
+                                    QString::fromUtf8(options[oi].c_str()));
+                                if (options[oi] == raw_val)
+                                    current_idx = combo->count() - 1;
+                            }
+                            if (current_idx >= 0) combo->setCurrentIndex(current_idx);
+                        }
                         row->addWidget(combo);
 
                         // Record for revert support.
@@ -5370,6 +5443,17 @@ QWidget* build_tune_tab(
 
                 row->addStretch(1);
                 params_layout->addLayout(row);
+                {
+                    double fms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - field_t0).count();
+                    if (fms > 20.0) {
+                        char fd[192];
+                        std::snprintf(fd, sizeof(fd),
+                            "PERF   slow_field %s %.1fms param=%s",
+                            target.c_str(), fms, f.parameter_name.c_str());
+                        debug_log(fd);
+                    }
+                }
             }
         }
         // Vertical sizing flips per page type. Scalar pages: scroll area
