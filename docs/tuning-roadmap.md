@@ -362,6 +362,13 @@ Audited against the deleted Python app (git `8dc3d92:src/tuner/`) and decompiled
 - **CRC check panel** — manual hex string CRC calculator. Niche debugging tool.
 - **Asymmetric sweep / dashed bar gauge renderers** — cosmetic gauge variants TunerStudio supports.
 
+**Workflow/UX gaps (from deep TunerStudio decompiled scan, 2026-04-16):**
+
+- **Diff on Connect** — TunerStudio's `G/an.java` auto-compares ECU page data against the project tune on every connect. Shows a "Difference Report" dialog (`U/h.java`) with side-by-side comparison and buttons to accept project settings or keep controller settings. Our app has `SpeeduinoController::verify_page` (CRC check) but no operator-facing diff or resolution flow.
+- **Automatic Restore Points** — `R/a.java` defines `saveRestorePointOnProjectClose` / `OnLoad` / `OnConnect` (all default true), `maxRestorePointSpace = 10`, `skipRestorePointWhenNoChange = true`. `aY/s.java` renders a browsable list of restore points with "Compare to Current" and "Load Restore Point" buttons. We have no restore-point or undo-to-snapshot feature.
+- **Auto-save Offline Tune** — `aP/f.java` checks `autoSaveOfflineTune` (default true) and saves the tune periodically when disconnected. We don't auto-save — operator must Ctrl+S manually. An unsaved tune is lost on crash or accidental close.
+- **SETUP tab sub-tabs** — the SETUP tab has grown to 6 guided cards + generator previews + compressor map + sensor calibration + wizard button. Operators report it's "getting pretty busy." Break into sub-tabs or collapsible sections: **Generators** (VE/AFR/Spark/Idle/WUE/Cranking previews) · **Hardware** (IAC/Fan/Flex/Safety/TPS/Engine Advanced) · **Turbo** (Advanced Turbo + Compressor Map) · **Calibration** (CLT/IAT/O2 sensor write).
+
 **C++ app is AHEAD of both Python and TunerStudio in:**
 
 - 3D rotatable table surface (QPainter wireframe, mouse-drag rotation)
