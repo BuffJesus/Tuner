@@ -17853,121 +17853,91 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
 // ---------------------------------------------------------------------------
 
 QWidget* build_history_tab() {
+    auto* scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setStyleSheet("QScrollArea { border: none; }");
     auto* container = new QWidget;
     auto* layout = new QVBoxLayout(container);
     layout->setContentsMargins(tt::space_lg, tt::space_lg, tt::space_lg, tt::space_lg);
     layout->setSpacing(tt::space_md);
 
-    auto* title = new QLabel("Phase 14 Slice 4 - workspace services in C++");
-    QFont tf = title->font(); tf.setPixelSize(tt::font_hero); tf.setBold(true);
-    title->setFont(tf);
-    layout->addWidget(title);
+    layout->addWidget(make_tab_header(
+        "About",
+        "Project info \xc2\xb7 keyboard shortcuts \xc2\xb7 resources"));
 
-    auto* count = new QLabel(
-        "<b>82 sub-slices landed. 1063 tests passing.</b> Each item below is a real C++ service "
-        "in tuner_core, parity-tested or doctest-pinned against the Python oracle.");
-    count->setTextFormat(Qt::RichText);
-    count->setWordWrap(true);
-    layout->addWidget(count);
+    // App identity card.
+    {
+        char body[512];
+        std::snprintf(body, sizeof(body),
+            "<span style='font-size: %dpx; font-weight: bold; color: %s;'>"
+            "TUNER</span><br>"
+            "<span style='color: %s; font-size: %dpx;'>"
+            "A modern workstation for Speeduino engines.<br>"
+            "The same information legacy tools show, organized around what "
+            "the operator is trying to accomplish.</span>",
+            tt::font_heading, tt::text_primary,
+            tt::text_secondary, tt::font_body);
+        auto* card = make_info_card("", body, tt::accent_primary);
+        if (auto* lbl = card->findChild<QLabel*>()) {
+            lbl->setTextFormat(Qt::RichText);
+            lbl->setText(QString::fromUtf8(body));
+        }
+        layout->addWidget(card);
+    }
 
-    auto* list = new QListWidget;
-    static const char* services[] = {
-        "01. visibility_expression - INI {expr} evaluator",
-        "02. required_fuel_calculator - reqFuel formula",
-        "03. table_edit - fill / fill_down / interpolate / smooth / paste",
-        "04. sample_gate_helpers - channel resolver + lambda/AFR + apply_operator",
-        "05. autotune_filter_gate_evaluator - std_DeadLambda / axis bounds / parametric",
-        "06. wue_analyze_helpers - confidence + numeric_axis + nearest_index",
-        "07. hardware_setup_validation - 10 dwell/dead-time/trigger/wideband rules",
-        "08. board_detection - regex-driven board family detection",
-        "09. pressure_sensor_calibration - preset matching + URL confidence labels",
-        "10. release_manifest - JSON release_manifest.json loader",
-        "11. tune_value_preview - Python str(float) repr via std::to_chars",
-        "12. staged_change - composes tune_value_preview for staged review",
-        "13. tuning_page_diff - per-page diff with summary + detail_text",
-        "14. table_view - flat list to 2D string grid with shape resolution",
-        "15. evidence_replay_comparison - channel-delta diff with top-4",
-        "16. gauge_color_zones - INI thresholds to ok/warning/danger bands",
-        "17. tuning_page_validation - composes visibility evaluator + range checks",
-        "18. sync_state - signature/page/ECU-vs-tune mismatch detector",
-        "19. parameter_catalog - sortable definition + tune-only catalog",
-        "20. flash_preflight - 8 warning rules + signature_family classifier",
-        "21. live_data_map_parser - Speeduino live_data_map.h to ChannelContract",
-        "22. page_family - fuel/spark/target/vvt grouping with sort + tab titles",
-        "23. curve_page_classifier - 8-rule keyword classifier",
-        "24. operation_log - append-only mutation log",
-        "25. operation_evidence - composes operation_log into session snapshot",
-        "26. scalar_page_editor - composes visibility evaluator with two-level filtering",
-        "27. table_replay_context - live operating-point crosshair locator",
-        "28. table_replay_hit - datalog to cell hit-count aggregator",
-        "29. surface_evidence - workspace pill strip + rollup paragraph",
-        "30. replay_sample_gate - named-gate evaluator for replay records",
-        "31. datalog_review - Logging tab review-chart trace builder",
-        "32. table_rendering - 6-stop heatmap gradient + foreground flip",
-        "33. ve_proposal_smoothing - Phase 7.5 reviewable smoothing transform",
-        "34. ve_root_cause_diagnostics - Phase 7.7 4-rule diagnostic engine",
-        "35. ve_cell_hit_accumulator - Phase 7.2 weighted-correction snapshot layer",
-        "36. ve_analyze_review - Phase 7 operator-facing review text builder",
-        "37. wue_analyze_snapshot - WUE Analyze 1D row accumulator snapshot",
-        "38. wue_analyze_review - WUE Analyze operator-facing review text",
-        "39. thermistor_calibration - Steinhart-Hart CLT/IAT table generator",
-        "40. idle_rpm_generator - conservative idle RPM target curve generator",
-        "41. afr_target_generator - conservative 16x16 AFR target table",
-        "42. spark_table_generator - conservative 16x16 spark advance table",
-        "43. ve_table_generator - conservative 16x16 VE table with topology shaping",
-        "44. startup_enrichment_generator - WUE + cranking + ASE curves",
-        "45. runtime_telemetry - Speeduino board capability + runtime status decoder",
-        "46. ini_dialog_parser - [UserDefined] dialog/field/panel parser",
-        "47. definition_layout - INI dialogs + menus -> editor-facing layout pages",
-        "48. tuning_page_grouping - keyword classifier for page group families",
-        "49. local_tune_edit - staged-edit state machine with undo/redo",
-        "50. wideband_calibration - wideband O2 AFR table + 5 presets",
-        "51. dashboard_layout - dashboard widget model + 11-gauge default",
-        "52. hardware_presets - ignition coil preset catalog with sources",
-        "53. firmware_capabilities - runtime trust summary + uncertain channels",
-        "54. operator_engine_context - session-level engine facts store + JSON persistence",
-        "55. hardware_setup_generator_context - keyword-based parameter discovery for generators",
-        "56. sensor_setup_checklist - 9-check sensor hardware validation",
-        "57. curve_page_builder - curve page builder with group classification",
-        "58. evidence_replay - evidence snapshot composer for workspace replay",
-        "59. page_evidence_review - page-level channel selector for evidence review",
-        "60. evidence_replay_formatter - text and JSON snapshot formatter",
-        "61. trigger_log_visualization - trace builder with edge/gap annotations",
-        "62. trigger_log_analysis - decoder context + gap + phase + sync analysis",
-        "63. live_ve_analyze_session - stateful VE session status builder",
-        "64. live_wue_analyze_session - stateful WUE session status builder",
-        "65. datalog_profile - priority ordering + JSON profile collection",
-        "66. firmware_catalog - board detection + entry scoring for firmware suggestion",
-        "67. datalog_replay - row selection with channel preview",
-        "68. ignition_trigger_cross_validation - 6 cross-page ign/trig checks + topology",
-        "69. mock_ecu_runtime - simulated driving cycle for live gauge animation",
-        "70. ts_dash_file - legacy dashboard .dash XML import/export",
-        "71. wue_analyze_accumulator - WUE stateful accumulator with CLT axis detection",
-        "72. ve_analyze_accumulator - VE stateful accumulator with RPM/MAP cell mapping",
-        "73. tuning_page_builder - compiles definition into grouped page model",
-        "74. datalog_import - CSV datalog import with time detection + channel extraction",
-        "75. msq_value_formatter - legacy MSQ value formatting",
-        "76. workspace_state - page state machine (clean/staged/written/burned)",
-        "77. native_tune_writer - .tuner JSON export/import (native format step 1)",
-        "78. project_file - .tunerproj JSON project metadata (native format step 2)",
-        "79. native_definition_writer - .tunerdef JSON definition export (native format step 3)",
-        "80. hardware_setup_summary - contextual setup cards per page type",
-        "81. workspace_presenter - compact workspace orchestrator (load/navigate/edit/write/burn)",
-        "82. table_surface_3d - 3D wireframe projection for table values (G2 foundation)",
-    };
-    for (const char* s : services) list->addItem(QString::fromUtf8(s));
-    layout->addWidget(list, 1);
+    // Quick-start reference.
+    layout->addWidget(make_info_card(
+        "Getting Started",
+        "1. File \xe2\x86\x92 New Project \xe2\x80\x94 creates a project directory + runs the Engine Setup Wizard\n"
+        "2. Review the generated tables on the TUNE tab (Alt+1)\n"
+        "3. Connect to the ECU (File \xe2\x86\x92 Connect to ECU)\n"
+        "4. Write to RAM (Ctrl+W) \xe2\x80\x94 changes take effect immediately\n"
+        "5. Burn to Flash (Ctrl+B) \xe2\x80\x94 permanent, survives power cycle\n"
+        "6. Use LOGGING to capture data while driving\n"
+        "7. Use ASSIST \xe2\x86\x92 VE Analyze to refine the tune from logged data",
+        tt::accent_ok));
 
-    auto* footer = new QLabel(
-        "Plus the entire Speeduino raw protocol stack (framing + command shapes "
-        "+ value codec + parameter codec + live-data decoder), every INI section "
-        "parser, the EcuDefinition compiler, the MSQ parser, and the native "
-        "format writer. Total: 931 doctest cases, 6668 assertions, 0 failures. "
-        "Python parity suite: 2445/2445 passing.");
-    footer->setWordWrap(true);
-    footer->setStyleSheet("color: gray;");
-    layout->addWidget(footer);
-    return container;
+    // Tab reference.
+    layout->addWidget(make_info_card(
+        "Tabs",
+        "\xf0\x9f\x94\xa7  TUNE     \xe2\x80\x94 Edit scalars, tables, curves. Review + Write + Burn.\n"
+        "\xf0\x9f\x93\x8a  LIVE     \xe2\x80\x94 Runtime gauges, indicators, hardware test panel.\n"
+        "\xe2\x9a\xa1  FLASH    \xe2\x80\x94 Firmware preflight + flash execution.\n"
+        "\xe2\x9a\x99  SETUP    \xe2\x80\x94 Engine Setup Wizard + generator previews + guided hardware cards.\n"
+        "\xf0\x9f\xa7\xaa  ASSIST   \xe2\x80\x94 VE Analyze, WUE Analyze, Virtual Dyno.\n"
+        "\xf0\x9f\x94\x8d  TRIGGERS \xe2\x80\x94 Trigger log capture, CSV import, oscilloscope view.\n"
+        "\xf0\x9f\x93\x9d  LOGGING  \xe2\x80\x94 Datalog capture, profiles, timeline replay.",
+        tt::text_muted));
+
+    // Keyboard shortcuts (compact version of the F1 cheat sheet).
+    layout->addWidget(make_info_card(
+        "Keyboard Shortcuts",
+        "Alt+1..7  \xe2\x80\x94 Jump to tab\n"
+        "Ctrl+K    \xe2\x80\x94 Command palette\n"
+        "Ctrl+R    \xe2\x80\x94 Review staged changes\n"
+        "Ctrl+W    \xe2\x80\x94 Write to RAM\n"
+        "Ctrl+B    \xe2\x80\x94 Burn to Flash\n"
+        "Ctrl+S    \xe2\x80\x94 Save tune\n"
+        "Ctrl+O    \xe2\x80\x94 Open project\n"
+        "F1 / ?    \xe2\x80\x94 Full shortcut cheat sheet\n"
+        "F11       \xe2\x80\x94 Fullscreen dashboard\n"
+        "+/-       \xe2\x80\x94 Increment/decrement table cells\n"
+        "I / S / F \xe2\x80\x94 Interpolate / Smooth / Fill table selection",
+        tt::accent_primary));
+
+    // Native file formats.
+    layout->addWidget(make_info_card(
+        "File Formats",
+        ".tuner      \xe2\x80\x94 Native tune file (JSON). All parameters + table data.\n"
+        ".tunerdef   \xe2\x80\x94 Native definition (JSON). Describes every tunable parameter.\n"
+        ".tunerproj  \xe2\x80\x94 Project metadata (JSON). Links definition + tune + settings.\n"
+        ".ini        \xe2\x80\x94 Legacy Speeduino/TunerStudio definition. Import supported.\n"
+        ".msq        \xe2\x80\x94 Legacy TunerStudio tune. Import supported.",
+        tt::text_muted));
+
+    layout->addStretch(1);
+    scroll->setWidget(container);
+    return scroll;
 }
 
 // ---------------------------------------------------------------------------
@@ -18060,8 +18030,8 @@ public:
                 "Triggers \xe2\x80\x94 trigger log diagnostics  (Alt+6)"},
             {"\xf0\x9f\x93\x9d", "Logging",
                 "Logging \xe2\x80\x94 datalog profiles and replay  (Alt+7)"},
-            {"\xf0\x9f\x93\x8b", "History",
-                "History \xe2\x80\x94 ported service manifest  (Alt+8)"},
+            {"\xf0\x9f\x93\x8b", "About",
+                "About \xe2\x80\x94 project info, shortcuts, resources  (Alt+8)"},
         };
         for (const auto& item : nav_items) {
             char label[96];
