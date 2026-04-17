@@ -1564,6 +1564,61 @@ bool icontains(const std::string& haystack, const std::string& needle) {
 }
 
 // ---------------------------------------------------------------------------
+// Display unit conversion — bridges INI internal units to operator prefs.
+// ---------------------------------------------------------------------------
+
+struct UnitConversion {
+    const char* display_unit;  // what the operator sees
+    double to_display;         // multiply internal value to get display
+    double to_internal;        // multiply display value to get internal
+    double offset_display;     // add after multiply (for °C→°F: *1.8+32)
+    double offset_internal;    // add after multiply (for °F→°C: subtract 32 first, then /1.8)
+};
+
+// Returns a conversion if the operator's preference differs from the
+// INI's declared unit. Returns nullopt if no conversion is needed.
+std::optional<UnitConversion> unit_conversion_for(const std::string& ini_unit) {
+    QSettings qs;
+    int temp_pref = qs.value("units/temperature", 0).toInt();   // 0=°C, 1=°F
+    int press_pref = qs.value("units/pressure", 0).toInt();     // 0=kPa, 1=PSI, 2=bar
+    int speed_pref = qs.value("units/speed", 0).toInt();        // 0=km/h, 1=mph
+
+    // Temperature: °C → °F.
+    if (temp_pref == 1) {
+        if (ini_unit == "\xc2\xb0""C" || ini_unit == "C"
+            || ini_unit == "deg C" || ini_unit == "degC"
+            || ini_unit == "\xc2\xb0" || ini_unit == "DEGC") {
+            return UnitConversion{"\xc2\xb0""F", 1.8, 1.0/1.8, 32.0, -32.0};
+        }
+    }
+    // Pressure: kPa → PSI or bar.
+    if (press_pref == 1) {
+        if (ini_unit == "kPa" || ini_unit == "kpa" || ini_unit == "KPA") {
+            return UnitConversion{"PSI", 0.14503773773, 6.89475729, 0, 0};
+        }
+    } else if (press_pref == 2) {
+        if (ini_unit == "kPa" || ini_unit == "kpa" || ini_unit == "KPA") {
+            return UnitConversion{"bar", 0.01, 100.0, 0, 0};
+        }
+    }
+    // Speed: km/h → mph.
+    if (speed_pref == 1) {
+        if (ini_unit == "km/h" || ini_unit == "kph" || ini_unit == "KPH") {
+            return UnitConversion{"mph", 0.621371, 1.60934, 0, 0};
+        }
+    }
+    return std::nullopt;
+}
+
+double convert_to_display(double internal, const UnitConversion& conv) {
+    return internal * conv.to_display + conv.offset_display;
+}
+
+double convert_to_internal(double display, const UnitConversion& conv) {
+    return (display + conv.offset_internal) * conv.to_internal;
+}
+
+// ---------------------------------------------------------------------------
 // Tune tab — collapsible tree + search filter + selection feedback
 // ---------------------------------------------------------------------------
 //
@@ -4028,12 +4083,28 @@ QWidget* build_tune_tab(
                     vis_values[k] = std::get<double>(v);
             }
         }
-        // Also inject wizard/cylinders from QSettings as nCylinders
-        // fallback if the edit service doesn't have it yet.
-        if (vis_values.find("nCylinders") == vis_values.end()) {
+        // Inject fallback values for output channels and wizard
+        // context that the INI's visibility expressions reference
+        // but aren't stored in the tune file. Without these,
+        // expressions like { nFuelChannels >= 5 } evaluate to
+        // { 0 >= 5 } = false, hiding pages that should be visible.
+        {
             QSettings qs;
+            auto inject = [&](const char* key, double val) {
+                if (vis_values.find(key) == vis_values.end())
+                    vis_values[key] = val;
+            };
             int nc = qs.value("wizard/cylinders", 0).toInt();
-            if (nc > 0) vis_values["nCylinders"] = static_cast<double>(nc);
+            if (nc > 0) inject("nCylinders", static_cast<double>(nc));
+            int board = qs.value("wizard/board_family", 3).toInt();
+            // DropBear (Teensy 4.1) supports 8 fuel + 8 ign outputs.
+            // Mega supports 4 fuel + 4 ign. STM32 supports 8.
+            int max_fuel = (board == 0) ? 4 : 8;
+            int max_ign = (board == 0) ? 4 : 8;
+            inject("nFuelChannels", static_cast<double>(max_fuel));
+            inject("nIgnChannels", static_cast<double>(max_ign));
+            // CAN availability — DropBear and STM32 have CAN.
+            inject("CANisAvailable", (board >= 3) ? 1.0 : 0.0);
         }
         bool has_vis_filter = !vis_values.empty();
         // App-level units filter: hide AFR or Lambda pages based on
@@ -5550,6 +5621,10 @@ QWidget* build_tune_tab(
                 auto* tv = edit_svc->get_value(f.parameter_name);
                 if (tv != nullptr && std::holds_alternative<double>(tv->value)) {
                     double v = std::get<double>(tv->value);
+                    // Apply display unit conversion if the operator's
+                    // preference differs from the INI's declared unit.
+                    auto uconv = unit_conversion_for(tv->units);
+                    if (uconv) v = convert_to_display(v, *uconv);
                     char val_str[32];
                     std::snprintf(val_str, sizeof(val_str), "%.4g", v);
                     auto* edit = new QLineEdit(QString::fromUtf8(val_str));
@@ -5559,32 +5634,26 @@ QWidget* build_tune_tab(
                     edit->setToolTip(QString::fromUtf8(tooltip_text.c_str()));
                     row->addWidget(edit);
 
-                    // Sub-slice 94 bugfix: record this editor + its
-                    // base text in the visible-editors map so a popup
-                    // revert can reset it. Read the base from
-                    // get_base_value, not get_value, so we capture
-                    // the "return to this on revert" target, not the
-                    // current (possibly already-staged) value.
                     {
                         std::string base_text;
                         auto* base_tv = edit_svc->get_base_value(f.parameter_name);
                         if (base_tv != nullptr && std::holds_alternative<double>(base_tv->value)) {
+                            double bv = std::get<double>(base_tv->value);
+                            if (uconv) bv = convert_to_display(bv, *uconv);
                             char btxt[32];
-                            std::snprintf(btxt, sizeof(btxt), "%.4g",
-                                std::get<double>(base_tv->value));
+                            std::snprintf(btxt, sizeof(btxt), "%.4g", bv);
                             base_text = btxt;
                         } else {
-                            // No base value known — fall back to the
-                            // currently-displayed text, which at
-                            // startup is the same as base.
                             base_text = val_str;
                         }
                         (*visible_editors)[f.parameter_name] = {edit, nullptr, base_text};
                     }
 
-                    // Units label.
-                    if (!tv->units.empty()) {
-                        auto* units = new QLabel(QString::fromUtf8(tv->units.c_str()));
+                    // Units label — show converted unit if applicable.
+                    std::string display_unit = uconv
+                        ? std::string(uconv->display_unit) : tv->units;
+                    if (!display_unit.empty()) {
+                        auto* units = new QLabel(QString::fromUtf8(display_unit.c_str()));
                         units->setStyleSheet(QString::fromUtf8(tt::units_label_style().c_str()));
                         row->addWidget(units);
                     }
@@ -5608,13 +5677,27 @@ QWidget* build_tune_tab(
                             }
                         }
                     }
+                    // Capture unit conversion for reverse path.
+                    auto field_uconv = uconv;
                     QObject::connect(edit, &QLineEdit::editingFinished,
                                      [edit, edit_svc, param_name, page_target,
                                       workspace, on_staged_changed,
                                       refresh_page_chip, refresh_review_button,
                                       refresh_tree_state_indicators,
-                                      sc_min, sc_max, has_range]() {
+                                      sc_min, sc_max, has_range, field_uconv]() {
                         std::string new_val = edit->text().toStdString();
+                        // Reverse-convert display units back to internal
+                        // before staging so the edit service stores the
+                        // firmware-native value.
+                        if (field_uconv) {
+                            try {
+                                double dv = std::stod(new_val);
+                                double iv = convert_to_internal(dv, *field_uconv);
+                                char buf[32];
+                                std::snprintf(buf, sizeof(buf), "%.4g", iv);
+                                new_val = buf;
+                            } catch (...) {}
+                        }
                         try {
                             bool clamped = false;
                             edit_svc->stage_scalar_value(param_name, new_val, &clamped);
@@ -5625,9 +5708,11 @@ QWidget* build_tune_tab(
                             if (clamped) {
                                 auto* tv = edit_svc->get_value(param_name);
                                 if (tv && std::holds_alternative<double>(tv->value)) {
+                                    double cv = std::get<double>(tv->value);
+                                    if (field_uconv)
+                                        cv = convert_to_display(cv, *field_uconv);
                                     char buf[32];
-                                    std::snprintf(buf, sizeof(buf), "%.4g",
-                                        std::get<double>(tv->value));
+                                    std::snprintf(buf, sizeof(buf), "%.4g", cv);
                                     edit->setText(QString::fromUtf8(buf));
                                 }
                                 char tip[160];
@@ -12945,6 +13030,9 @@ struct WizardResult {
     int n_injectors = 6;
     int inj_layout = 0;     // 0=paired, 1=semi-sequential, 2=sequential
     int calibration_intent = 0;  // 0=first start, 1=drivable base
+    double cam_duration_deg = 0;  // 0=use default, >0=intake cam duration
+    int head_flow_class = 0;     // 0=stock, 1=mild ported, 2=race ported
+    int intake_manifold = 0;     // 0=stock, 1=long runner plenum, 2=short runner, 3=ITB, 4=log/compact
     // Step 2: Induction
     int induction = 0;  // 0=NA, 1=single turbo, 2=twin turbo, 3=supercharged
     double boost_target_psi = 14.0;
@@ -13196,9 +13284,23 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
     auto* intent_combo = make_combo_row(p1l, "Calibration Intent:");
     intent_combo->addItem("First Start (conservative)");
     intent_combo->addItem("Drivable Base (moderate)");
+    auto* cam_dur_edit = make_row(p1l, "Cam Duration (\xc2\xb0):");
+    cam_dur_edit->setPlaceholderText("auto");
+    auto* head_flow_combo = make_combo_row(p1l, "Head Flow:");
+    head_flow_combo->addItem("Stock");
+    head_flow_combo->addItem("Mild Ported");
+    head_flow_combo->addItem("Race Ported");
+    auto* manifold_combo = make_combo_row(p1l, "Intake Manifold:");
+    manifold_combo->addItem("Stock / OEM");
+    manifold_combo->addItem("Long Runner Plenum");
+    manifold_combo->addItem("Short Runner Plenum");
+    manifold_combo->addItem("Individual Throttle Bodies");
+    manifold_combo->addItem("Log / Compact");
     make_hint(p1l, "Speed Density is recommended for most builds. "
               "Sequential injection requires cam sync. "
-              "Teensy 4.1 (DropBear) is recommended for new builds.");
+              "Teensy 4.1 (DropBear) is recommended for new builds. "
+              "Cam duration, head flow, and manifold shape the VE table "
+              "generators \xe2\x80\x94 leave defaults if unknown.");
     p1l->addStretch(1);
     pages->addWidget(p1);
 
@@ -13745,6 +13847,7 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
                       fuel_pressure_combo, rail_pressure_edit, comp_mode_combo,
                       baro_combo,
                       inj_count_edit, inj_layout_combo, intent_combo,
+                      cam_dur_edit, head_flow_combo, manifold_combo,
                       flex_combo, flex_low_edit, flex_high_edit,
                       cam_combo, knock_combo, knock_retard_edit,
                       oil_combo, afr_prot_combo, afr_prot_max_edit,
@@ -13766,6 +13869,9 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
             try { result.n_injectors = std::stoi(inj_count_edit->text().toStdString()); } catch (...) {}
             result.inj_layout = inj_layout_combo->currentIndex();
             result.calibration_intent = intent_combo->currentIndex();
+            try { result.cam_duration_deg = std::stod(cam_dur_edit->text().toStdString()); } catch (...) {}
+            result.head_flow_class = head_flow_combo->currentIndex();
+            result.intake_manifold = manifold_combo->currentIndex();
             result.induction = induction_combo->currentIndex();
             try { result.boost_target_psi = std::stod(boost_edit->text().toStdString()); } catch (...) {}
             result.intercooler_present = (intercooler_combo->currentIndex() == 1);
@@ -14023,6 +14129,18 @@ QWidget* build_setup_tab(
                 ve_ctx.injector_flow_ccmin = wr.injector_flow;
                 ve_ctx.injector_dead_time_ms = wr.dead_time_ms;
                 ve_ctx.intercooler_present = wr.intercooler_present;
+                if (wr.cam_duration_deg > 0)
+                    ve_ctx.cam_duration_deg = wr.cam_duration_deg;
+                {
+                    const char* hfc[] = {"", "mild_ported", "race_ported"};
+                    if (wr.head_flow_class > 0 && wr.head_flow_class <= 2)
+                        ve_ctx.head_flow_class = hfc[wr.head_flow_class];
+                }
+                {
+                    const char* ims[] = {"", "long_runner_plenum", "short_runner_plenum", "itb", "log_compact"};
+                    if (wr.intake_manifold > 0 && wr.intake_manifold <= 4)
+                        ve_ctx.intake_manifold_style = ims[wr.intake_manifold];
+                }
                 if (wr.induction > 0) {
                     ve_ctx.forced_induction_topology = (wr.induction == 3)
                         ? vg::ForcedInductionTopology::SINGLE_SUPERCHARGER
@@ -14143,6 +14261,10 @@ QWidget* build_setup_tab(
                     wqs.setValue("wizard/dead_time_ms", wr.dead_time_ms);
                     wqs.setValue("wizard/stoich", wr.stoich);
                     wqs.setValue("wizard/dwell_running", wr.dwell_running);
+                    wqs.setValue("wizard/board_family", wr.board_family);
+                    wqs.setValue("wizard/cam_duration_deg", wr.cam_duration_deg);
+                    wqs.setValue("wizard/head_flow_class", wr.head_flow_class);
+                    wqs.setValue("wizard/intake_manifold", wr.intake_manifold);
                     // Units preferences.
                     wqs.setValue("units/fuel", wr.fuel_unit);
                     wqs.setValue("units/temperature", wr.temp_unit);
