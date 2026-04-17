@@ -2958,6 +2958,45 @@ bool open_connect_dialog(QWidget* parent,
 #endif
             }
 
+            // Airbear DASH_ECHO mode hint. When connected via TCP,
+            // the Airbear's built-in dashboard at speeduino.local
+            // won't show ECU data unless the bridge is configured in
+            // "Dash + TunerStudio" mode (connection_type=4). Check
+            // /api/status to see if we're talking to an Airbear and
+            // surface a one-time hint.
+            if (info.framed && transport_combo->currentIndex() == 1) {
+#ifdef _WIN32
+                std::string hint_host = host_edit->text().toStdString();
+                namespace aa = tuner_core::airbear_api;
+                try {
+                    auto status = aa::fetch_status(
+                        hint_host, 80, std::chrono::milliseconds(1500));
+                    if (status && status->product) {
+                        QSettings hint_qs;
+                        bool shown = hint_qs.value(
+                            "hints/airbear_dash_echo", false).toBool();
+                        if (!shown) {
+                            QMessageBox::information(dlg,
+                                "Airbear Dashboard",
+                                QString::fromUtf8(
+                                    "Tuner is connected via the Airbear WiFi bridge.\n\n"
+                                    "To keep the Airbear\xe2\x80\x99s built-in dashboard "
+                                    "at speeduino.local working while Tuner is connected, "
+                                    "set the Airbear to \xe2\x80\x9c" "Dash + TunerStudio\xe2\x80\x9d"
+                                    " mode:\n\n"
+                                    "  1. Open speeduino.local/config in a browser\n"
+                                    "  2. Change Connection Type to \xe2\x80\x9c"
+                                    "Dash + TunerStudio\xe2\x80\x9d" "\n"
+                                    "  3. Save and reboot the Airbear\n\n"
+                                    "This allows both the dashboard and Tuner to "
+                                    "share the UART connection to the ECU."));
+                            hint_qs.setValue("hints/airbear_dash_echo", true);
+                        }
+                    }
+                } catch (...) {}
+#endif
+            }
+
             // Update sidebar connection indicator.
             if (conn_label) {
                 char ct[256];
