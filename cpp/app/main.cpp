@@ -3892,36 +3892,58 @@ QWidget* build_tune_tab(
                         split.push_back(std::move(pg));
                         continue;
                     }
-                    // Split across sections. Each chunk gets up to
-                    // kMaxFieldsPerPage fields. Sections are never
-                    // broken mid-way — a section's fields stay together.
+                    // Split across sections AND within oversized sections.
+                    // A section with >kMaxFieldsPerPage fields (CAN Bus
+                    // has one section with 434 fields) gets its fields
+                    // distributed across multiple chunks, each becoming
+                    // a synthetic section in its own chunk.
                     int page_num = 1;
                     int chunks = (total + kMaxFieldsPerPage - 1) / kMaxFieldsPerPage;
                     int field_count = 0;
-                    dlns::LayoutPage chunk;
-                    chunk.target = pg.target + "__1";
-                    chunk.title = pg.title + " (1/" + std::to_string(chunks) + ")";
-                    chunk.group_id = pg.group_id;
-                    chunk.group_title = pg.group_title;
-                    chunk.visibility_expression = pg.visibility_expression;
+                    auto make_chunk = [&](int num) {
+                        dlns::LayoutPage c;
+                        c.target = pg.target + "__" + std::to_string(num);
+                        c.title = pg.title + " (" + std::to_string(num)
+                            + "/" + std::to_string(chunks) + ")";
+                        c.group_id = pg.group_id;
+                        c.group_title = pg.group_title;
+                        c.visibility_expression = pg.visibility_expression;
+                        return c;
+                    };
+                    dlns::LayoutPage chunk = make_chunk(1);
                     for (auto& sec : pg.sections) {
                         int sec_fields = static_cast<int>(sec.fields.size());
-                        if (field_count + sec_fields > kMaxFieldsPerPage
-                            && field_count > 0) {
-                            // Flush current chunk, start a new one.
-                            split.push_back(std::move(chunk));
-                            page_num++;
-                            chunk = {};
-                            chunk.target = pg.target + "__" + std::to_string(page_num);
-                            chunk.title = pg.title + " (" + std::to_string(page_num)
-                                + "/" + std::to_string(chunks) + ")";
-                            chunk.group_id = pg.group_id;
-                            chunk.group_title = pg.group_title;
-                            chunk.visibility_expression = pg.visibility_expression;
-                            field_count = 0;
+                        if (sec_fields <= kMaxFieldsPerPage) {
+                            // Small section — keep intact.
+                            if (field_count + sec_fields > kMaxFieldsPerPage
+                                && field_count > 0) {
+                                split.push_back(std::move(chunk));
+                                chunk = make_chunk(++page_num);
+                                field_count = 0;
+                            }
+                            chunk.sections.push_back(std::move(sec));
+                            field_count += sec_fields;
+                        } else {
+                            // Oversized section — split fields across
+                            // multiple chunks. Each chunk gets a
+                            // synthetic section with up to cap fields.
+                            for (int fi = 0; fi < sec_fields; ) {
+                                if (field_count >= kMaxFieldsPerPage) {
+                                    split.push_back(std::move(chunk));
+                                    chunk = make_chunk(++page_num);
+                                    field_count = 0;
+                                }
+                                int take = std::min(kMaxFieldsPerPage - field_count,
+                                                    sec_fields - fi);
+                                dlns::LayoutSection sub;
+                                sub.title = sec.title;
+                                for (int j = 0; j < take; ++j)
+                                    sub.fields.push_back(std::move(sec.fields[fi + j]));
+                                chunk.sections.push_back(std::move(sub));
+                                field_count += take;
+                                fi += take;
+                            }
                         }
-                        chunk.sections.push_back(std::move(sec));
-                        field_count += sec_fields;
                     }
                     if (!chunk.sections.empty())
                         split.push_back(std::move(chunk));
@@ -4815,9 +4837,12 @@ QWidget* build_tune_tab(
         // popup's revert handler to reach widgets that are currently
         // on-screen.
         visible_editors->clear();
-        // Detach old params widget — just hide it, never delete.
+        // Detach old params widget. Previously we hid it (never
+        // deleted from signal handlers), but hide() on a 434-widget
+        // tree triggers a full relayout storm (~1.5s). deleteLater()
+        // defers cleanup to the next event-loop tick without blocking.
         auto* old_widget = params_scroll->takeWidget();
-        if (old_widget) old_widget->hide();
+        if (old_widget) old_widget->deleteLater();
         auto* params_container = new QWidget;
         auto* params_layout = new QVBoxLayout(params_container);
         params_layout->setContentsMargins(0, 0, 0, 0);
