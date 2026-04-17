@@ -20939,40 +20939,14 @@ public:
                                     QObject::connect(keep_proj, &QPushButton::clicked,
                                                      dlg, &QDialog::accept);
                                     QObject::connect(keep_ecu, &QPushButton::clicked,
-                                        [dlg, diffs, shared_edit_svc, ecu_conn, def_opt_c]() {
-                                        auto& def = *def_opt_c;
+                                        [dlg, diffs, shared_edit_svc]() {
                                         for (const auto& d : diffs) {
-                                            // Try scalar first.
+                                            if (d.is_table) continue;  // tables need page-level write, not staging
                                             try {
                                                 char buf[32];
                                                 std::snprintf(buf, sizeof(buf), "%.6g", d.ecu_val);
                                                 shared_edit_svc->stage_scalar_value(d.name, buf);
-                                                continue;
                                             } catch (...) {}
-                                            // Array — re-decode from page cache.
-                                            for (const auto& ar : def.constants.arrays) {
-                                                if (ar.name != d.name) continue;
-                                                if (!ar.page.has_value() || !ar.offset.has_value()) break;
-                                                auto it = ecu_conn->page_cache.find(*ar.page);
-                                                if (it == ecu_conn->page_cache.end()) break;
-                                                namespace spc2 = tuner_core::speeduino_param_codec;
-                                                namespace svc2 = tuner_core::speeduino_value_codec;
-                                                spc2::TableLayout tl;
-                                                tl.offset = *ar.offset;
-                                                try { tl.data_type = svc2::parse_data_type(ar.data_type); }
-                                                catch (...) { break; }
-                                                tl.scale = ar.scale;
-                                                tl.translate = ar.translate;
-                                                tl.rows = ar.rows;
-                                                tl.columns = ar.columns;
-                                                try {
-                                                    auto vals = spc2::decode_table(tl,
-                                                        std::span<const std::uint8_t>(
-                                                            it->second.data(), it->second.size()));
-                                                    shared_edit_svc->replace_list(d.name, vals);
-                                                } catch (...) {}
-                                                break;
-                                            }
                                         }
                                         dlg->accept();
                                     });
