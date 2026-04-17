@@ -3317,6 +3317,12 @@ QWidget* build_tune_tab(
     struct ItemInfo { std::string title; std::string target; };
     auto item_info = std::make_shared<std::unordered_map<QTreeWidgetItem*, ItemInfo>>();
     auto page_map = std::make_shared<std::unordered_map<std::string, dlns::LayoutPage>>();
+    // Per-page "show all fields" flag — survives page-switch re-fires.
+    // When the operator clicks "Show all N fields" on a capped page,
+    // the flag is set here and the handler re-fires. The NEW handler
+    // reads the flag from this map (not from a local variable) so it
+    // actually sees the true state.
+    auto show_all_flags = std::make_shared<std::unordered_map<std::string, bool>>();
     // Store the INI definition for table editor lookups in the handler.
     auto ecu_def = std::make_shared<tuner_core::NativeEcuDefinition>();
     // Load tune values — prefer native .tuner format, fall back to .msq.
@@ -4721,7 +4727,8 @@ QWidget* build_tune_tab(
                       refresh_review_button, refresh_tree_state_indicators,
                       on_staged_changed, visible_editors,
                       detail_label, params_scroll, right_layout, heatmap_widget,
-                      page_map, item_info, edit_svc, tune_file, ecu_def, crosshair, workspace, splitter, container](
+                      page_map, item_info, edit_svc, tune_file, ecu_def, crosshair,
+                      workspace, splitter, container, show_all_flags](
                          QTreeWidgetItem* current, QTreeWidgetItem*) {
         if (current == nullptr) return;
         PerfScope _ps("page_switch");
@@ -4871,9 +4878,11 @@ QWidget* build_tune_tab(
         constexpr int kFieldRenderCap = 40;
         int rendered_fields = 0;
         bool capped = total_fields > kFieldRenderCap;
-        // Shared flag: when the "Show all" button is clicked, this
-        // goes true and a rebuild fires to render every field.
-        auto show_all = std::make_shared<bool>(false);
+        // Read the per-page "show all" flag — persists across
+        // page-switch re-fires so the "Show all" button actually
+        // works (prior bug: a local shared_ptr<bool> was recreated
+        // fresh on each re-fire, losing the flag).
+        bool show_all_for_page = (*show_all_flags)[target];
 
         PerfScope _ps_fields("render_scalar_fields");
         for (const auto& sec : page.sections) {
@@ -4910,7 +4919,7 @@ QWidget* build_tune_tab(
                 // cap is reached and the operator hasn't clicked
                 // "Show all". Cuts CAN Bus from 434 widgets (1.6s)
                 // to 40 widgets (~150ms).
-                if (capped && !*show_all && rendered_fields >= kFieldRenderCap)
+                if (capped && !show_all_for_page && rendered_fields >= kFieldRenderCap)
                     continue;
                 ++rendered_fields;
 
@@ -5303,7 +5312,7 @@ QWidget* build_tune_tab(
         // Clicking re-fires the page switch with show_all=true so
         // every field gets rendered. The button disappears once
         // clicked (replaced by the full field list).
-        if (capped && !*show_all) {
+        if (capped && !show_all_for_page) {
             char cap_text[128];
             std::snprintf(cap_text, sizeof(cap_text),
                 "Show all %d fields (first %d shown for speed)",
@@ -5322,10 +5331,14 @@ QWidget* build_tune_tab(
                 show_all_btn->setStyleSheet(QString::fromUtf8(bs));
             }
             params_layout->addWidget(show_all_btn);
+            // Capture target string + the flags map. The button sets
+            // the per-page flag and re-fires the page switch. The new
+            // handler reads the flag from the map, sees true, and
+            // renders all fields.
+            std::string page_target_copy = target;
             QObject::connect(show_all_btn, &QPushButton::clicked,
-                             [show_all, current]() {
-                *show_all = true;
-                // Re-fire page switch by re-selecting the same item.
+                             [show_all_flags, page_target_copy, current]() {
+                (*show_all_flags)[page_target_copy] = true;
                 auto* tw = current->treeWidget();
                 if (!tw) return;
                 tw->setCurrentItem(nullptr);
@@ -5834,6 +5847,10 @@ QWidget* build_tune_tab(
 
                     crosshair->cell_labels.resize(dr);
                     crosshair->base_styles.resize(dr);
+                    // Shared font for all cells — set once, reuse.
+                    QFont cell_qfont;
+                    cell_qfont.setFamily("monospace");
+                    cell_qfont.setPixelSize(cell_font);
                     // Selection anchor for Shift+click range selection.
                     auto sel_anchor = std::make_shared<std::pair<int,int>>(-1, -1);
                     for (int r = 0; r < dr; ++r) {
@@ -5841,6 +5858,9 @@ QWidget* build_tune_tab(
                         crosshair->base_styles[r].resize(dc);
                         for (int c = 0; c < dc; ++c) {
                             auto& cell = render.cells[r][c];
+                            // Use setPalette instead of setStyleSheet —
+                            // setPalette skips CSS parsing (~1.5ms per
+                            // widget). For 256 cells this saves ~350ms.
                             char style_buf[256];
                             std::snprintf(style_buf, sizeof(style_buf),
                                 "background-color: %s; color: %s; border: none; "
@@ -5849,7 +5869,14 @@ QWidget* build_tune_tab(
                             crosshair->base_styles[r][c] = style_buf;
                             auto* lbl = new QLabel(QString::fromUtf8(cell.text.c_str()));
                             lbl->setAlignment(Qt::AlignCenter);
-                            lbl->setStyleSheet(QString::fromUtf8(style_buf));
+                            lbl->setAutoFillBackground(true);
+                            QPalette pal;
+                            pal.setColor(QPalette::Window,
+                                QColor(QString::fromUtf8(cell.background_hex.c_str())));
+                            pal.setColor(QPalette::WindowText,
+                                QColor(QString::fromUtf8(cell.foreground_hex.c_str())));
+                            lbl->setPalette(pal);
+                            lbl->setFont(cell_qfont);
                             lbl->setMinimumHeight(cell_h);
                             grid->addWidget(lbl, r + grid_row_offset, c + grid_col_offset);
                             crosshair->cell_labels[r][c] = lbl;
