@@ -16982,15 +16982,15 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
 
     auto* ch_scroll = new QScrollArea;
     ch_scroll->setWidgetResizable(true);
-    ch_scroll->setFixedHeight(220);
+    ch_scroll->setMinimumHeight(120);
     ch_scroll->setStyleSheet("QScrollArea { border: none; background: transparent; }");
     auto* ch_inner = new QWidget;
     auto* ch_inner_layout = new QVBoxLayout(ch_inner);
     ch_inner_layout->setContentsMargins(0, 0, 0, 0);
     ch_inner_layout->setSpacing(0);
     ch_scroll->setWidget(ch_inner);
-    ch_card_layout->addWidget(ch_scroll);
-    layout->addWidget(ch_card);
+    ch_card_layout->addWidget(ch_scroll, 1);
+    layout->addWidget(ch_card, 1);
 
     *rebuild_channel_list = [ch_inner_layout, profile, all_profiles, active_name,
                              profile_channel_names, channel_info,
@@ -17004,7 +17004,24 @@ QWidget* build_logging_tab(std::shared_ptr<EcuConnection> ecu_conn) {
 
         for (std::size_t i = 0; i < profile->channels.size(); ++i) {
             const auto& ch = profile->channels[i];
+            // Humanize camelCase channel names: insert space before
+            // each uppercase letter that follows a lowercase one.
+            // "boostDuty" → "Boost Duty", "idleControlOn" → "Idle Control On"
             std::string label = ch.label;
+            {
+                std::string humanized;
+                for (std::size_t j = 0; j < label.size(); ++j) {
+                    char c = label[j];
+                    if (j > 0 && std::isupper(static_cast<unsigned char>(c))
+                        && std::islower(static_cast<unsigned char>(label[j - 1])))
+                        humanized += ' ';
+                    humanized += c;
+                }
+                if (!humanized.empty())
+                    humanized[0] = static_cast<char>(
+                        std::toupper(static_cast<unsigned char>(humanized[0])));
+                label = humanized;
+            }
             if (!ch.units.empty()) label += "  (" + ch.units + ")";
             auto* cb = new QCheckBox(QString::fromUtf8(label.c_str()));
             cb->setChecked(ch.enabled);
