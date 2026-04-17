@@ -826,6 +826,24 @@ void debug_log(const std::string& message) {
     out.flush();
 }
 
+// Lightweight scoped perf timer — logs a PERF line on destruction.
+// Usage: { PerfScope ps("page_switch"); ... } → PERF page_switch 42.3 ms
+struct PerfScope {
+    std::chrono::steady_clock::time_point start;
+    const char* label;
+    explicit PerfScope(const char* lbl)
+        : start(std::chrono::steady_clock::now()), label(lbl) {}
+    ~PerfScope() {
+        double ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start).count();
+        char msg[128];
+        std::snprintf(msg, sizeof(msg), "PERF %-30s %.1f ms", label, ms);
+        debug_log(msg);
+    }
+    PerfScope(const PerfScope&) = delete;
+    PerfScope& operator=(const PerfScope&) = delete;
+};
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -2513,6 +2531,7 @@ bool open_connect_dialog(QWidget* parent,
                      [&, dlg, transport_combo, port_combo, baud_combo,
                       host_edit, tcp_port_edit, status_label,
                       ecu_conn, conn_label]() {
+        PerfScope _ps_connect("ecu_connect");
         // Disconnect any existing connection.
         ecu_conn->close();
 
@@ -4705,6 +4724,7 @@ QWidget* build_tune_tab(
                       page_map, item_info, edit_svc, tune_file, ecu_def, crosshair, workspace, splitter, container](
                          QTreeWidgetItem* current, QTreeWidgetItem*) {
         if (current == nullptr) return;
+        PerfScope _ps("page_switch");
 
         // Look up from side map — no Qt string calls.
         auto info_it = item_info->find(current);
@@ -4840,6 +4860,7 @@ QWidget* build_tune_tab(
             scalar_by_name[sc.name] = &sc;
 
         // Populate parameter form with editable fields.
+        PerfScope _ps_fields("render_scalar_fields");
         for (const auto& sec : page.sections) {
             // Section header — humanized, strip "Dialog" noise.
             std::string sec_title = sec.title;
@@ -5267,6 +5288,7 @@ QWidget* build_tune_tab(
 
         if (!page.curve_editor_id.empty()) {
             // Render 1D curve page — editable table + bar chart.
+            PerfScope _ps_curve("render_curve_page");
             try {
                 for (const auto& curve : ecu_def->curve_editors.curves) {
                     if (curve.name != page.curve_editor_id) continue;
@@ -5610,6 +5632,7 @@ QWidget* build_tune_tab(
                 }
             } catch (...) {}
         } else if (!page.table_editor_id.empty()) {
+            PerfScope _ps_table("render_table_page");
             try {
                 for (const auto& editor : ecu_def->table_editors.editors) {
                     if (editor.table_id != page.table_editor_id) continue;
@@ -6335,6 +6358,7 @@ QWidget* build_tune_tab(
                           refresh_review_button, refresh_tree_state_indicators,
                           on_staged_changed, pending_reboot_count]() {
             namespace wsns = tuner_core::workspace_state;
+            PerfScope _ps_write("write_to_ram");
             namespace spc = tuner_core::speeduino_param_codec;
             namespace svc = tuner_core::speeduino_value_codec;
 
@@ -6520,6 +6544,7 @@ QWidget* build_tune_tab(
                           refresh_tree_state_indicators, on_staged_changed,
                           page_staged_chip, ecu_conn, ecu_def, target_slot_index,
                           loaded_tune_hash, pending_reboot_count]() {
+            PerfScope _ps_burn("burn_to_flash");
             namespace wsns = tuner_core::workspace_state;
 
             // Definition-hash guard (P16-1 / firmware 14B). When both
@@ -9070,19 +9095,61 @@ QWidget* build_live_tab(
             }
             w.max_value = g->hi.value_or(hi_fallback);
 
-            // Derive color zones from thresholds.
-            gcz::Thresholds th;
-            th.lo_danger = g->lo_danger;
-            th.lo_warn = g->lo_warn;
-            th.hi_warn = g->hi_warn;
-            th.hi_danger = g->hi_danger;
-            auto zones = gcz::derive_zones(w.min_value, w.max_value, th);
-            for (const auto& z : zones) {
-                dln2::ColorZone cz;
-                cz.lo = z.lo;
-                cz.hi = z.hi;
-                cz.color = z.color;
-                w.color_zones.push_back(cz);
+            // Derive color zones from thresholds. When the INI uses
+            // expression refs like {rpmwarn} that the parser can't
+            // resolve, the threshold is nullopt. Without both hi_warn
+            // AND hi_danger, derive_zones puts "ok" for the entire
+            // high end — making the RPM gauge green at redline and
+            // red at idle (backwards). Fall back to channel-specific
+            // default zones when the INI thresholds are unresolvable.
+            bool has_hi_zones = g->hi_warn.has_value()
+                             || g->hi_danger.has_value();
+            bool has_lo_zones = g->lo_warn.has_value()
+                             || g->lo_danger.has_value();
+            if (has_hi_zones || (!has_lo_zones && !has_hi_zones)) {
+                // INI thresholds usable or all absent — derive normally.
+                gcz::Thresholds th;
+                th.lo_danger = g->lo_danger;
+                th.lo_warn = g->lo_warn;
+                th.hi_warn = g->hi_warn;
+                th.hi_danger = g->hi_danger;
+                auto zones = gcz::derive_zones(w.min_value, w.max_value, th);
+                for (const auto& z : zones) {
+                    dln2::ColorZone cz;
+                    cz.lo = z.lo; cz.hi = z.hi; cz.color = z.color;
+                    w.color_zones.push_back(cz);
+                }
+            } else {
+                // Only low-end thresholds resolved (high-end refs like
+                // {rpmwarn} unresolvable). Use channel-aware defaults
+                // so the gauge reads correctly without resolved refs.
+                std::string ch = g->channel;
+                for (auto& c : ch) c = static_cast<char>(
+                    std::tolower(static_cast<unsigned char>(c)));
+                if (ch.find("rpm") != std::string::npos) {
+                    w.color_zones = {
+                        {0, w.max_value * 0.625, "ok"},         // 0-5000
+                        {w.max_value * 0.625, w.max_value * 0.8125, "warning"}, // 5000-6500
+                        {w.max_value * 0.8125, w.max_value, "danger"},          // 6500-8000
+                    };
+                } else if (ch.find("tps") != std::string::npos
+                        || ch.find("throttle") != std::string::npos) {
+                    // TPS: all green — no inherent danger zone.
+                    w.color_zones = {{0, w.max_value, "ok"}};
+                } else if (ch.find("clt") != std::string::npos) {
+                    w.color_zones = {
+                        {0, 80, "ok"}, {80, 100, "warning"}, {100, w.max_value, "danger"},
+                    };
+                } else if (ch.find("afr") != std::string::npos) {
+                    w.color_zones = {
+                        {0, 11, "danger"}, {11, 13, "warning"},
+                        {13, 15, "ok"}, {15, 17, "warning"},
+                        {17, w.max_value, "danger"},
+                    };
+                } else {
+                    // Generic: all ok, no zones.
+                    w.color_zones = {{0, w.max_value, "ok"}};
+                }
             }
 
             // First two gauges are 2x2 dials, rest are 1x1 number cards.
@@ -13109,6 +13176,16 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
 QWidget* build_setup_tab(
     std::shared_ptr<tuner_core::local_tune_edit::EditService> edit_svc = nullptr,
     std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
+    PerfScope _ps_setup("build_setup_tab_total");
+    auto setup_t0 = std::chrono::steady_clock::now();
+    auto setup_lap = [&setup_t0](const char* label) {
+        auto now = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(now - setup_t0).count();
+        char msg[128];
+        std::snprintf(msg, sizeof(msg), "PERF   setup/%-20s %.1f ms", label, ms);
+        debug_log(msg);
+        setup_t0 = now;
+    };
     auto* scroll = new QScrollArea;
     scroll->setWidgetResizable(true);
     scroll->setStyleSheet("QScrollArea { border: none; }");
@@ -13634,6 +13711,7 @@ QWidget* build_setup_tab(
         layout->addWidget(make_info_card(card_title, badge_buf, tt::text_muted));
     };
     render_assumption_card("VE Assumptions", ve_result.assumptions);
+    setup_lap("VE gen+render");
 
     // AFR target table — baseline preview. Topology + boost target
     // read from the tune; intercooler defaults to true for boost,
@@ -13660,6 +13738,7 @@ QWidget* build_setup_tab(
         layout->addWidget(render_heatmap(afr_result.values, 16, 16, afr_title));
     }
     render_assumption_card("AFR Assumptions", afr_result.assumptions);
+    setup_lap("AFR gen+render");
 
     // Spark advance table.
     sg::SparkGeneratorContext spark_ctx;
@@ -13678,6 +13757,7 @@ QWidget* build_setup_tab(
         layout->addWidget(render_heatmap(spark_result.values, 16, 16, spark_title));
     }
     render_assumption_card("Spark Assumptions", spark_result.assumptions);
+    setup_lap("Spark gen+render");
 
     // Idle RPM curve — baseline head/manifold (empty strings) and a
     // stock-ish 250° cam to match the VE table preview.
@@ -13725,6 +13805,7 @@ QWidget* build_setup_tab(
             crank_title, "%", tt::accent_danger));
     }
     render_assumption_card("Cranking Assumptions", crank_result.assumptions);
+    setup_lap("curves gen+render");
 
     // ---- Guided SETUP cards notice -----------------------------------
     // When no tune is loaded (fixture missing schema_version, fresh
@@ -15016,6 +15097,8 @@ QWidget* build_setup_tab(
         }
         layout->addWidget(card);
     }
+
+    setup_lap("compressor+cards");
 
     // ---- Sensor Calibration: Write to ECU ----
     // Pairs with SpeeduinoController::write_calibration_table(). Both
@@ -17754,6 +17837,7 @@ public:
         auto save_as_native_handler = [this, shared_edit_svc, save_path, tune_signature,
                                        shared_workspace, refresh_tune_badge,
                                        tune_slot_index, tune_slot_name, ecu_conn]() {
+            PerfScope _ps_save("save_tune");
             namespace ntw = tuner_core::native_tune_writer;
             // Build the tune from the live edit service.
             auto tune = ntw::from_edit_service(
