@@ -5847,10 +5847,6 @@ QWidget* build_tune_tab(
 
                     crosshair->cell_labels.resize(dr);
                     crosshair->base_styles.resize(dr);
-                    // Shared font for all cells — set once, reuse.
-                    QFont cell_qfont;
-                    cell_qfont.setFamily("monospace");
-                    cell_qfont.setPixelSize(cell_font);
                     // Selection anchor for Shift+click range selection.
                     auto sel_anchor = std::make_shared<std::pair<int,int>>(-1, -1);
                     for (int r = 0; r < dr; ++r) {
@@ -5858,9 +5854,6 @@ QWidget* build_tune_tab(
                         crosshair->base_styles[r].resize(dc);
                         for (int c = 0; c < dc; ++c) {
                             auto& cell = render.cells[r][c];
-                            // Use setPalette instead of setStyleSheet —
-                            // setPalette skips CSS parsing (~1.5ms per
-                            // widget). For 256 cells this saves ~350ms.
                             char style_buf[256];
                             std::snprintf(style_buf, sizeof(style_buf),
                                 "background-color: %s; color: %s; border: none; "
@@ -5869,14 +5862,7 @@ QWidget* build_tune_tab(
                             crosshair->base_styles[r][c] = style_buf;
                             auto* lbl = new QLabel(QString::fromUtf8(cell.text.c_str()));
                             lbl->setAlignment(Qt::AlignCenter);
-                            lbl->setAutoFillBackground(true);
-                            QPalette pal;
-                            pal.setColor(QPalette::Window,
-                                QColor(QString::fromUtf8(cell.background_hex.c_str())));
-                            pal.setColor(QPalette::WindowText,
-                                QColor(QString::fromUtf8(cell.foreground_hex.c_str())));
-                            lbl->setPalette(pal);
-                            lbl->setFont(cell_qfont);
+                            lbl->setStyleSheet(QString::fromUtf8(style_buf));
                             lbl->setMinimumHeight(cell_h);
                             grid->addWidget(lbl, r + grid_row_offset, c + grid_col_offset);
                             crosshair->cell_labels[r][c] = lbl;
@@ -17849,20 +17835,59 @@ public:
         stack->addWidget(build_flash_tab(ecu_conn));
         prof_lap("FLASH tab");
 
-        stack->addWidget(build_setup_tab(shared_edit_svc, ecu_conn));
-        prof_lap("SETUP tab");
+        // Lazy-loaded tabs: create placeholder widgets now, build
+        // the real tab on first navigation. SETUP (1.5s), ASSIST
+        // (196ms), TRIGGERS (73ms), LOGGING (215ms) together save
+        // ~2s on startup. HISTORY (16ms) isn't worth deferring.
+        auto* setup_placeholder = new QWidget;
+        auto* assist_placeholder = new QWidget;
+        auto* triggers_placeholder = new QWidget;
+        auto* logging_placeholder = new QWidget;
+        stack->addWidget(setup_placeholder);    // index 3
+        stack->addWidget(assist_placeholder);   // index 4
+        stack->addWidget(triggers_placeholder); // index 5
+        stack->addWidget(logging_placeholder);  // index 6
+        stack->addWidget(build_history_tab());  // index 7
+        prof_lap("placeholders+HISTORY");
 
-        stack->addWidget(build_assist_tab(shared_edit_svc, ecu_conn));
-        prof_lap("ASSIST tab");
+        // Track which tabs have been built. On first navigation,
+        // replace the placeholder with the real tab widget.
+        auto tabs_built = std::make_shared<std::array<bool, 8>>();
+        tabs_built->fill(false);
+        (*tabs_built)[0] = true;  // TUNE — already built
+        (*tabs_built)[1] = true;  // LIVE — already built
+        (*tabs_built)[2] = true;  // FLASH — already built
+        (*tabs_built)[7] = true;  // HISTORY — already built
 
-        stack->addWidget(build_triggers_tab(ecu_conn));
-        prof_lap("TRIGGERS tab");
-
-        stack->addWidget(build_logging_tab(ecu_conn));
-        prof_lap("LOGGING tab");
-
-        stack->addWidget(build_history_tab());
-        prof_lap("HISTORY tab");
+        QObject::connect(sidebar, &QListWidget::currentRowChanged,
+            [stack, tabs_built, shared_edit_svc, ecu_conn](int idx) {
+            if (idx < 0 || idx >= 8) return;
+            if ((*tabs_built)[idx]) return;
+            (*tabs_built)[idx] = true;
+            QWidget* real_tab = nullptr;
+            const char* tab_name = "?";
+            switch (idx) {
+                case 3: real_tab = build_setup_tab(shared_edit_svc, ecu_conn);
+                        tab_name = "SETUP"; break;
+                case 4: real_tab = build_assist_tab(shared_edit_svc, ecu_conn);
+                        tab_name = "ASSIST"; break;
+                case 5: real_tab = build_triggers_tab(ecu_conn);
+                        tab_name = "TRIGGERS"; break;
+                case 6: real_tab = build_logging_tab(ecu_conn);
+                        tab_name = "LOGGING"; break;
+                default: return;
+            }
+            if (!real_tab) return;
+            // Replace placeholder with real tab.
+            auto* old = stack->widget(idx);
+            stack->removeWidget(old);
+            old->deleteLater();
+            stack->insertWidget(idx, real_tab);
+            stack->setCurrentIndex(idx);
+            char msg[64];
+            std::snprintf(msg, sizeof(msg), "PERF lazy-build %s", tab_name);
+            debug_log(msg);
+        });
 
         // Wire sidebar → stack page switching.
         QObject::connect(sidebar, &QListWidget::currentRowChanged,
