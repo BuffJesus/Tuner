@@ -128,9 +128,12 @@ TunerTune from_edit_service(
     tune.created_iso = "2026-04-10T00:00:00Z";
     tune.modified_iso = "2026-04-10T00:00:00Z";
 
-    auto dict = edit.get_scalar_values_dict();
-    for (const auto& [name, val] : dict)
-        tune.values.push_back({name, val});
+    // get_all_values returns every value type (double, string,
+    // vector<double>) with staged overlays applied. The prior
+    // get_scalar_values_dict dropped strings and arrays — saving a
+    // tune after editing one scalar silently lost all table data and
+    // string-typed parameters.
+    tune.values = edit.get_all_values();
 
     if (ctx) tune.operator_context = *ctx;
     return tune;

@@ -217,6 +217,25 @@ std::unordered_map<std::string, double> EditService::get_scalar_values_dict() co
     return result;
 }
 
+std::vector<std::pair<std::string, Value>> EditService::get_all_values() const {
+    // Build a map of effective values: base values first, then staged
+    // overlays replace any that were edited. Preserves all variant
+    // types (double, string, vector<double>) so the tune writer
+    // serializes the complete tune.
+    std::unordered_map<std::string, Value> merged;
+    if (base_ != nullptr) {
+        for (const auto& tv : base_->constants)
+            merged[tv.name] = tv.value;
+    }
+    for (const auto& [name, tv] : staged_)
+        merged[name] = tv.value;
+    std::vector<std::pair<std::string, Value>> result;
+    result.reserve(merged.size());
+    for (auto& [name, val] : merged)
+        result.push_back({name, std::move(val)});
+    return result;
+}
+
 TuneValue& EditService::ensure_staged_copy(const std::string& name, const TuneValue& base) {
     auto it = staged_.find(name);
     if (it != staged_.end()) return it->second;

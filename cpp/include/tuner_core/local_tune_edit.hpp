@@ -103,6 +103,12 @@ public:
     // Get all scalar values as a flat map (for visibility expressions).
     std::unordered_map<std::string, double> get_scalar_values_dict() const;
 
+    // Get ALL values (doubles, strings, vectors) with staged overlays.
+    // Used by the tune writer to serialize the complete tune — the
+    // prior get_scalar_values_dict dropped strings and arrays, causing
+    // data loss on save.
+    std::vector<std::pair<std::string, Value>> get_all_values() const;
+
 private:
     const TuneFile* base_ = nullptr;
     LimitsProvider limits_provider_;
