@@ -2087,8 +2087,9 @@ protected:
         int aw = axis_w(), ah = axis_h();
         auto [cw, ch] = live_cell_size();
         // Scale font with cell height so text stays readable at any size.
-        int live_cell_font = std::clamp(ch * 2 / 3, cell_font_px_, 16);
-        int live_axis_font = std::clamp(ch / 2, axis_font_px_, 14);
+        int font_cap = std::max(16, ch / 2);
+        int live_cell_font = std::clamp(ch * 2 / 3, cell_font_px_, font_cap);
+        int live_axis_font = std::clamp(ch / 2, axis_font_px_, font_cap - 2);
         // X-axis
         if (!x_labels_.empty()) {
             QFont af; af.setFamily("monospace"); af.setBold(true); af.setPixelSize(live_axis_font);
