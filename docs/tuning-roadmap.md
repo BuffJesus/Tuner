@@ -347,6 +347,7 @@ Audited against the deleted Python app (git `8dc3d92:src/tuner/`) and decompiled
 
 | # | Item | Source | Effort | Status |
 |---|------|--------|--------|--------|
+| 0 | **Context-aware tree visibility** — (a) Units preference (AFR vs Lambda) at project creation or settings; only matching table shows in tree. (b) Fuel trim pages adapt to cylinder count. (c) Changing `active_settings` dynamically rebuilds the TUNE tree without restart. Ties into INI `#if LAMBDA` / `[SettingGroups]` / `active_settings`. | Operator feedback | Medium | Not started |
 | 1 | **Diff on Connect** — auto-compare ECU pages vs project tune on connect, "Difference Report" dialog with keep-controller / keep-project resolution | TS `G/an.java` + `U/h.java` | Medium | Not started |
 | 2 | **Auto-save Offline Tune** — periodic auto-save when disconnected, configurable interval, prevent data loss on crash | TS `aP/f.java` `autoSaveOfflineTune` | Small | Not started |
 | 3 | **Automatic Restore Points** — snapshot on close/load/connect, max 10, browsable list with "Compare to Current" + "Load Restore Point" | TS `R/a.java` + `aY/s.java` | Medium | Not started |

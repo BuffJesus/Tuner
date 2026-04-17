@@ -1109,11 +1109,28 @@ std::optional<tuner_core::NativeEcuDefinition> load_active_definition() {
             || !def.table_editors.editors.empty();
     };
 
+    // Read active_settings from QSettings so INI #if/#else blocks
+    // resolve according to the operator's project configuration.
+    auto read_active_settings = []() -> std::set<std::string> {
+        QSettings qs;
+        auto csv = qs.value("projects/current/activeSettings", "").toString().toStdString();
+        std::set<std::string> result;
+        std::istringstream ss(csv);
+        std::string tok;
+        while (std::getline(ss, tok, ',')) {
+            while (!tok.empty() && tok.front() == ' ') tok.erase(tok.begin());
+            while (!tok.empty() && tok.back() == ' ') tok.pop_back();
+            if (!tok.empty()) result.insert(tok);
+        }
+        return result;
+    };
+    auto active_settings = read_active_settings();
+
     // Process-lifetime cache — tabs call this during construction, and
     // the production INI is 5000+ lines, so every tab-local call used
     // to pay a full parse. Cache keyed on the source paths + their
-    // mtimes so switching projects or editing the INI on disk
-    // invalidates the cache automatically.
+    // mtimes + active_settings so switching projects, editing the INI
+    // on disk, or changing definition settings all invalidate the cache.
     static std::string cached_key;
     static std::optional<tuner_core::NativeEcuDefinition> cached;
     auto mtime_token = [](const std::filesystem::path& p) -> std::string {
@@ -1126,8 +1143,14 @@ std::optional<tuner_core::NativeEcuDefinition> load_active_definition() {
     {
         auto native_probe = find_native_definition();
         auto ini_probe = find_production_ini();
+        std::string settings_key;
+        for (const auto& s : active_settings) {
+            if (!settings_key.empty()) settings_key += ",";
+            settings_key += s;
+        }
         std::string key = native_probe.string() + "|" + mtime_token(native_probe)
-                        + "||" + ini_probe.string() + "|" + mtime_token(ini_probe);
+                        + "||" + ini_probe.string() + "|" + mtime_token(ini_probe)
+                        + "|||" + settings_key;
         if (key == cached_key && cached.has_value()) return cached;
         cached_key = std::move(key);
     }
@@ -1191,9 +1214,9 @@ std::optional<tuner_core::NativeEcuDefinition> load_active_definition() {
     auto ini_path = find_production_ini();
     if (!ini_path.empty()) {
         try {
-            auto def = tuner_core::compile_ecu_definition_file(ini_path);
-            std::printf("[def] Loaded legacy INI: %s\n",
-                ini_path.string().c_str());
+            auto def = tuner_core::compile_ecu_definition_file(ini_path, active_settings);
+            std::printf("[def] Loaded legacy INI: %s (active_settings=%zu)\n",
+                ini_path.string().c_str(), active_settings.size());
             std::fflush(stdout);
             debug_log("load_active_definition ini loaded menus="
                 + std::to_string(def.menus.menus.size())
@@ -1565,7 +1588,7 @@ QWidget* render_heatmap(const std::vector<double>& values, int rows, int cols,
                          const char* title_text);
 
 // Page data structs for tree rebuilding.
-struct PageEntry { std::string display; std::string target; std::string type_tag; };
+struct PageEntry { std::string display; std::string target; std::string type_tag; std::string vis_expr; };
 struct GroupEntry { std::string title; std::vector<PageEntry> pages; };
 
 // ---------------------------------------------------------------------------
@@ -3785,6 +3808,7 @@ QWidget* build_tune_tab(
         std::string title;
         std::string target;
         std::string base_label;
+        std::string vis_expr;
         int subgroup_index = -1;  // -1 = leaf is direct child of group
         char kind = 's';          // 's' scalar, 't' table, 'c' curve
     };
@@ -3799,7 +3823,7 @@ QWidget* build_tune_tab(
     auto tree_refs = std::make_shared<std::vector<TreeGroupRef>>();
 
     auto rebuild_tree = [tree, item_info, all_groups, tree_refs,
-                         enabled_kinds](const std::string& needle) {
+                         enabled_kinds, edit_svc](const std::string& needle) {
         // First call: build the tree.
         if (tree_refs->empty()) {
             for (const auto& grp : *all_groups) {
@@ -3967,7 +3991,7 @@ QWidget* build_tune_tab(
                         leaf->setToolTip(0, QString::fromUtf8(pg.target.c_str()));
                     (*item_info)[leaf] = {pg.display, pg.target};
                     ref.leaves.push_back({leaf, pg.display, pg.target,
-                                           label_only, subgroup_slot, kind});
+                                           label_only, pg.vis_expr, subgroup_slot, kind});
                 }
                 tree_refs->push_back(std::move(ref));
             }
@@ -3980,7 +4004,8 @@ QWidget* build_tune_tab(
                 ref.group->setExpanded(true);
                 for (auto* sg : ref.subgroups) sg->setExpanded(true);
             }
-            return;
+            // Fall through to the filter path so visibility expressions
+            // are evaluated on the initial build too.
         }
         // Subsequent calls: show/hide. Subgroup visibility is derived
         // from its leaves — an empty subgroup hides so a narrow search
@@ -3988,6 +4013,29 @@ QWidget* build_tune_tab(
         // active (not all three kinds enabled), we treat that as a
         // narrowing filter equivalent to a search needle so empty
         // groups/subgroups collapse the same way.
+        //
+        // Visibility-expression evaluation: pages with non-empty
+        // vis_expr are hidden when the expression evaluates to 0
+        // against the current scalar value map. This is how the INI's
+        // { nFuelChannels >= 5 } style conditions dynamically filter
+        // the tree based on the operator's engine configuration.
+        namespace mee = tuner_core::math_expression_evaluator;
+        mee::ValueMap vis_values;
+        if (edit_svc) {
+            auto all_vals = edit_svc->get_all_values();
+            for (const auto& [k, v] : all_vals) {
+                if (std::holds_alternative<double>(v))
+                    vis_values[k] = std::get<double>(v);
+            }
+        }
+        // Also inject wizard/cylinders from QSettings as nCylinders
+        // fallback if the edit service doesn't have it yet.
+        if (vis_values.find("nCylinders") == vis_values.end()) {
+            QSettings qs;
+            int nc = qs.value("wizard/cylinders", 0).toInt();
+            if (nc > 0) vis_values["nCylinders"] = static_cast<double>(nc);
+        }
+        bool has_vis_filter = !vis_values.empty();
         bool kind_filter_active = enabled_kinds->size() < 3;
         bool narrowing = !needle.empty() || kind_filter_active;
         for (auto& ref : *tree_refs) {
@@ -3996,7 +4044,12 @@ QWidget* build_tune_tab(
             for (auto& lf : ref.leaves) {
                 bool name_match = needle.empty() || icontains(lf.title, needle);
                 bool kind_match = enabled_kinds->count(lf.kind) > 0;
-                bool match = name_match && kind_match;
+                bool vis_match = true;
+                if (has_vis_filter && !lf.vis_expr.empty()) {
+                    double v = mee::evaluate(lf.vis_expr, vis_values);
+                    vis_match = (v != 0.0);
+                }
+                bool match = name_match && kind_match && vis_match;
                 lf.item->setHidden(!match);
                 if (match) {
                     total_visible++;
@@ -4007,11 +4060,11 @@ QWidget* build_tune_tab(
             }
             for (std::size_t i = 0; i < ref.subgroups.size(); ++i) {
                 ref.subgroups[i]->setHidden(
-                    per_subgroup_visible[i] == 0 && narrowing);
+                    per_subgroup_visible[i] == 0 && (narrowing || has_vis_filter));
                 if (narrowing && per_subgroup_visible[i] > 0)
                     ref.subgroups[i]->setExpanded(true);
             }
-            ref.group->setHidden(total_visible == 0 && narrowing);
+            ref.group->setHidden(total_visible == 0 && (narrowing || has_vis_filter));
             ref.group->setExpanded(narrowing && total_visible > 0);
         }
     };
@@ -4300,6 +4353,10 @@ QWidget* build_tune_tab(
                         pe.type_tag = " \xe2\x8c\xa1";  // ⌡ curve indicator
                     else
                         pe.type_tag = "";
+                    // Look up visibility expression from the LayoutPage.
+                    auto pm_it = page_map->find(gp.target);
+                    if (pm_it != page_map->end())
+                        pe.vis_expr = pm_it->second.visibility_expression;
                     ge.pages.push_back(std::move(pe));
                 }
                 all_groups->push_back(std::move(ge));
@@ -12904,6 +12961,11 @@ struct WizardResult {
     double afr_protection_cut_time = 2.0;
     int clt_filter = 180;
     int iat_filter = 180;
+    // Units preferences
+    int fuel_unit = 0;      // 0=AFR, 1=Lambda
+    int temp_unit = 0;      // 0=°C, 1=°F
+    int pressure_unit = 0;  // 0=kPa, 1=PSI, 2=bar
+    int speed_unit = 0;     // 0=km/h, 1=mph
 };
 
 WizardResult open_engine_setup_wizard(QWidget* parent) {
@@ -13457,12 +13519,50 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
     p5l->addStretch(1);
     pages->addWidget(p5);
 
-    // ---- Step 6: Review ----
+    // ---- Step 6: Preferences ----
     auto* p6 = new QWidget;
     auto* p6l = new QVBoxLayout(p6);
     p6l->setSpacing(tt::space_sm);
-    p6l->addWidget(make_step_header("Step 6 of 6 \xe2\x80\x94 Review"));
-    make_guidance(p6l, "Review your settings below. When you click Finish, the wizard will "
+    p6l->addWidget(make_step_header("Step 6 of 7 \xe2\x80\x94 Preferences"));
+    make_guidance(p6l, "Choose your preferred display units. The tuning tree and "
+                       "gauges will adapt to show only what\xe2\x80\x99s relevant to your configuration.");
+    auto* fuel_unit_combo = make_combo_row(p6l, "Fuel Display:");
+    fuel_unit_combo->addItem("AFR (Air-Fuel Ratio)");
+    fuel_unit_combo->addItem("Lambda");
+    auto* temp_unit_combo = make_combo_row(p6l, "Temperature:");
+    temp_unit_combo->addItem("\xc2\xb0""C (Celsius)");
+    temp_unit_combo->addItem("\xc2\xb0""F (Fahrenheit)");
+    auto* pressure_unit_combo = make_combo_row(p6l, "Pressure:");
+    pressure_unit_combo->addItem("kPa");
+    pressure_unit_combo->addItem("PSI");
+    pressure_unit_combo->addItem("bar");
+    auto* speed_unit_combo = make_combo_row(p6l, "Speed:");
+    speed_unit_combo->addItem("km/h");
+    speed_unit_combo->addItem("mph");
+    // Pre-fill from QSettings if the wizard was run before.
+    {
+        QSettings pqs;
+        fuel_unit_combo->setCurrentIndex(
+            std::clamp(pqs.value("units/fuel", 0).toInt(), 0, 1));
+        temp_unit_combo->setCurrentIndex(
+            std::clamp(pqs.value("units/temperature", 0).toInt(), 0, 1));
+        pressure_unit_combo->setCurrentIndex(
+            std::clamp(pqs.value("units/pressure", 0).toInt(), 0, 2));
+        speed_unit_combo->setCurrentIndex(
+            std::clamp(pqs.value("units/speed", 0).toInt(), 0, 1));
+    }
+    make_hint(p6l, "Lambda mode shows the LAMBDA definition setting flag. "
+              "AFR/Lambda controls which fuel tables appear in the tuning tree. "
+              "Temperature and pressure affect display labels across the app.");
+    p6l->addStretch(1);
+    pages->addWidget(p6);
+
+    // ---- Step 7: Review ----
+    auto* p7 = new QWidget;
+    auto* p7l = new QVBoxLayout(p7);
+    p7l->setSpacing(tt::space_sm);
+    p7l->addWidget(make_step_header("Step 7 of 7 \xe2\x80\x94 Review"));
+    make_guidance(p7l, "Review your settings below. When you click Finish, the wizard will "
                        "generate starter VE, AFR, spark, warmup, and cranking tables for your engine.");
     auto* review_label = new QLabel;
     review_label->setTextFormat(Qt::RichText);
@@ -13477,20 +13577,20 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
             tt::text_secondary, tt::font_body);
         review_label->setText(QString::fromUtf8(rl));
     }
-    p6l->addWidget(review_label);
-    // Summary card — updated when page 6 becomes visible.
+    p7l->addWidget(review_label);
+    // Summary card — updated when page 7 becomes visible.
     auto* summary_label = new QLabel;
     summary_label->setTextFormat(Qt::RichText);
     summary_label->setWordWrap(true);
     summary_label->setStyleSheet(QString::fromUtf8(tt::card_style().c_str()));
-    p6l->addWidget(summary_label);
-    p6l->addStretch(1);
-    pages->addWidget(p6);
+    p7l->addWidget(summary_label);
+    p7l->addStretch(1);
+    pages->addWidget(p7);
 
     outer->addWidget(pages, 1);
 
     // Step indicator + buttons.
-    constexpr int total_steps = 6;
+    constexpr int total_steps = 7;
     auto* step_label = new QLabel;
     step_label->setAlignment(Qt::AlignCenter);
     step_label->setTextFormat(Qt::RichText);
@@ -13523,6 +13623,8 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
                            teeth_edit, missing_edit, spark_combo,
                            dwell_run_edit, dwell_crank_edit,
                            ego_combo, wb_combo, map_min_edit, map_max_edit,
+                           fuel_unit_combo, temp_unit_combo,
+                           pressure_unit_combo, speed_unit_combo,
                            reqfuel_label, pages](int idx) {
         char sl[128];
         std::snprintf(sl, sizeof(sl),
@@ -13583,10 +13685,16 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
                 dwell_run_edit->text().toStdString().c_str(),
                 dwell_crank_edit->text().toStdString().c_str());
             off += std::snprintf(sm + off, sizeof(sm) - off,
-                "<b>Sensors:</b> %s, MAP %s\xe2\x80\x93%s kPa",
+                "<b>Sensors:</b> %s, MAP %s\xe2\x80\x93%s kPa<br>",
                 ego_combo->currentText().toStdString().c_str(),
                 map_min_edit->text().toStdString().c_str(),
                 map_max_edit->text().toStdString().c_str());
+            off += std::snprintf(sm + off, sizeof(sm) - off,
+                "<b>Units:</b> %s, %s, %s, %s",
+                fuel_unit_combo->currentText().toStdString().c_str(),
+                temp_unit_combo->currentText().toStdString().c_str(),
+                pressure_unit_combo->currentText().toStdString().c_str(),
+                speed_unit_combo->currentText().toStdString().c_str());
             off += std::snprintf(sm + off, sizeof(sm) - off, "</span>");
             summary_label->setText(QString::fromUtf8(sm));
         }
@@ -13610,7 +13718,9 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
                       flex_combo, flex_low_edit, flex_high_edit,
                       cam_combo, knock_combo, knock_retard_edit,
                       oil_combo, afr_prot_combo, afr_prot_max_edit,
-                      afr_prot_time_edit]() {
+                      afr_prot_time_edit,
+                      fuel_unit_combo, temp_unit_combo,
+                      pressure_unit_combo, speed_unit_combo]() {
         int idx = pages->currentIndex();
         if (idx < pages->count() - 1) {
             pages->setCurrentIndex(idx + 1);
@@ -13665,6 +13775,10 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
             try { result.afr_protection_max = std::stod(afr_prot_max_edit->text().toStdString()); } catch (...) {}
             try { result.afr_protection_cut_time = std::stod(afr_prot_time_edit->text().toStdString()); } catch (...) {}
             result.fuel_pressure_model = fuel_pressure_combo->currentIndex();
+            result.fuel_unit = fuel_unit_combo->currentIndex();
+            result.temp_unit = temp_unit_combo->currentIndex();
+            result.pressure_unit = pressure_unit_combo->currentIndex();
+            result.speed_unit = speed_unit_combo->currentIndex();
             result.accepted = true;
             dlg->accept();
         }
@@ -13719,6 +13833,7 @@ QWidget* build_setup_tab(
             {"\xe2\x9c\x93", "Injectors", false},
             {"\xe2\x9c\x93", "Ignition", false},
             {"\xe2\x9c\x93", "Sensors", false},
+            {"\xe2\x9c\x93", "Preferences", false},
             {"\xe2\x96\xb6", "Review", true},
         };
         auto* step_bar = new QWidget;
@@ -13998,10 +14113,38 @@ QWidget* build_setup_tab(
                     wqs.setValue("wizard/dead_time_ms", wr.dead_time_ms);
                     wqs.setValue("wizard/stoich", wr.stoich);
                     wqs.setValue("wizard/dwell_running", wr.dwell_running);
-                    // cam_duration, head_flow_class, intake_manifold_style
-                    // are NOT in WizardResult — the wizard's generators use
-                    // default contexts for these. The SETUP tab reads them
-                    // from QSettings if present but doesn't require them.
+                    // Units preferences.
+                    wqs.setValue("units/fuel", wr.fuel_unit);
+                    wqs.setValue("units/temperature", wr.temp_unit);
+                    wqs.setValue("units/pressure", wr.pressure_unit);
+                    wqs.setValue("units/speed", wr.speed_unit);
+
+                    // Wire LAMBDA active_settings flag from fuel unit choice.
+                    // When the operator picks Lambda, add LAMBDA to active_settings
+                    // so the INI's #if LAMBDA blocks resolve to Lambda tables.
+                    {
+                        std::string csv = wqs.value(
+                            "projects/current/activeSettings", "").toString().toStdString();
+                        std::set<std::string> flags;
+                        std::istringstream ss(csv);
+                        std::string tok;
+                        while (std::getline(ss, tok, ',')) {
+                            while (!tok.empty() && tok.front() == ' ') tok.erase(tok.begin());
+                            while (!tok.empty() && tok.back() == ' ') tok.pop_back();
+                            if (!tok.empty()) flags.insert(tok);
+                        }
+                        if (wr.fuel_unit == 1)
+                            flags.insert("LAMBDA");
+                        else
+                            flags.erase("LAMBDA");
+                        std::string joined;
+                        for (const auto& f : flags) {
+                            if (!joined.empty()) joined += ",";
+                            joined += f;
+                        }
+                        wqs.setValue("projects/current/activeSettings",
+                            QString::fromUtf8(joined.c_str()));
+                    }
                 }
 
                 // Post-wizard guidance — tell the operator what to do next.
@@ -20045,7 +20188,119 @@ public:
                     dlg->accept();
                 });
 
-                dlg->exec();
+                if (dlg->exec() == QDialog::Accepted) {
+                    reload_active_project();
+                    return;
+                }
+                dlg->deleteLater();
+            });
+
+            // Units Preferences dialog — allows changing display units
+            // without re-running the full engine setup wizard.
+            auto* units_action = file_menu->addAction("Units &Preferences...");
+            QObject::connect(units_action, &QAction::triggered,
+                             [this, reload_active_project]() {
+                auto* dlg = new QDialog(this);
+                dlg->setWindowTitle("Units Preferences");
+                dlg->setMinimumWidth(380);
+                {
+                    char ds[128];
+                    std::snprintf(ds, sizeof(ds),
+                        "QDialog { background: %s; }"
+                        "QLabel { color: %s; font-size: %dpx; }"
+                        "QComboBox { background: %s; color: %s; border: 1px solid %s; "
+                        "  border-radius: %dpx; padding: 4px 8px; font-size: %dpx; }",
+                        tt::bg_base, tt::text_primary, tt::font_body,
+                        tt::bg_elevated, tt::text_primary, tt::border,
+                        tt::radius_sm, tt::font_body);
+                    dlg->setStyleSheet(QString::fromUtf8(ds));
+                }
+                auto* dl = new QVBoxLayout(dlg);
+                dl->setContentsMargins(tt::space_lg, tt::space_lg, tt::space_lg, tt::space_lg);
+                dl->setSpacing(tt::space_md);
+
+                auto add_row = [dl](const char* label_text) -> QComboBox* {
+                    auto* row = new QHBoxLayout;
+                    auto* lbl = new QLabel(QString::fromUtf8(label_text));
+                    lbl->setFixedWidth(140);
+                    row->addWidget(lbl);
+                    auto* combo = new QComboBox;
+                    combo->setMinimumWidth(180);
+                    row->addWidget(combo, 1);
+                    dl->addLayout(row);
+                    return combo;
+                };
+
+                auto* fuel_c = add_row("Fuel Display:");
+                fuel_c->addItem("AFR (Air-Fuel Ratio)");
+                fuel_c->addItem("Lambda");
+                auto* temp_c = add_row("Temperature:");
+                temp_c->addItem("\xc2\xb0""C (Celsius)");
+                temp_c->addItem("\xc2\xb0""F (Fahrenheit)");
+                auto* press_c = add_row("Pressure:");
+                press_c->addItem("kPa");
+                press_c->addItem("PSI");
+                press_c->addItem("bar");
+                auto* speed_c = add_row("Speed:");
+                speed_c->addItem("km/h");
+                speed_c->addItem("mph");
+
+                QSettings qs;
+                fuel_c->setCurrentIndex(
+                    std::clamp(qs.value("units/fuel", 0).toInt(), 0, 1));
+                temp_c->setCurrentIndex(
+                    std::clamp(qs.value("units/temperature", 0).toInt(), 0, 1));
+                press_c->setCurrentIndex(
+                    std::clamp(qs.value("units/pressure", 0).toInt(), 0, 2));
+                speed_c->setCurrentIndex(
+                    std::clamp(qs.value("units/speed", 0).toInt(), 0, 1));
+
+                auto* btn_row = new QHBoxLayout;
+                btn_row->addStretch(1);
+                auto* ok_btn = new QPushButton("OK");
+                auto* cancel_btn = new QPushButton("Cancel");
+                btn_row->addWidget(ok_btn);
+                btn_row->addWidget(cancel_btn);
+                dl->addLayout(btn_row);
+
+                QObject::connect(cancel_btn, &QPushButton::clicked, dlg, &QDialog::reject);
+                QObject::connect(ok_btn, &QPushButton::clicked,
+                                 [dlg, fuel_c, temp_c, press_c, speed_c]() {
+                    QSettings s;
+                    s.setValue("units/fuel", fuel_c->currentIndex());
+                    s.setValue("units/temperature", temp_c->currentIndex());
+                    s.setValue("units/pressure", press_c->currentIndex());
+                    s.setValue("units/speed", speed_c->currentIndex());
+
+                    // Wire LAMBDA flag into active_settings.
+                    std::string csv = s.value(
+                        "projects/current/activeSettings", "").toString().toStdString();
+                    std::set<std::string> flags;
+                    std::istringstream ss(csv);
+                    std::string tok;
+                    while (std::getline(ss, tok, ',')) {
+                        while (!tok.empty() && tok.front() == ' ') tok.erase(tok.begin());
+                        while (!tok.empty() && tok.back() == ' ') tok.pop_back();
+                        if (!tok.empty()) flags.insert(tok);
+                    }
+                    if (fuel_c->currentIndex() == 1)
+                        flags.insert("LAMBDA");
+                    else
+                        flags.erase("LAMBDA");
+                    std::string joined;
+                    for (const auto& f : flags) {
+                        if (!joined.empty()) joined += ",";
+                        joined += f;
+                    }
+                    s.setValue("projects/current/activeSettings",
+                        QString::fromUtf8(joined.c_str()));
+                    dlg->accept();
+                });
+
+                if (dlg->exec() == QDialog::Accepted) {
+                    reload_active_project();
+                    return;
+                }
                 dlg->deleteLater();
             });
 
