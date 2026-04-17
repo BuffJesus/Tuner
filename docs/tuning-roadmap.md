@@ -348,7 +348,7 @@ Audited against the deleted Python app (git `8dc3d92:src/tuner/`) and decompiled
 | # | Item | Source | Effort | Status |
 |---|------|--------|--------|--------|
 | 0 | **Context-aware tree visibility** — units preferences (AFR/Lambda, °C/°F, kPa/PSI/bar, km/h/mph), display unit conversion layer, visibility-expression filtering, board-aware defaults, LAMBDA flag wiring, cam/head/manifold wizard fields | Operator feedback | Medium | Done |
-| 1 | **Diff on Connect** — reads all ECU pages on connect, compares scalars vs project tune, shows Difference Report dialog with Keep ECU / Keep Project / Dismiss | TS `G/an.java` + `U/h.java` | Medium | Done |
+| 1 | **Diff on Connect** — reads all ECU pages on connect (33ms for 15 pages), compares scalars + tables, paged side-by-side dialog grouped by ECU page with per-page Keep Project / Keep ECU resolution. Remaining: side-by-side heatmap rendering for table diffs (currently shows min/max/avg summary), verify table staging doesn't corrupt row order | TS `G/an.java` + `U/h.java` | Medium | In progress |
 | 2 | **Auto-save Offline Tune** — periodic auto-save when disconnected, configurable interval, prevent data loss on crash | TS `aP/f.java` `autoSaveOfflineTune` | Small | Not started |
 | 3 | **Automatic Restore Points** — snapshot on close/load/connect, max 10, browsable list with "Compare to Current" + "Load Restore Point" | TS `R/a.java` + `aY/s.java` | Medium | Not started |
 | 4 | **SETUP tab sub-tabs** — split into Generators / Hardware / Turbo / Calibration sections via QTabWidget or collapsible groups | Operator feedback | Small | Not started |
