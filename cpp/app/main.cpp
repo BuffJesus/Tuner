@@ -551,15 +551,24 @@ struct EcuConnection {
         auto t0 = std::chrono::steady_clock::now();
         for (const auto& [page, size] : page_sizes) {
             if (size <= 0) continue;
+            auto pt0 = std::chrono::steady_clock::now();
             try {
                 auto data = controller->read_page(
                     static_cast<std::uint8_t>(page), 0,
                     static_cast<std::uint16_t>(size));
+                auto pt1 = std::chrono::steady_clock::now();
+                double pms = std::chrono::duration<double, std::milli>(pt1 - pt0).count();
+                std::printf("PERF   page %d: %d bytes in %.0f ms (%.0f KB/s)\n",
+                    page, size, pms,
+                    pms > 0 ? (size / 1024.0) / (pms / 1000.0) : 0);
+                std::fflush(stdout);
                 if (!data.empty()) {
                     page_cache[page] = std::move(data);
                     read_count++;
                 }
-            } catch (...) {
+            } catch (const std::exception& ex) {
+                std::printf("PERF   page %d: FAILED (%s)\n", page, ex.what());
+                std::fflush(stdout);
                 break;
             }
         }
@@ -20668,6 +20677,7 @@ public:
                                     double ecu_val;
                                     double project_val;
                                     std::string units;
+                                    bool is_table = false;
                                 };
                                 std::vector<DiffEntry> diffs;
 
@@ -20715,8 +20725,57 @@ public:
                                     }
                                 }
 
+                                // Compare arrays (tables).
+                                for (const auto& ar : def.constants.arrays) {
+                                    if (!ar.page.has_value() || !ar.offset.has_value()) continue;
+                                    auto cache_it = ecu_conn->page_cache.find(*ar.page);
+                                    if (cache_it == ecu_conn->page_cache.end()) continue;
+                                    const auto& page_bytes = cache_it->second;
+
+                                    spc::TableLayout layout;
+                                    layout.offset = static_cast<std::size_t>(*ar.offset);
+                                    namespace svc2 = tuner_core::speeduino_value_codec;
+                                    try { layout.data_type = svc2::parse_data_type(ar.data_type); }
+                                    catch (...) { continue; }
+                                    layout.scale = ar.scale;
+                                    layout.translate = ar.translate;
+                                    layout.rows = ar.rows;
+                                    layout.columns = ar.columns;
+
+                                    std::vector<double> ecu_vals;
+                                    try {
+                                        ecu_vals = spc::decode_table(layout,
+                                            std::span<const std::uint8_t>(
+                                                page_bytes.data(), page_bytes.size()));
+                                    } catch (...) { continue; }
+
+                                    auto* tv = shared_edit_svc->get_value(ar.name);
+                                    if (!tv || !std::holds_alternative<std::vector<double>>(tv->value))
+                                        continue;
+                                    const auto& proj_vals = std::get<std::vector<double>>(tv->value);
+
+                                    int cells_diff = 0;
+                                    std::size_t count = std::min(ecu_vals.size(), proj_vals.size());
+                                    for (std::size_t i = 0; i < count; ++i) {
+                                        double d = std::abs(ecu_vals[i] - proj_vals[i]);
+                                        double m = std::max(std::abs(ecu_vals[i]), std::abs(proj_vals[i]));
+                                        bool diff = (m > 0.0001) ? (d / m > 0.001) : (d > 0.0001);
+                                        if (diff) cells_diff++;
+                                    }
+                                    if (cells_diff > 0) {
+                                        char summary[64];
+                                        std::snprintf(summary, sizeof(summary),
+                                            "%d of %d cells differ",
+                                            cells_diff, static_cast<int>(count));
+                                        diffs.push_back({ar.name, ar.name,
+                                            static_cast<double>(cells_diff),
+                                            static_cast<double>(count),
+                                            std::string(summary), true});
+                                    }
+                                }
+
                                 debug_log("diff_on_connect: " + std::to_string(diffs.size())
-                                    + " scalar differences found");
+                                    + " differences found (scalars + tables)");
 
                                 if (!diffs.empty()) {
                                     auto* dlg = new QDialog(this);
@@ -20761,15 +20820,26 @@ public:
 
                                     for (const auto& d : diffs) {
                                         char row[512];
-                                        std::snprintf(row, sizeof(row),
-                                            "<span style='color: %s; font-size: %dpx;'>"
-                                            "<b>%s</b></span>"
-                                            "<span style='color: %s; font-size: %dpx;'>"
-                                            "  ECU: <b>%.4g</b>  Project: <b>%.4g</b>"
-                                            "  %s</span>",
-                                            tt::text_primary, tt::font_body, d.name.c_str(),
-                                            tt::text_secondary, tt::font_small,
-                                            d.ecu_val, d.project_val, d.units.c_str());
+                                        if (d.is_table) {
+                                            std::snprintf(row, sizeof(row),
+                                                "<span style='color: %s; font-size: %dpx;'>"
+                                                "<b>%s</b></span>"
+                                                "<span style='color: %s; font-size: %dpx;'>"
+                                                "  %s</span>",
+                                                tt::text_primary, tt::font_body, d.name.c_str(),
+                                                tt::accent_warning, tt::font_small,
+                                                d.units.c_str());
+                                        } else {
+                                            std::snprintf(row, sizeof(row),
+                                                "<span style='color: %s; font-size: %dpx;'>"
+                                                "<b>%s</b></span>"
+                                                "<span style='color: %s; font-size: %dpx;'>"
+                                                "  ECU: <b>%.4g</b>  Project: <b>%.4g</b>"
+                                                "  %s</span>",
+                                                tt::text_primary, tt::font_body, d.name.c_str(),
+                                                tt::text_secondary, tt::font_small,
+                                                d.ecu_val, d.project_val, d.units.c_str());
+                                        }
                                         auto* rl = new QLabel;
                                         rl->setTextFormat(Qt::RichText);
                                         rl->setText(QString::fromUtf8(row));
@@ -20797,13 +20867,40 @@ public:
                                     QObject::connect(keep_proj, &QPushButton::clicked,
                                                      dlg, &QDialog::accept);
                                     QObject::connect(keep_ecu, &QPushButton::clicked,
-                                        [dlg, diffs, shared_edit_svc]() {
+                                        [dlg, diffs, shared_edit_svc, ecu_conn, def_opt_c]() {
+                                        auto& def = *def_opt_c;
                                         for (const auto& d : diffs) {
-                                            char buf[32];
-                                            std::snprintf(buf, sizeof(buf), "%.6g", d.ecu_val);
+                                            // Try scalar first.
                                             try {
+                                                char buf[32];
+                                                std::snprintf(buf, sizeof(buf), "%.6g", d.ecu_val);
                                                 shared_edit_svc->stage_scalar_value(d.name, buf);
+                                                continue;
                                             } catch (...) {}
+                                            // Array — re-decode from page cache.
+                                            for (const auto& ar : def.constants.arrays) {
+                                                if (ar.name != d.name) continue;
+                                                if (!ar.page.has_value() || !ar.offset.has_value()) break;
+                                                auto it = ecu_conn->page_cache.find(*ar.page);
+                                                if (it == ecu_conn->page_cache.end()) break;
+                                                namespace spc2 = tuner_core::speeduino_param_codec;
+                                                namespace svc2 = tuner_core::speeduino_value_codec;
+                                                spc2::TableLayout tl;
+                                                tl.offset = *ar.offset;
+                                                try { tl.data_type = svc2::parse_data_type(ar.data_type); }
+                                                catch (...) { break; }
+                                                tl.scale = ar.scale;
+                                                tl.translate = ar.translate;
+                                                tl.rows = ar.rows;
+                                                tl.columns = ar.columns;
+                                                try {
+                                                    auto vals = spc2::decode_table(tl,
+                                                        std::span<const std::uint8_t>(
+                                                            it->second.data(), it->second.size()));
+                                                    shared_edit_svc->replace_list(d.name, vals);
+                                                } catch (...) {}
+                                                break;
+                                            }
                                         }
                                         dlg->accept();
                                     });
