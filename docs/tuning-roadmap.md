@@ -329,15 +329,67 @@ Ordered roughly by leverage:
 
 ### Desktop (this repo)
 
-Mostly polish and coverage gaps:
+#### Infrastructure
 
 - **G13 embedded flash for Mega2560** — port STK500v2 bootloader over `QSerialPort`. ~400 LOC, pure stdlib. Removes `avrdude.exe` bundling.
 - **G13 embedded flash for STM32F407** — port DFU 1.1 protocol + vendor libusb-1.0. ~500 LOC + platform DLL.
 - **Teensy HID flasher on Linux/macOS** — current path is Windows-only (`setupapi` / `hid.dll`). hidapi vendoring closes it.
 - **XCP editing parity** — simulator + packet layer done (sub-slices 104-105); workspace presenter integration (XCP-based page read/write/burn-equivalent threading into `EcuConnection`) is the missing piece.
-- **Widget unit tests** — `LogTimelineWidget`, `TriggerScopeWidget`, `DynoChartWidget` have partial coverage (`chart_axes` extracted + tested, 4 cases). The remaining pure-logic parts (timeline zoom-index window, square-wave path composition) could be extracted.
-- **Operator manual** — the roadmap commits to a desktop-side manual paired with firmware Slice 14H. First pass landed 2026-04-16 at `docs/operator-manual.md` (install → projects → connect → TUNE → Write/Burn/power-cycle → SETUP cards → wizard → other tabs → shortcuts → troubleshooting). Per-tab deep-dives and per-feature how-tos are the open follow-up.
-- ~~**Doc drift cleanup**~~ ✅ Audited 2026-04-15. `engine-model-reference.md` is pure language-agnostic modeling theory — no drift. `ux-design.md` is design philosophy with generic "service" references that are architectural concepts, not Python class names — no drift. `protocol-notes.md` had a stale "Python rewrite approach" section (now updated to the C++ `tuner_core::` architecture) and eight "open questions" (three resolved: `.tunerproj` / `.tuner` / controller packet formats; five annotated with current state).
+- ~~**Widget unit tests**~~ ✅ `widget_math.hpp` landed 2026-04-16: `screen_drag_to_time_range` (8 cases) + `build_square_wave_points` (5 cases) extracted from LogTimelineWidget + TriggerScopeWidget.
+- **Operator manual** — first pass landed 2026-04-16 at `docs/operator-manual.md`. Remaining: per-tab deep-dives, screenshots, and pairing with firmware 14H release notes.
+- ~~**Doc drift cleanup**~~ ✅ Audited 2026-04-15.
+
+#### Feature gaps from three-way disparity check (2026-04-16)
+
+Audited against the deleted Python app (git `8dc3d92:src/tuner/`) and decompiled TunerStudio (`C:\Users\Cornelio\Desktop\Decompiled\TunerStudioMS\`). Ordered by operator impact.
+
+**Significant gaps:**
+
+- **ECU-vs-project sync prompt** — when connected, if ECU page data doesn't match the saved tune, TunerStudio prompts "Keep controller settings or project settings?" We have page-CRC verification (`SpeeduinoController::verify_page`) but no operator-facing prompt or auto-sync flow. Would need: read all pages → CRC compare → prompt → either write project values to ECU or read ECU values into project.
+- **Tune file-vs-file compare** — load two `.tuner`/`.msq` files and show a per-parameter diff table. The review dialog shows staged-vs-base for the current session but can't compare two independent tune files. TunerStudio has a dedicated compare dialog.
+- **Datalog review summary stats** — Python had `DatalogReviewService` producing per-channel min/max/mean/outlier stats from imported CSVs. C++ imports and replays but doesn't aggregate. Small, self-contained add.
+- **MegaLogViewer equivalent** — TunerStudio bundles a standalone log viewer with timeline scrubbing, scatter plots, and multi-channel trace rendering. Our `LogTimelineWidget` handles timeline + channel tracks but doesn't have scatter plots or the full MLV feature set.
+- **SD card log/tune browse** — TunerStudio has `RemoteFileAccess` for browsing + downloading files from ECU SD cards. C++ has a single-file Airbear download path; multi-file browse is blocked on Airbear firmware G5 + firmware Slice 14D.
+- **Dashboard multiple layout tabs** — TunerStudio lets operators define multiple dashboard tabs. C++ has a single dashboard layout. Store a `vector<Layout>` instead of one, add a tab bar or dropdown.
+- **Continuous IP range scan** — TunerStudio scans an IP range to find ECUs on the network. C++ has mDNS + UDP discovery but no subnet sweep.
+
+**Minor/niche gaps:**
+
+- **Output Port Editor** — graphical I/O pin mapping. TunerStudio-only; neither Python nor C++ had it.
+- **Wideband calibration panel** — logic ported (`wideband_calibration.hpp`), SETUP tab has CLT/IAT/O2 write. No dedicated wideband-specific panel with preset selection + verification.
+- **`string` kind constant editing** — INI `string` fields (rare, used for firmware version display). Parser skips them. Low impact.
+- **Built-in calculator** — TunerStudio bundles one. Trivial.
+- **CRC check panel** — manual hex string CRC calculator. Niche debugging tool.
+- **Asymmetric sweep / dashed bar gauge renderers** — cosmetic gauge variants TunerStudio supports.
+
+**C++ app is AHEAD of both Python and TunerStudio in:**
+
+- 3D rotatable table surface (QPainter wireframe, mouse-drag rotation)
+- Virtual Dyno (torque/HP chart + before/after overlay comparison)
+- Zone-entry alert toasts on dashboard
+- VE/WUE coverage heatmap overlay with per-cell confidence
+- 6 table generators (VE/AFR/Spark/Idle/WUE/Cranking) — TunerStudio has none
+- Compressor map modeling with 6-tier risk classification
+- Command palette (Ctrl+K)
+- F1 keyboard shortcut cheat sheet with contextual tab highlighting
+- EditableCurveChartWidget (click-and-drag line-chart curve editor)
+- PaintedHeatmapWidget (table switch <3ms vs TunerStudio's Swing overhead)
+- Guided SETUP-tab hardware cards (IAC/Fan/Flex/Safety/Turbo/TPS/Engine Advanced)
+- Power-cycle indicator + auto-reboot via cmdstm32reboot
+- Full dark theme with 200+ design tokens
+
+#### Autotuning improvements (from engine-model reference)
+
+These build on the Phase 7 VE Analyze pipeline without requiring firmware changes:
+
+- **Pressure-ratio-aware VE correction weighting** — under boost, intake temperature correction is larger (compressor heating). Wire the compressor-map service's efficiency estimate into the VE correction confidence score so boosted cells get honester weighting.
+- **Injector flow nonlinearity model** — the current root-cause diagnostic flags "injector flow error" for uniform bias but doesn't model dead-time + ballistic-opening nonlinearity. A simple quadratic correction model (calibrated from early drive sessions) would separate "VE is wrong" from "injector characterization is wrong."
+- **Torque-peak-informed VE anchor** — when a WOT pull is logged, the Virtual Dyno's torque-peak RPM is a strong signal for where VE should peak. Currently generators guess from displacement + cam duration; a real anchor from dyno data would tighten the first iteration.
+
+#### CAN Bus operator guidance
+
+- **CAN Quick Start card** — add to SETUP tab: "CAN Bus lets your ECU talk to other modules. You need: a CAN transceiver (MCP2515 for Mega, built-in for Teensy 4.1), two wires (CAN-H + CAN-L), 120Ω termination. Set True Address to 0x100 for most setups."
+- **Pre-built CAN profiles** — one-click presets for common devices: AEM wideband (0x180), Haltech dash (0x360-0x363), generic OBD2 (0x7E8). Each fills the caninput_sel fields automatically.
 
 ### Hardware / integration (no code fixes its own blocker)
 
