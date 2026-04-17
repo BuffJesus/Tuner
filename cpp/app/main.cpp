@@ -2146,6 +2146,7 @@ private:
     int axis_w() const { return y_labels_.empty() ? 0 : 40; }
     int axis_h() const { return x_labels_.empty() ? 0 : 16; }
     std::pair<int, int> pixel_to_cell(QPointF pos) const {
+        if (rows_ == 0 || cols_ == 0) return {-1, -1};
         int c = static_cast<int>((pos.x() - axis_w()) / cell_w_);
         int r = static_cast<int>((pos.y() - axis_h()) / cell_h_);
         return (r < 0 || r >= rows_ || c < 0 || c >= cols_) ? std::pair{-1, -1} : std::pair{r, c};
