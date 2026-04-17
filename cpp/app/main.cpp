@@ -2151,8 +2151,26 @@ protected:
     }
 
 private:
-    int axis_w() const { return y_labels_.empty() ? 0 : 40; }
-    int axis_h() const { return x_labels_.empty() ? 0 : 22; }
+    // Dynamic axis sizing — scales with cell dimensions and the
+    // longest label text so values never get squished or truncated.
+    int axis_w() const {
+        if (y_labels_.empty()) return 0;
+        // Find the widest Y-axis label character count.
+        std::size_t max_len = 1;
+        for (const auto& l : y_labels_)
+            if (l.size() > max_len) max_len = l.size();
+        // Approximate width: ~7px per char at axis font + 8px padding.
+        auto [cw, ch] = live_cell_size();
+        int font_px = std::clamp(ch / 2, axis_font_px_, std::max(14, ch / 2));
+        int char_w = font_px * 6 / 10;  // monospace approximate
+        return std::max(40, static_cast<int>(max_len) * char_w + 10);
+    }
+    int axis_h() const {
+        if (x_labels_.empty()) return 0;
+        auto [cw, ch] = live_cell_size();
+        int font_px = std::clamp(ch / 2, axis_font_px_, std::max(14, ch / 2));
+        return std::max(22, font_px + 10);
+    }
     // Compute cell dimensions from actual widget size so the heatmap
     // fills available space instead of sitting at the fixed minimum.
     std::pair<int, int> live_cell_size() const {
