@@ -4036,6 +4036,35 @@ QWidget* build_tune_tab(
             if (nc > 0) vis_values["nCylinders"] = static_cast<double>(nc);
         }
         bool has_vis_filter = !vis_values.empty();
+        // App-level units filter: hide AFR or Lambda pages based on
+        // the operator's fuel display preference. The INI shows both
+        // unconditionally — we filter at the tree level so the
+        // operator only sees the unit system they chose.
+        QSettings units_qs;
+        int fuel_unit = units_qs.value("units/fuel", 0).toInt();  // 0=AFR, 1=Lambda
+        auto units_filter = [fuel_unit](const std::string& title,
+                                         const std::string& target) -> bool {
+            // When AFR mode: hide Lambda pages. When Lambda mode: hide AFR pages.
+            std::string tl = title;
+            for (auto& c : tl) c = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(c)));
+            std::string tt = target;
+            for (auto& c : tt) c = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(c)));
+            // Target-ID based matching for the specific AFR/Lambda
+            // table editor pages. These are the only pages where the
+            // INI provides parallel AFR and Lambda versions.
+            bool is_lambda_page = (tt.find("lambdatable") != std::string::npos
+                                || tt.find("lambda_table") != std::string::npos
+                                || tt.find("lambda1tbl") != std::string::npos);
+            bool is_afr_page = (tt.find("afrtable") != std::string::npos
+                             || tt.find("afr_table") != std::string::npos
+                             || tt.find("afr1tbl") != std::string::npos);
+            if (fuel_unit == 0 && is_lambda_page) return false;
+            if (fuel_unit == 1 && is_afr_page) return false;
+            return true;
+        };
+
         bool kind_filter_active = enabled_kinds->size() < 3;
         bool narrowing = !needle.empty() || kind_filter_active;
         for (auto& ref : *tree_refs) {
@@ -4049,7 +4078,8 @@ QWidget* build_tune_tab(
                     double v = mee::evaluate(lf.vis_expr, vis_values);
                     vis_match = (v != 0.0);
                 }
-                bool match = name_match && kind_match && vis_match;
+                bool units_match = units_filter(lf.title, lf.target);
+                bool match = name_match && kind_match && vis_match && units_match;
                 lf.item->setHidden(!match);
                 if (match) {
                     total_visible++;
