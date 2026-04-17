@@ -120,6 +120,7 @@ namespace tt = tuner_theme;
 #include "tuner_core/runtime_telemetry.hpp"
 #include "tuner_core/startup_enrichment_generator.hpp"
 #include "tuner_core/table_rendering.hpp"
+#include "tuner_core/tune_value_preview.hpp"
 #include "tuner_core/table_view.hpp"
 #include "tuner_core/thermistor_calibration.hpp"
 #include "tuner_core/ve_analyze_review.hpp"
@@ -2151,7 +2152,7 @@ protected:
 
 private:
     int axis_w() const { return y_labels_.empty() ? 0 : 40; }
-    int axis_h() const { return x_labels_.empty() ? 0 : 16; }
+    int axis_h() const { return x_labels_.empty() ? 0 : 22; }
     // Compute cell dimensions from actual widget size so the heatmap
     // fills available space instead of sitting at the fixed minimum.
     std::pair<int, int> live_cell_size() const {
@@ -4605,14 +4606,13 @@ QWidget* build_tune_tab(
                 }
             }
             {
-                char buf[16];
-                std::snprintf(buf, sizeof(buf), "%.4g", shown);
+                auto fmt = tuner_core::tune_value_preview::format_scalar_python_repr(shown);
                 if (crosshair->painted_heatmap) {
-                    crosshair->painted_heatmap->set_cell_text(r, c, buf);
+                    crosshair->painted_heatmap->set_cell_text(r, c, fmt);
                 } else if (r < static_cast<int>(crosshair->cell_labels.size())
                     && c < static_cast<int>(crosshair->cell_labels[r].size())
                     && crosshair->cell_labels[r][c] != nullptr) {
-                    crosshair->cell_labels[r][c]->setText(QString::fromUtf8(buf));
+                    crosshair->cell_labels[r][c]->setText(QString::fromUtf8(fmt.c_str()));
                 }
             }
             if (clamped) {
@@ -4688,8 +4688,11 @@ QWidget* build_tune_tab(
                 std::size_t flat = model_r * static_cast<std::size_t>(crosshair->cols)
                     + static_cast<std::size_t>(c);
                 if (flat >= vals.size()) continue;
-                char buf[16];
-                std::snprintf(buf, sizeof(buf), "%.4g", vals[flat]);
+                // Use the same format as the initial render so cell
+                // text doesn't visually change on refresh (69.0 stays
+                // 69.0, not "69" from %.4g).
+                auto buf_str = tuner_core::tune_value_preview::format_scalar_python_repr(vals[flat]);
+                const char* buf = buf_str.c_str();
 
                 // Per-cell diff flag — triggers the staged-change overlay
                 // when the stored value has drifted from the base. Only
@@ -4706,10 +4709,13 @@ QWidget* build_tune_tab(
                 if (crosshair->painted_heatmap) {
                     crosshair->painted_heatmap->set_cell_text(r, c, buf);
                     // Update heatmap color via the painted widget.
+                    // Use display row `r` (not model_r) because the
+                    // render model is already Y-inverted — its cells
+                    // are indexed by display position.
                     if (render_opt.has_value()
-                        && model_r < render_opt->rows
+                        && static_cast<std::size_t>(r) < render_opt->rows
                         && static_cast<std::size_t>(c) < render_opt->columns) {
-                        const auto& cell = render_opt->cells[model_r][c];
+                        const auto& cell = render_opt->cells[r][c];
                         QColor bg(QString::fromUtf8(cell.background_hex.c_str()));
                         QColor fg(QString::fromUtf8(cell.foreground_hex.c_str()));
                         // Staged-change diff: tint the left edge amber
@@ -6284,7 +6290,10 @@ QWidget* build_tune_tab(
                         QPoint pos = heatmap->mapTo(ed->parentWidget(), cr.topLeft());
                         ed->setGeometry(pos.x(), pos.y(), cr.width(), cr.height());
                         ed->setText(QString::fromUtf8(heatmap->get_cell_text(row, col).c_str()));
-                        ed->show(); ed->setFocus(); ed->selectAll();
+                        ed->show();
+                        ed->raise();  // ensure editor is above the scroll area stack
+                        ed->setFocus();
+                        ed->selectAll();
                         crosshair->edit_row = row; crosshair->edit_col = col;
                     };
                     heatmap->on_click = [crosshair, sel_anchor](int row, int col, bool shift) {
