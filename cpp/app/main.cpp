@@ -20834,6 +20834,24 @@ public:
                                         if (diff) cells_diff++;
                                     }
                                     if (cells_diff > 0) {
+                                        // Debug: log first 8 values for comparison.
+                                        std::string dbg = "DIFF_ARRAY " + ar.name
+                                            + " offset=" + std::to_string(*ar.offset)
+                                            + " " + std::to_string(ar.rows) + "x" + std::to_string(ar.columns)
+                                            + " diff=" + std::to_string(cells_diff) + "/" + std::to_string(count)
+                                            + " ecu[0..7]=";
+                                        for (int i = 0; i < 8 && i < (int)ecu_vals.size(); ++i) {
+                                            if (i) dbg += ",";
+                                            char vb[16]; std::snprintf(vb, sizeof(vb), "%.1f", ecu_vals[i]);
+                                            dbg += vb;
+                                        }
+                                        dbg += " proj[0..7]=";
+                                        for (int i = 0; i < 8 && i < (int)proj_vals.size(); ++i) {
+                                            if (i) dbg += ",";
+                                            char vb[16]; std::snprintf(vb, sizeof(vb), "%.1f", proj_vals[i]);
+                                            dbg += vb;
+                                        }
+                                        debug_log(dbg);
                                         char summary[64];
                                         std::snprintf(summary, sizeof(summary),
                                             "%d of %d cells differ",
@@ -20881,7 +20899,7 @@ public:
                                     h->setText(QString::fromUtf8(header));
                                     dl->addWidget(h);
 
-                                    // Scrollable diff list.
+                                    // Scrollable diff list with per-item checkboxes.
                                     auto* scroll = new QScrollArea;
                                     scroll->setWidgetResizable(true);
                                     scroll->setStyleSheet("QScrollArea { border: none; }");
@@ -20889,65 +20907,135 @@ public:
                                     auto* list_l = new QVBoxLayout(list_w);
                                     list_l->setSpacing(2);
 
-                                    for (const auto& d : diffs) {
-                                        char row[512];
+                                    auto diff_checks = std::make_shared<
+                                        std::vector<std::pair<int, QCheckBox*>>>();
+                                    for (int di = 0; di < static_cast<int>(diffs.size()); ++di) {
+                                        const auto& d = diffs[di];
                                         auto human = humanize_name(d.name);
+                                        char row_text[512];
                                         if (d.is_table) {
-                                            std::snprintf(row, sizeof(row),
-                                                "<span style='color: %s; font-size: %dpx;'>"
-                                                "<b>%s</b></span>"
-                                                "<span style='color: %s; font-size: %dpx;'>"
-                                                "  %s</span>",
-                                                tt::text_primary, tt::font_body, human.c_str(),
-                                                tt::accent_warning, tt::font_small,
-                                                d.units.c_str());
+                                            std::snprintf(row_text, sizeof(row_text),
+                                                "%s  —  %s", human.c_str(), d.units.c_str());
                                         } else {
-                                            std::snprintf(row, sizeof(row),
-                                                "<span style='color: %s; font-size: %dpx;'>"
-                                                "<b>%s</b></span>"
-                                                "<span style='color: %s; font-size: %dpx;'>"
-                                                "  ECU: <b>%.4g</b>  Project: <b>%.4g</b>"
-                                                "  %s</span>",
-                                                tt::text_primary, tt::font_body, human.c_str(),
-                                                tt::text_secondary, tt::font_small,
-                                                d.ecu_val, d.project_val, d.units.c_str());
+                                            std::snprintf(row_text, sizeof(row_text),
+                                                "%s  —  ECU: %.4g  Project: %.4g  %s",
+                                                human.c_str(), d.ecu_val, d.project_val,
+                                                d.units.c_str());
                                         }
-                                        auto* rl = new QLabel;
-                                        rl->setTextFormat(Qt::RichText);
-                                        rl->setText(QString::fromUtf8(row));
-                                        rl->setStyleSheet(QString::fromUtf8(
-                                            tt::card_style().c_str()));
-                                        list_l->addWidget(rl);
+                                        auto* cb = new QCheckBox(QString::fromUtf8(row_text));
+                                        {
+                                            char cs[256];
+                                            std::snprintf(cs, sizeof(cs),
+                                                "QCheckBox { color: %s; font-size: %dpx; "
+                                                "padding: %dpx; background: %s; "
+                                                "border-radius: %dpx; }",
+                                                tt::text_primary, tt::font_small,
+                                                tt::space_xs, tt::bg_panel, tt::radius_sm);
+                                            cb->setStyleSheet(QString::fromUtf8(cs));
+                                        }
+                                        cb->setChecked(false);
+                                        list_l->addWidget(cb);
+                                        diff_checks->push_back({di, cb});
                                     }
                                     list_l->addStretch(1);
                                     scroll->setWidget(list_w);
                                     dl->addWidget(scroll, 1);
 
+                                    // Select all / none helpers.
+                                    auto* sel_row = new QHBoxLayout;
+                                    auto* sel_all = new QPushButton("Select All");
+                                    auto* sel_none = new QPushButton("Select None");
+                                    sel_row->addWidget(sel_all);
+                                    sel_row->addWidget(sel_none);
+                                    sel_row->addStretch(1);
+                                    dl->addLayout(sel_row);
+                                    QObject::connect(sel_all, &QPushButton::clicked,
+                                        [diff_checks]() {
+                                        for (auto& [_, cb] : *diff_checks) cb->setChecked(true);
+                                    });
+                                    QObject::connect(sel_none, &QPushButton::clicked,
+                                        [diff_checks]() {
+                                        for (auto& [_, cb] : *diff_checks) cb->setChecked(false);
+                                    });
+
                                     // Action buttons.
                                     auto* btn_row = new QHBoxLayout;
                                     btn_row->addStretch(1);
-                                    auto* keep_ecu = new QPushButton("Keep ECU Values");
-                                    auto* keep_proj = new QPushButton("Keep Project Values");
+                                    auto* keep_ecu = new QPushButton("Apply Selected ECU Values");
                                     auto* dismiss = new QPushButton("Dismiss");
                                     btn_row->addWidget(keep_ecu);
-                                    btn_row->addWidget(keep_proj);
                                     btn_row->addWidget(dismiss);
                                     dl->addLayout(btn_row);
 
                                     QObject::connect(dismiss, &QPushButton::clicked,
                                                      dlg, &QDialog::reject);
-                                    QObject::connect(keep_proj, &QPushButton::clicked,
-                                                     dlg, &QDialog::accept);
                                     QObject::connect(keep_ecu, &QPushButton::clicked,
-                                        [dlg, diffs, shared_edit_svc]() {
-                                        for (const auto& d : diffs) {
-                                            if (d.is_table) continue;  // tables need page-level write, not staging
-                                            try {
-                                                char buf[32];
-                                                std::snprintf(buf, sizeof(buf), "%.6g", d.ecu_val);
-                                                shared_edit_svc->stage_scalar_value(d.name, buf);
-                                            } catch (...) {}
+                                        [dlg, diffs, diff_checks, shared_edit_svc, ecu_conn, def_opt_c]() {
+                                        auto& def = *def_opt_c;
+                                        int applied = 0;
+                                        for (const auto& [di, cb] : *diff_checks) {
+                                            if (!cb->isChecked()) continue;
+                                            const auto& d = diffs[di];
+                                            if (!d.is_table) {
+                                                try {
+                                                    char buf[32];
+                                                    std::snprintf(buf, sizeof(buf), "%.6g", d.ecu_val);
+                                                    shared_edit_svc->stage_scalar_value(d.name, buf);
+                                                    applied++;
+                                                } catch (...) {}
+                                                continue;
+                                            }
+                                            // Array — re-decode from page cache.
+                                            for (const auto& ar : def.constants.arrays) {
+                                                if (ar.name != d.name) continue;
+                                                if (!ar.page.has_value() || !ar.offset.has_value()) break;
+                                                auto it = ecu_conn->page_cache.find(*ar.page);
+                                                if (it == ecu_conn->page_cache.end()) break;
+                                                namespace spc2 = tuner_core::speeduino_param_codec;
+                                                namespace svc2 = tuner_core::speeduino_value_codec;
+                                                spc2::TableLayout tl;
+                                                tl.offset = *ar.offset;
+                                                try { tl.data_type = svc2::parse_data_type(ar.data_type); }
+                                                catch (...) { break; }
+                                                tl.scale = ar.scale;
+                                                tl.translate = ar.translate;
+                                                tl.rows = ar.rows;
+                                                tl.columns = ar.columns;
+                                                try {
+                                                    auto ecu_vals = spc2::decode_table(tl,
+                                                        std::span<const std::uint8_t>(
+                                                            it->second.data(), it->second.size()));
+                                                    // Debug: log first 8 values from ECU and project.
+                                                    auto* tv = shared_edit_svc->get_value(d.name);
+                                                    std::string dbg = "KEEP_ECU " + d.name
+                                                        + " ecu_size=" + std::to_string(ecu_vals.size())
+                                                        + " offset=" + std::to_string(*ar.offset)
+                                                        + " rows=" + std::to_string(ar.rows)
+                                                        + " cols=" + std::to_string(ar.columns)
+                                                        + " ecu[0..7]=";
+                                                    for (int i = 0; i < 8 && i < (int)ecu_vals.size(); ++i) {
+                                                        if (i) dbg += ",";
+                                                        char vb[16]; std::snprintf(vb, sizeof(vb), "%.1f", ecu_vals[i]);
+                                                        dbg += vb;
+                                                    }
+                                                    if (tv && std::holds_alternative<std::vector<double>>(tv->value)) {
+                                                        const auto& pv = std::get<std::vector<double>>(tv->value);
+                                                        dbg += " proj_size=" + std::to_string(pv.size()) + " proj[0..7]=";
+                                                        for (int i = 0; i < 8 && i < (int)pv.size(); ++i) {
+                                                            if (i) dbg += ",";
+                                                            char vb[16]; std::snprintf(vb, sizeof(vb), "%.1f", pv[i]);
+                                                            dbg += vb;
+                                                        }
+                                                    }
+                                                    debug_log(dbg);
+                                                    shared_edit_svc->replace_list(d.name, ecu_vals);
+                                                    applied++;
+                                                } catch (...) {}
+                                                break;
+                                            }
                                         }
+                                        debug_log("diff_on_connect: applied " + std::to_string(applied)
+                                            + " ECU values");
                                         dlg->accept();
                                     });
 
