@@ -414,6 +414,7 @@ if(TUNER_BUILD_APP)
     # mismatch entirely.
     add_executable(tuner_app
         app/main.cpp
+        app/shell/ecu_connection.cpp
         app/tabs/history_tab.cpp
         app/ui/styles.cpp
         app/widgets/bar_gauge_widget.cpp
