@@ -422,6 +422,7 @@ if(TUNER_BUILD_APP)
         app/widgets/led_gauge_widget.cpp
         app/widgets/log_timeline_widget.cpp
         app/widgets/painted_heatmap_widget.cpp
+        app/widgets/table_surface_3d_view.cpp
         app/widgets/trigger_scope_widget.cpp
     )
     target_include_directories(tuner_app PRIVATE app)
