@@ -421,6 +421,7 @@ if(TUNER_BUILD_APP)
         app/widgets/histogram_widget.cpp
         app/widgets/led_gauge_widget.cpp
         app/widgets/log_timeline_widget.cpp
+        app/widgets/trigger_scope_widget.cpp
     )
     target_include_directories(tuner_app PRIVATE app)
     target_link_libraries(tuner_app
