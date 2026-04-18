@@ -414,6 +414,7 @@ if(TUNER_BUILD_APP)
     # mismatch entirely.
     add_executable(tuner_app
         app/main.cpp
+        app/widgets/bar_gauge_widget.cpp
         app/widgets/dial_gauge_widget.cpp
     )
     target_include_directories(tuner_app PRIVATE app)
