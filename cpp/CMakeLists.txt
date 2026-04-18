@@ -418,6 +418,7 @@ if(TUNER_BUILD_APP)
         app/widgets/dial_gauge_widget.cpp
         app/widgets/draggable_card_label.cpp
         app/widgets/dyno_chart_widget.cpp
+        app/widgets/editable_curve_chart_widget.cpp
         app/widgets/histogram_widget.cpp
         app/widgets/led_gauge_widget.cpp
         app/widgets/log_timeline_widget.cpp
