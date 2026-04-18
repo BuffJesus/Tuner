@@ -416,6 +416,7 @@ if(TUNER_BUILD_APP)
         app/main.cpp
         app/widgets/bar_gauge_widget.cpp
         app/widgets/dial_gauge_widget.cpp
+        app/widgets/draggable_card_label.cpp
         app/widgets/led_gauge_widget.cpp
     )
     target_include_directories(tuner_app PRIVATE app)
