@@ -3,13 +3,38 @@
 
 #include <nlohmann/json.hpp>
 #include <stdexcept>
+#include <cctype>
 
 namespace tuner_core::project_file {
+
+std::string_view firmware_family_to_string(FirmwareFamily family) noexcept {
+    switch (family) {
+        case FirmwareFamily::SPEEDUINO: return "speeduino";
+        case FirmwareFamily::RUSEFI:    return "rusefi";
+    }
+    return "speeduino";
+}
+
+FirmwareFamily firmware_family_from_string(std::string_view s) noexcept {
+    // Case-insensitive compare. "speeduino" / "rusefi" are the
+    // canonical wire forms; anything else falls back to SPEEDUINO
+    // so legacy projects (no field) and typos load safely.
+    std::string lower;
+    lower.reserve(s.size());
+    for (char c : s) lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    if (lower == "rusefi")    return FirmwareFamily::RUSEFI;
+    if (lower == "speeduino") return FirmwareFamily::SPEEDUINO;
+    return FirmwareFamily::SPEEDUINO;
+}
 
 std::string export_json(const Project& p) {
     nlohmann::ordered_json j;
     j["format"] = p.format;
     j["name"] = p.name;
+    // firmware_family is always emitted — the project's tilt is
+    // load-bearing for protocol selection and shouldn't be
+    // implicit. Phase 18 schema addition.
+    j["firmware_family"] = std::string(firmware_family_to_string(p.firmware_family));
     if (!p.definition_path.empty()) j["definition_path"] = p.definition_path;
     if (!p.tune_path.empty()) j["tune_path"] = p.tune_path;
     if (!p.active_settings.empty()) {
@@ -39,6 +64,9 @@ Project import_json(const std::string& json_text) {
     Project p;
     p.format = j.value("format", "tuner-project-v1");
     p.name = j.value("name", "");
+    // Forward-compatible: missing field → SPEEDUINO default.
+    p.firmware_family = firmware_family_from_string(
+        j.value("firmware_family", std::string("speeduino")));
     p.definition_path = j.value("definition_path", j.value("definition_file", ""));
     p.tune_path = j.value("tune_path", j.value("tune_file", ""));
     if (j.contains("active_settings") && j["active_settings"].is_array())

@@ -61,4 +61,81 @@ TEST_CASE("empty project exports minimal JSON") {
     CHECK(json.find("active_settings") == std::string::npos);  // omitted when empty
 }
 
+// ----- Phase 18 firmware_family additions -----
+
+TEST_CASE("default firmware_family is SPEEDUINO") {
+    pf::Project p;
+    CHECK(p.firmware_family == pf::FirmwareFamily::SPEEDUINO);
+}
+
+TEST_CASE("firmware_family_to_string emits canonical lowercase wire form") {
+    CHECK(pf::firmware_family_to_string(pf::FirmwareFamily::SPEEDUINO) == "speeduino");
+    CHECK(pf::firmware_family_to_string(pf::FirmwareFamily::RUSEFI)    == "rusefi");
+}
+
+TEST_CASE("firmware_family_from_string parses both canonical wire forms") {
+    CHECK(pf::firmware_family_from_string("speeduino") == pf::FirmwareFamily::SPEEDUINO);
+    CHECK(pf::firmware_family_from_string("rusefi")    == pf::FirmwareFamily::RUSEFI);
+}
+
+TEST_CASE("firmware_family_from_string is case-insensitive") {
+    CHECK(pf::firmware_family_from_string("SPEEDUINO") == pf::FirmwareFamily::SPEEDUINO);
+    CHECK(pf::firmware_family_from_string("Speeduino") == pf::FirmwareFamily::SPEEDUINO);
+    CHECK(pf::firmware_family_from_string("RUSEFI")    == pf::FirmwareFamily::RUSEFI);
+    CHECK(pf::firmware_family_from_string("RusEFI")    == pf::FirmwareFamily::RUSEFI);
+}
+
+TEST_CASE("firmware_family_from_string defaults to SPEEDUINO on unknown / empty") {
+    CHECK(pf::firmware_family_from_string("")        == pf::FirmwareFamily::SPEEDUINO);
+    CHECK(pf::firmware_family_from_string("unknown") == pf::FirmwareFamily::SPEEDUINO);
+    CHECK(pf::firmware_family_from_string("megasquirt") == pf::FirmwareFamily::SPEEDUINO);
+}
+
+TEST_CASE("export_json always emits firmware_family field") {
+    pf::Project p;
+    p.firmware_family = pf::FirmwareFamily::SPEEDUINO;
+    auto json = pf::export_json(p);
+    CHECK(json.find("\"firmware_family\"") != std::string::npos);
+    CHECK(json.find("\"speeduino\"") != std::string::npos);
+}
+
+TEST_CASE("export_json emits 'rusefi' when family is RUSEFI") {
+    pf::Project p;
+    p.firmware_family = pf::FirmwareFamily::RUSEFI;
+    p.name = "RusEFI bench project";
+    auto json = pf::export_json(p);
+    CHECK(json.find("\"firmware_family\"") != std::string::npos);
+    CHECK(json.find("\"rusefi\"") != std::string::npos);
+}
+
+TEST_CASE("import_json parses firmware_family field") {
+    auto p = pf::import_json(R"({"name":"X","firmware_family":"rusefi"})");
+    CHECK(p.firmware_family == pf::FirmwareFamily::RUSEFI);
+
+    p = pf::import_json(R"({"name":"X","firmware_family":"speeduino"})");
+    CHECK(p.firmware_family == pf::FirmwareFamily::SPEEDUINO);
+}
+
+TEST_CASE("import_json missing firmware_family defaults to SPEEDUINO (forward compat)") {
+    // Legacy projects from before Phase 18 don't carry the field;
+    // they must load as Speeduino without complaint.
+    auto p = pf::import_json(R"({"name":"Legacy Project"})");
+    CHECK(p.firmware_family == pf::FirmwareFamily::SPEEDUINO);
+}
+
+TEST_CASE("import_json with bogus firmware_family value defaults to SPEEDUINO") {
+    auto p = pf::import_json(R"({"firmware_family":"megasquirt"})");
+    CHECK(p.firmware_family == pf::FirmwareFamily::SPEEDUINO);
+}
+
+TEST_CASE("firmware_family round-trips through export → import for both values") {
+    for (auto f : {pf::FirmwareFamily::SPEEDUINO, pf::FirmwareFamily::RUSEFI}) {
+        pf::Project orig;
+        orig.firmware_family = f;
+        orig.name = "Round-trip test";
+        auto restored = pf::import_json(pf::export_json(orig));
+        CHECK(restored.firmware_family == f);
+    }
+}
+
 }  // TEST_SUITE
