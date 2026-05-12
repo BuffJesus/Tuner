@@ -233,6 +233,10 @@ namespace tt = tuner_theme;
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#else
+// POSIX (Linux + macOS) — Phase 20.
+#include <dirent.h>     // opendir/readdir for /dev scan in list_serial_ports
+#include <unistd.h>
 #endif
 
 // ---------------------------------------------------------------------------
@@ -268,6 +272,42 @@ std::vector<std::string> list_serial_ports() {
     }
     RegCloseKey(hKey);
     std::sort(ports.begin(), ports.end());
+#else
+    // POSIX (Linux + macOS) — Phase 20 slice 2.
+    //
+    // Scan /dev for typical USB-serial device node names:
+    //   - /dev/ttyUSB*  — Linux FTDI / CH340 / CP210x / PL2303 (kernel
+    //                     usb-serial drivers)
+    //   - /dev/ttyACM*  — Linux native USB-CDC (Arduino-class, Teensy,
+    //                     STM32 with CDC firmware)
+    //   - /dev/cu.usbserial* — macOS USB-serial (FTDI, etc.)
+    //   - /dev/cu.usbmodem*  — macOS USB-CDC
+    //
+    // Bluetooth and dialin variants (/dev/tty.* on macOS) are
+    // intentionally skipped — they're not enumerated as ECU connection
+    // candidates today. Add to the prefix list when an operator asks.
+    DIR* dir = ::opendir("/dev");
+    if (dir != nullptr) {
+        static const char* const kPrefixes[] = {
+            "ttyUSB",         // Linux usb-serial
+            "ttyACM",         // Linux USB-CDC
+            "cu.usbserial",   // macOS USB-serial
+            "cu.usbmodem",    // macOS USB-CDC
+        };
+        struct dirent* entry;
+        while ((entry = ::readdir(dir)) != nullptr) {
+            const char* name = entry->d_name;
+            for (const char* prefix : kPrefixes) {
+                std::size_t plen = std::strlen(prefix);
+                if (std::strncmp(name, prefix, plen) == 0) {
+                    ports.emplace_back(std::string("/dev/") + name);
+                    break;
+                }
+            }
+        }
+        ::closedir(dir);
+        std::sort(ports.begin(), ports.end());
+    }
 #endif
     return ports;
 }
