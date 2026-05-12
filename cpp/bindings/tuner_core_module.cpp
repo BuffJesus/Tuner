@@ -58,8 +58,6 @@
 #include "tuner_core/live_capture_session.hpp"
 #include "tuner_core/firmware_flash_builder.hpp"
 #include "tuner_core/legacy_project_file.hpp"
-#include "tuner_core/xcp_packets.hpp"
-#include "tuner_core/xcp_simulator.hpp"
 #include "tuner_core/protocol_simulator.hpp"
 #include "tuner_core/speeduino_connect_strategy.hpp"
 #include "tuner_core/ini_setting_groups_parser.hpp"
@@ -1031,147 +1029,6 @@ NB_MODULE(tuner_core, m) {
           "Mirrors the line-builder body of ProjectService.save_project.");
 
     // -----------------------------------------------------------------
-    // XCP packet builders + parsers — pure-logic byte shapes for the
-    // XCP-on-CAN command/response layer. I/O (CAN-USB transport)
-    // stays Python under XcpControllerClient.
-    // -----------------------------------------------------------------
-
-    namespace xcp = tuner_core::xcp_packets;
-
-    nb::class_<xcp::XcpConnectResponse>(m, "XcpConnectResponseCpp")
-        .def(nb::init<>())
-        .def_rw("resource",                &xcp::XcpConnectResponse::resource)
-        .def_rw("comm_mode_basic",         &xcp::XcpConnectResponse::comm_mode_basic)
-        .def_rw("max_cto",                 &xcp::XcpConnectResponse::max_cto)
-        .def_rw("max_dto",                 &xcp::XcpConnectResponse::max_dto)
-        .def_rw("protocol_layer_version",  &xcp::XcpConnectResponse::protocol_layer_version)
-        .def_rw("transport_layer_version", &xcp::XcpConnectResponse::transport_layer_version);
-
-    nb::class_<xcp::XcpStatusResponse>(m, "XcpStatusResponseCpp")
-        .def(nb::init<>())
-        .def_rw("session_status",       &xcp::XcpStatusResponse::session_status)
-        .def_rw("protection_status",    &xcp::XcpStatusResponse::protection_status)
-        .def_rw("configuration_status", &xcp::XcpStatusResponse::configuration_status);
-
-    nb::class_<xcp::XcpGetIdResponse>(m, "XcpGetIdResponseCpp")
-        .def(nb::init<>())
-        .def_rw("mode",              &xcp::XcpGetIdResponse::mode)
-        .def_rw("identifier_length", &xcp::XcpGetIdResponse::identifier_length)
-        .def_rw("identifier",        &xcp::XcpGetIdResponse::identifier)
-        .def("identifier_text",      &xcp::XcpGetIdResponse::identifier_text);
-
-    auto bytes_to_vec = [](nb::bytes b) {
-        const auto* data = reinterpret_cast<const std::uint8_t*>(b.c_str());
-        return std::vector<std::uint8_t>(data, data + b.size());
-    };
-
-    m.def("xcp_build_connect_command",
-          &xcp::build_connect_command,
-          nb::arg("mode") = std::uint8_t{0},
-          "Mirrors tuner.comms.xcp.packets.build_connect_command.");
-
-    m.def("xcp_build_get_status_command",
-          &xcp::build_get_status_command,
-          "Mirrors build_get_status_command.");
-
-    m.def("xcp_build_get_id_command",
-          &xcp::build_get_id_command,
-          nb::arg("identifier_type") = std::uint8_t{0},
-          "Mirrors build_get_id_command.");
-
-    m.def("xcp_build_set_mta_command",
-          &xcp::build_set_mta_command,
-          nb::arg("address"), nb::arg("address_extension") = std::uint8_t{0},
-          "Mirrors build_set_mta_command.");
-
-    m.def("xcp_build_upload_command",
-          &xcp::build_upload_command,
-          nb::arg("size"),
-          "Mirrors build_upload_command.");
-
-    m.def("xcp_parse_connect_response",
-          [bytes_to_vec](nb::bytes packet) {
-              auto v = bytes_to_vec(packet);
-              return xcp::parse_connect_response(std::span<const std::uint8_t>(v));
-          },
-          nb::arg("packet"),
-          "Mirrors parse_connect_response.");
-
-    m.def("xcp_parse_status_response",
-          [bytes_to_vec](nb::bytes packet) {
-              auto v = bytes_to_vec(packet);
-              return xcp::parse_status_response(std::span<const std::uint8_t>(v));
-          },
-          nb::arg("packet"),
-          "Mirrors parse_status_response.");
-
-    m.def("xcp_parse_get_id_response",
-          [bytes_to_vec](nb::bytes packet) {
-              auto v = bytes_to_vec(packet);
-              return xcp::parse_get_id_response(std::span<const std::uint8_t>(v));
-          },
-          nb::arg("packet"),
-          "Mirrors parse_get_id_response.");
-
-    m.def("xcp_parse_command_ack",
-          [bytes_to_vec](nb::bytes packet) {
-              auto v = bytes_to_vec(packet);
-              xcp::parse_command_ack(std::span<const std::uint8_t>(v));
-          },
-          nb::arg("packet"),
-          "Mirrors parse_command_ack.");
-
-    m.def("xcp_parse_upload_response",
-          [bytes_to_vec](nb::bytes packet, int expected_size) {
-              auto v = bytes_to_vec(packet);
-              return xcp::parse_upload_response(std::span<const std::uint8_t>(v), expected_size);
-          },
-          nb::arg("packet"), nb::arg("expected_size"),
-          "Mirrors parse_upload_response.");
-
-    // -----------------------------------------------------------------
-    // XCP simulator command dispatch — pure-logic half of
-    // `XcpSimulatorServer`. Socket I/O stays Python.
-    // -----------------------------------------------------------------
-
-    namespace xcs = tuner_core::xcp_simulator;
-
-    nb::class_<xcs::XcpSimulatorState>(m, "XcpSimulatorStateCpp")
-        .def(nb::init<>())
-        .def_static("default_state", &xcs::XcpSimulatorState::default_state)
-        .def_rw("session_status",          &xcs::XcpSimulatorState::session_status)
-        .def_rw("protection_status",       &xcs::XcpSimulatorState::protection_status)
-        .def_rw("configuration_status",    &xcs::XcpSimulatorState::configuration_status)
-        .def_rw("resource",                &xcs::XcpSimulatorState::resource)
-        .def_rw("comm_mode_basic",         &xcs::XcpSimulatorState::comm_mode_basic)
-        .def_rw("max_cto",                 &xcs::XcpSimulatorState::max_cto)
-        .def_rw("max_dto",                 &xcs::XcpSimulatorState::max_dto)
-        .def_rw("protocol_layer_version",  &xcs::XcpSimulatorState::protocol_layer_version)
-        .def_rw("transport_layer_version", &xcs::XcpSimulatorState::transport_layer_version)
-        .def_rw("identifier",              &xcs::XcpSimulatorState::identifier)
-        .def_rw("memory",                  &xcs::XcpSimulatorState::memory);
-
-    nb::class_<xcs::DispatchResult>(m, "XcpDispatchResult")
-        .def(nb::init<>())
-        .def_rw("response",        &xcs::DispatchResult::response)
-        .def_rw("new_mta_address", &xcs::DispatchResult::new_mta_address);
-
-    m.def("xcp_simulator_expected_command_size",
-          &xcs::expected_command_size,
-          nb::arg("opcode"),
-          "Mirrors XcpSimulatorServer._expected_command_size.");
-
-    m.def("xcp_simulator_handle_command",
-          [bytes_to_vec](const xcs::XcpSimulatorState& state,
-                         nb::bytes packet, std::uint32_t mta_address) {
-              auto v = bytes_to_vec(packet);
-              return xcs::handle_command(state, std::span<const std::uint8_t>(v), mta_address);
-          },
-          nb::arg("state"), nb::arg("packet"), nb::arg("mta_address"),
-          "Mirrors XcpSimulatorServer._handle. Returns a DispatchResult "
-          "with the response bytes plus the updated MTA address.");
-
-    // -----------------------------------------------------------------
     // Protocol simulator command dispatch — pure-logic half of
     // `ProtocolSimulatorServer`. Socket I/O stays Python.
     // -----------------------------------------------------------------
@@ -1256,6 +1113,11 @@ NB_MODULE(tuner_core, m) {
         .def_rw("name",      &scs::OutputChannelField::name)
         .def_rw("offset",    &scs::OutputChannelField::offset)
         .def_rw("data_type", &scs::OutputChannelField::data_type);
+
+    auto bytes_to_vec = [](nb::bytes b) {
+        const auto* data = reinterpret_cast<const std::uint8_t*>(b.c_str());
+        return std::vector<std::uint8_t>(data, data + b.size());
+    };
 
     m.def("speeduino_parse_capability_header",
           [bytes_to_vec](std::optional<nb::bytes> payload) {

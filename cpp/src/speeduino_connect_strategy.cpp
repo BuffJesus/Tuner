@@ -152,8 +152,8 @@ CapabilityHeader parse_capability_header(
     const auto& p = *payload;
     if (p.size() < 6) return header;
     if (p[0] != 0x00) return header;
-    // Python: `payload[2] << 8 | payload[3]`. That's big-endian u16
-    // — note this is the capability query, not the XCP spec.
+    // Python: `payload[2] << 8 | payload[3]`. Big-endian u16 — this is
+    // the only place big-endian creeps into the Speeduino raw protocol.
     header.parsed = true;
     header.serial_protocol_version = p[1];
     header.blocking_factor =

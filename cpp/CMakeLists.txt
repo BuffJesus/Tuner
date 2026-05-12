@@ -172,8 +172,6 @@ add_library(tuner_core STATIC
     src/live_capture_session.cpp
     src/firmware_flash_builder.cpp
     src/legacy_project_file.cpp
-    src/xcp_packets.cpp
-    src/xcp_simulator.cpp
     src/protocol_simulator.cpp
     src/speeduino_connect_strategy.cpp
     src/ini_setting_groups_parser.cpp
@@ -336,8 +334,6 @@ if(TUNER_CORE_BUILD_TESTS)
         tests/test_live_capture_session.cpp
         tests/test_firmware_flash_builder.cpp
         tests/test_legacy_project_file.cpp
-        tests/test_xcp_packets.cpp
-        tests/test_xcp_simulator.cpp
         tests/test_protocol_simulator.cpp
         tests/test_speeduino_connect_strategy.cpp
         tests/test_ini_setting_groups_parser.cpp
