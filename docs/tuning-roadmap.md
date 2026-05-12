@@ -11,7 +11,7 @@ Build a Python desktop ECU tuning workstation that is recognizably TunerStudio i
 - future autotune transparency
 - bench/firmware workflow safety
 
-This remains a Speeduino-first product, not a generic ECU parameter browser.
+This is a **Speeduino + RusEFI tuning workstation**, not a generic ECU parameter browser. The two firmware families share enough DNA (TS-format INI, MSQ tune storage, raw-style serial framing) that they fit cleanly under one product. XCP, FTDI-direct, Bluetooth, and proprietary OEM calibration stacks are explicitly **out of scope** — see Phase 18 below for the focused-strip plan that removes the speculative work for those targets. The trigger-signal layer is firmware-agnostic (see Phase 17 Bench Simulator), but every protocol, INI dialect, generator, and operator-workflow surface targets Speeduino and RusEFI only.
 
 ## Reference Inputs
 
@@ -129,13 +129,27 @@ TunerStudio bundles MegaLogViewer for post-session analysis: scrubbing through a
 - **Complexity:** Medium-large.
 - **Priority:** Nice-to-have. Most desktop Speeduino users do log analysis in TS or in spreadsheets today.
 
+#### G13. Bench-test trigger signal simulator (Ardu-stim host)
+
+Speeduino and RusEFI bench testing today usually means an [Ardu-stim](https://github.com/speeduino/Ardu-Stim) — an Arduino Nano/Uno/Mega running open-source firmware that emits crank/cam signals on pins 8/9 (Nano) or 53/52/51 (Mega). Our in-tree reference at `resources/Ardu-Stim-master/` is a **modified Speeduino-community fork (firmware `VERSION 2`, Electron GUI v1.2.1)** that extends upstream with a compression-cycle simulator — the headline 8-cylinder feature.
+
+- **Wheel pattern catalog:** 64 entries in `wheel_defs.h::WheelType` (terminator `MAX_WHEELS`). Every common V8 covered: `EIGHT_MINUS_ONE`, `OPTISPARK_LT1`, `GM_EIGHT_TOOTH_WITH_CAM`, `GM_LS1_CRANK_AND_CAM` (24x), `GM_58x_LS_CRANK_4X_CAM` (LS2/3 58x), `CHRYSLER_NGC_36-2+2_WITH_NGC8_CAM`, `DIZZY_EIGHT_CYLINDER`. Notable engine-specific entries also include `BMW_N20`, `FORD_ST170`, `VIPER_96_02`, `JEEP2000_4CYL/6CYL`, `TOYOTA_4AGE_CAS/4AGZE`.
+- **Compression-cycle simulator (THE 8-cyl feature):** firmware `configTable` v2 carries `useCompression`, `compressionType` (2/4/6/**8**-cyl 4-stroke; `1` and `3` declared "not initially supported"), `compressionRPM`, `compressionOffset`, `compressionDynamic`. The firmware modulates RPM through compression strokes per cylinder count — `currentStatus = {base_rpm, compressionModifier, rpm}` — so the ECU under test sees a realistic loaded engine signature, not a flat tone. Without this, 8-cyl decoder validation never exercises the cylinder-count-sensitive interrupt timing.
+- **Host protocol:** 13 single-char commands over 115200-baud serial (`a/c/C/L/n/N/p/P/R/r/s/S/X`). `c`/`C` exchange the full 18-byte packed v2 `configTable`; the version byte at offset 0 lets the host detect a v1 (11-byte) legacy firmware and fall back. Pot mode capped at `TMP_RPM_CAP = 9000`.
+
+- **What we have today:** No simulator integration. Operators run the standalone Electron Ardu-stim GUI side-by-side with the tuner.
+- **What we want:** A "Simulate" sub-panel inside the TRIGGERS tab — separate serial port from the ECU, cylinder-filter chip strip, pattern picker with Speeduino/RusEFI decoder badges, fixed/sweep RPM control, **compression-cycle controls** (enable + cyl-type 2/4/6/8 + RPM target + offset + dynamic flag), live waveform preview reusing `TriggerScopeWidget`, signal-invert toggles (primary/secondary). Plus a SETUP wizard Step 4 cross-link so picking a trigger pattern + cylinder count in the engine wizard pre-selects both the matching Ardu-stim pattern and the matching compression type.
+- **Why this matters:** It's signal-level, so it's firmware-agnostic — both Speeduino and RusEFI bench-test against the same simulator. Folding the host into the tuner kills a second-app context switch (replaces the Electron GUI entirely), lets the trigger-log capture side cross-validate against a known-good signal source, and makes the 8-cyl compression simulator discoverable from the same flow where the operator picks 8 cylinders in SETUP.
+- **Complexity:** Medium. Four pure-logic C++ services (catalog, protocol, config-codec, controller) + one Qt sub-panel.
+- **Priority:** High operator value. Scheduled as Phase 17 below.
+
 ### Niche / lower priority
 
 | Feature | Where | Complexity | Why deferred |
 |---|---|---|---|
 | G7. Ignition timing scope (high-speed trigger logger UI) | `com/efiAnalytics/tunerStudio/panels/TriggerLoggerPanel.java`, `com/efiAnalytics/tunerStudio/panels/o.java` | Medium | We already have basic trigger log capture; the scope visualization is for advanced diagnostics most operators rarely run |
 | G8. Dyno / power-and-torque view | `aP/hb.java` (Tuning & Dyno Views tab), `aO/cd.java` | Medium | ✅ **Covered** — Virtual Dyno card on the ASSIST tab with QPainter torque+HP chart (peak markers, dual Y axes, nice-ceiling axis scaling) plus **before/after overlay** via "Compare to Another CSV…" (dashed curves under the primary, shared axis range so deltas are visually honest) and "Clear Overlay" controls. No physical dyno required — math in `tuner_core::virtual_dyno::calculate`. |
-| G9. Bluetooth / BLE direct connectivity | `aP/bh.java` (uses `javax.bluetooth.*`) | Medium | Airbear bridge already covers wireless via TCP — Bluetooth is a parallel transport, not a missing feature |
+| G9. Bluetooth / BLE direct connectivity | `aP/bh.java` (uses `javax.bluetooth.*`) | Medium | **Cut in Phase 18.** Wireless to the ECU is already covered: Airbear ships both WiFi/TCP and BLE-via-NUS (`Airbear-main/src/ble-uart.{cpp,h}`), and Speeduino's STM32 board layouts designate UART1 pins (PA9/PA10 per `init.cpp:2448-2449`) for an external HC-05/HC-06 module that the operator wires up themselves. **Neither path requires a `BleTransport` in the desktop tuner** — Airbear's BLE peer is a phone/tablet running a gauge app (Nordic UART Service), and the HC-05 path enumerates as a regular COM port on the host. No operator scenario asks the desktop tuner to be a BLE client |
 | G10. Map switching (multi-tune slot management) | Not found in decomp | Medium | Speeduino firmware doesn't support multi-tune slots in the way TS-targeted ECUs do — this is a firmware feature, not a desktop one |
 | G11. Knock listener / audio feedback | Not found | Medium | Hardware-dependent; not in TS core either |
 | G12. Cloud / DIY tune sharing | Not found | Large | Outside the scope of an offline-first tuner |
@@ -538,7 +552,7 @@ Status key: **Done** = fully functional | **Partial** = framework in place, not 
 | Scrubbable timeline with channel tracks | **Done** (post-parity) | `LogTimelineWidget` with play/pause + speed selector + channels picker + shift-drag zoom + export menu (CSV range + PNG snapshot) |
 | Airbear SD log browser | **Done** (post-parity) | Host field + Refresh + download via `/api/sd/logs` grammar; firmware G5 exercise pending |
 
-### TRIGGERS tab (5/5 — Complete)
+### TRIGGERS tab (5/5 — Complete; +1 planned Phase 17)
 
 | Feature | Status | Notes |
 |---|---|---|
@@ -547,6 +561,7 @@ Status key: **Done** = fully functional | **Partial** = framework in place, not 
 | CSV import | **Done** (sub-slice 146) | Parses into Row format, rebuilds viz + analysis dynamically |
 | Live capture (tooth/composite) | **Done** (sub-slice 146) | `fetch_raw()` on controller, INI LoggerDefinition decode |
 | Oscilloscope waveform view | **Done** (post-parity) | `TriggerScopeWidget` — stacked tracks, digital square-waves, analog smooth lines, dashed annotation marks, ms time axis |
+| Bench simulator (Ardu-stim host) | **Planned (Phase 17)** | `bench_simulator::{wheel_pattern_catalog,protocol,controller}` + TRIGGERS "Simulate" sub-panel + SETUP wizard cross-link |
 
 ### Connection & comms (15/15 — Complete)
 
@@ -4548,6 +4563,68 @@ the following features are prioritized by operator impact.
 | 3 | HTTP API versioning (/api/v1/) | Trivial | Desktop only | ✅ Done |
 | 4 | Airbear error counters in /api/status | Airbear change + desktop | Airbear firmware PR | ✅ **Done end-to-end.** Airbear side (`Airbear-main/src/tcp-uart.{cpp,h}` + `rest_api.cpp` `handleStatus`): `TCPrequestsReceived` (already existed) + new `ecuTimeouts` + `ecuBusyResponses` counters incremented at the four `RC_TIMEOUT` / `RC_BUSY_ERR` send paths in `handleData`, exposed as `tcp_requests` / `ecu_timeouts` / `ecu_busy` JSON keys. Desktop side: `StatusResponse` field names aligned with real keys (retired the four speculative names), `parse_status_json` reads them, File → Airbear Health… renders `TS/ECU requests` as a neutral volume counter + `ECU timeouts` / `ECU busy` as error counters colored by threshold. Older Airbear builds that predate the counters fall back to dashes + the existing footnote |
 | 5 | Standalone log viewer with timeline | Large | Desktop only | ✅ Done — scrubbable timeline widget with stacked channel tracks + click/drag cursor + play/pause + 1x/2x/4x/8x speed selector + channels picker + shift-drag region zoom with translucent selection overlay + Reset Zoom button + zoom-percent hint + Export menu (visible range as CSV, timeline snapshot as PNG) landed in LOGGING tab |
+
+### Phase 17: Bench Simulator (Ardu-stim host)
+
+Integrate the [Speeduino Ardu-stim](https://github.com/speeduino/Ardu-Stim) crank/cam signal simulator directly into the TRIGGERS tab — replacing the standalone Electron GUI (`resources/Ardu-Stim-master/UI/`, v1.2.1) with a Qt sub-panel that shares serial enumeration, waveform rendering, and theme with the rest of the app. Reference firmware: `resources/Ardu-Stim-master/ardustim/ardustim/`, `#define VERSION 2`.
+
+Signal-level, so it covers both Speeduino and RusEFI ECUs from the same panel. The compression-cycle simulator is the headline 8-cylinder feature.
+
+| # | Slice | Effort | Notes |
+|---|-------|--------|-------|
+| A | `tuner_core::bench_simulator::wheel_pattern_catalog` — port the 64-entry `WheelType` enum (`wheel_defs.h::DIZZY_FOUR_CYLINDER … GM_40_OSS`) with cylinder count + crank/cam composition + Speeduino/RusEFI decoder tags. Pattern-name friendly strings (`*_friendly_name`) parsed alongside | Small | ✅ **Done (2026-05-11).** 23 doctest cases, 513 assertions, full suite **1513 / 11752 passing**. Files: `cpp/include/tuner_core/bench_simulator_wheel_pattern_catalog.hpp` + `cpp/src/bench_simulator_wheel_pattern_catalog.cpp` + `cpp/tests/test_bench_simulator_wheel_pattern_catalog.cpp` |
+| B | `tuner_core::bench_simulator::config_codec` — pure byte (de)serializer for the 18-byte v2 `configTable` (`{version, wheel, mode, fixed_rpm, sweep_low_rpm, sweep_high_rpm, sweep_interval, useCompression, compressionType, compressionRPM, compressionOffset, compressionDynamic}` little-endian packed, plus a v1 11-byte fallback path triggered by the leading version byte). Mirrors `globals.h::configTable` exactly so a `C`-then-`c` round-trip is byte-stable | Small | ✅ **Done (2026-05-11).** 22 doctest cases, 168 assertions. Includes `is_compression_type_firmware_supported` + `compression_type_from_cylinders` wizard helpers. Files: `bench_simulator_config_codec.{hpp,cpp}` + test |
+| C | `tuner_core::bench_simulator::protocol` — pure byte builders/parsers for the 13 single-char commands (`a/c/C/L/n/N/p/P/R/r/s/S/X`), 115200 baud. Includes the 6-byte LE sweep payload (lo word, hi word, interval word) emitted by `r`, the wheel-pattern CSV+degrees response from `P`, and the line-delimited `L` decoder-name listing | Small | ✅ **Done (2026-05-11).** 28 doctest cases, 204 assertions. `Command::*` named constants + `WheelPatternResponse` POD + 9 builder helpers + 5 response parsers. Files: `bench_simulator_protocol.{hpp,cpp}` + test |
+| D | `tuner_core::bench_simulator::controller` — orchestration over `SerialTransport`; `set_wheel`, `set_fixed_rpm`, `set_sweep`, `set_compression(enabled, cyl_type, target_rpm, offset, dynamic)`, `read_status`, `list_patterns`, `save_to_eeprom`. Uses mock transport for unit tests; respects `TMP_RPM_CAP = 9000` from firmware | Medium | ✅ **Done (2026-05-11).** 26 doctest cases, 95 assertions. Stateless free-function API taking `transport::Transport&`. `make_fixed_rpm_config` / `make_sweep_config` / `make_compression_enabled_config` builders. Tested via in-suite MockTransport. Files: `bench_simulator_controller.{hpp,cpp}` + test |
+| E | TRIGGERS-tab "Simulate" sub-panel — separate-from-ECU serial port picker, cylinder-filter chip strip (4/6/8/10/12), pattern picker with Speeduino/RusEFI badges, fixed/sweep RPM control, **compression-cycle controls** (enable toggle + cyl-type 2/4/6/8 dropdown + target RPM + offset + dynamic flag), signal-invert toggles (primary/secondary), live waveform preview via existing `TriggerScopeWidget` driven by the `P` pattern dump | Medium | UI only |
+| F | SETUP wizard Step 4 cross-link — "Test on bench with Ardu-stim" affordance pre-selects the matching pattern in TRIGGERS **and** auto-selects the compression type that matches the wizard's cylinder count (4 → type 3, 6 → type 4, 8 → type 5) | Small | UI only |
+| G | Operator manual entry + per-pattern decoder badges + cabling diagrams (Speeduino Mega2560 / DropBear / Frankenso 0.4 / RusEFI Hellen / generic) + compression-simulator explainer | Small | Doc + catalog tag wiring |
+| H | *(optional / upstream)* Firmware PR adding `FORD_MODULAR_THIRTY_SIX_MINUS_ONE_WITH_CAM` (4.6/5.4 36-1 with cam-sync; workaround today is generic 36-1 + manual cam wire) and enabling `COMPRESSION_TYPE_1CYL_4STROKE` / `COMPRESSION_TYPE_3CYL_4STROKE` (currently declared "not initially supported" in `globals.h`) | Small–Medium | External (speeduino/Ardu-Stim) |
+
+**8-cylinder coverage is strong in this fork:** the wheel catalog covers LS (24x and 58x), SBC/BBC (8-tooth dizzy + Optispark), Chrysler NGC8 cam, Yamaha 8-tooth, plain 8-1, dizzy 8. The compression-cycle simulator (slice B + D + E) is what makes 8-cyl testing actually meaningful — without modulating RPM through the firing-order strokes, the ECU just sees a constant-period pulse train and decoder edge cases never fire. Combined, the tuner's 8-cyl bench coverage matches or exceeds the standalone Electron GUI.
+
+**Slice ordering rationale:** A and B are independent and can land in parallel; C builds on B (protocol decoder uses config_codec); D builds on B+C; E–H follow. Total Phase 17 = ~80 new doctest cases + ~1 Qt sub-panel + 1 firmware PR (optional).
+
+### Phase 18: Focus on Speeduino + RusEFI (strip non-target capabilities)
+
+Trim the C++ tree to only what serves Speeduino and RusEFI operators. Reclaims test-suite cycles, code-size, and onboarding complexity for capabilities that were exploratory, speculative, or aspirational. Nothing in this strip changes any operator-visible behavior — everything removed is either dead code (never wired into `EcuConnection` or the Qt app) or planning that never started.
+
+| # | Action | Effort | Notes |
+|---|--------|--------|-------|
+| 1 | Delete `tuner_core::xcp_packets` — XCP isn't a Speeduino or RusEFI protocol. Packet layer was built speculatively (sub-slice 104), never wired into `EcuConnection`. `grep XcpControllerClient` returns only docs, bindings, and the XCP files themselves — zero call sites in `app/main.cpp` or any tab. Reclaims ~23 doctest cases + ~700 LOC of code+tests | Small | Drops the 3-file XCP packet cluster (`xcp_packets.hpp`, `xcp_packets.cpp`, `test_xcp_packets.cpp`) + CMake entry + nanobind binding + cross-reference comment in `speeduino_connect_strategy.cpp` |
+| 2 | Delete `tuner_core::xcp_simulator` — pair to item 1, server-side; same rationale (sub-slice 105). Reclaims ~15 doctest cases + ~500 LOC | Small | Drops the 3-file XCP simulator cluster + CMake + binding |
+| 3 | Cut Bluetooth/BLE from the desktop-tuner backlog (G9 in gap analysis above) — wireless to the ECU is already covered by Airbear (WiFi/TCP **and** BLE-via-NUS, `Airbear-main/src/ble-uart.{cpp,h}`) and by user-wired HC-05/HC-06 modules on Speeduino's UART1 (`speeduino/init.cpp:2448-2449` documents the pin assignment). Both paths terminate in either a phone-side BLE client or a USB-serial bridge — the desktop tuner never needs to be a BLE client itself. The Airbear-side BLE feature stays on the **firmware** roadmap as the phone/tablet gauge path, not on the desktop transport list | Trivial | Doc removal only — no code ever landed on the desktop side |
+| 4 | Cut FTDI direct-access path from "future port" mentions in `docs/protocol-notes.md` — Win32 serial via the standard COM-port enumerator handles every USB-serial chip operators actually use (FTDI, CH340, CP210x, native USB CDC on Teensy/STM32); FTD2XX-JNA was a TunerStudio internal implementation detail, not an operator feature | Trivial | Doc edit only — no code ever landed |
+| 5 | Add `firmware_family: "speeduino" \| "rusefi"` field to the `.tunerproj` schema, default `"speeduino"`. Used by future RusEFI-specific INI signature sniffing and protocol routing. Forward-compatible — existing projects load with the default | Small | ✅ **Done (2026-05-11).** `FirmwareFamily` enum + `firmware_family_to_string` / `firmware_family_from_string` (case-insensitive, falls back to SPEEDUINO on unknown). `export_json` always emits the field; `import_json` defaults to SPEEDUINO when absent. 11 new doctest cases — suite **1600 / 12241** passing |
+| 6 | Reframe TunerStudio decompiled-source references throughout the docs as a historical **parity oracle** (used during the porting effort, not a live integration target). The `Desktop/Decompiled/TunerStudioMS/` tree stays a reference for "did we cover this feature?" comparisons — it is not a porting source any longer | Trivial | Doc edit |
+| 7 | Reframe "Speeduino-first" language in `docs/tuning-roadmap.md`, `docs/architecture.md`, `docs/operator-manual.md`, and `docs/ux-design.md` to "Speeduino + RusEFI primary targets" | Trivial | Doc edit |
+| 8 | RusEFI follow-up — Phase 19 placeholder for first-class RusEFI controller binding (TS-style framing variant, INI signature detection, USB CDC enumeration polish). Out of scope for Phase 18 strip; the bench simulator (Phase 17) already serves RusEFI users because trigger signals are firmware-agnostic | Trivial | ✅ **Done (2026-05-11).** Phase 19 section drafted directly below Phase 18 with a 7-slice scope, RusEFI ref tree location (`resources/speeduino-202501.6/Resources/rusefi-2026-03-17/`), and a "trigger to start" gating note |
+
+**Why this strips and doesn't break anything:** XCP packet+simulator clusters are currently dead code — `grep XcpControllerClient` returns docs + bindings + the XCP files themselves; nothing in `app/main.cpp`, `EcuConnection`, or any tab references them. Bluetooth and FTDI-direct never had any code beyond doc mentions. Removing all four shrinks the test suite count and the documentation surface without changing any operator-visible behavior.
+
+**Net effect after Phase 18:** the tuner ships as a focused **Speeduino + RusEFI** workstation. XCP, FTDI-direct, Bluetooth, and OEM proprietary stacks are explicitly off the roadmap. The product positioning sharpens: every surface, every parser, every controller has a clear answer to "which firmware family does this serve?"
+
+### Phase 19: RusEFI first-class controller binding (placeholder)
+
+With Phase 18's `firmware_family` field on `.tunerproj` in place and the bench simulator (Phase 17) already serving RusEFI users at the signal level, Phase 19 makes RusEFI a first-class **controller** target — the desktop tuner connects to a RusEFI ECU directly via its TS-style serial protocol.
+
+This phase is **not yet committed**; it's listed here so future work has a known landing site. Slice plan to be drafted when the firmware-family routing in Phase 18 ships an explicit operator-facing affordance.
+
+**Scope (when committed):**
+
+| # | Slice | Notes |
+|---|-------|-------|
+| 1 | `tuner_core::rusefi_framing` — RusEFI's TS-style framing variant (similar to Speeduino new-protocol but with packet-size + CRC quirks). Reference: `resources/speeduino-202501.6/Resources/rusefi-2026-03-17/firmware/console/binary_log/` and the wider `console/` tree | Pure-logic byte shaping. ~25 doctest cases expected |
+| 2 | `tuner_core::rusefi_protocol` — command set (queryCommand `S`, get-version, page read/write, burn). RusEFI uses a small superset of the TS raw-command set | Mirrors `speeduino_protocol.{hpp,cpp}` shape |
+| 3 | `tuner_core::rusefi_controller` — connect/handshake/poll lifecycle. Per-family signature detection via `firmware_family_from_string` reading the `.tunerproj` field | Mirrors `speeduino_controller.{hpp,cpp}` shape |
+| 4 | INI signature sniff — auto-detect RusEFI vs Speeduino INI on project open via the INI's `signature = ...` line. Set `firmware_family` on the loaded project. Operator gets a "this is a RusEFI definition" chip on the TUNE tab project header | Wire `definition_layout` + `project_file` |
+| 5 | EcuConnection routing — when `firmware_family == RUSEFI`, route through `rusefi_controller`; SPEEDUINO continues through `speeduino_controller`. Single connect dialog, both transports work for both firmwares | Touches `EcuConnection` |
+| 6 | Operator manual — RusEFI quickstart, INI compatibility notes, known-divergent behavior (e.g. burn semantics, polling cadence) | Doc work |
+| 7 | RusEFI Hellen-board flash targets — extend `flash_target_detection` to recognise Hellen USB IDs and recommend the matching DFU tool | Builds on existing `flash_target_detection` shape |
+
+**Why this is a separate phase rather than bundled with Phase 17/18:** the bench simulator (Phase 17) already covers the RusEFI use case at the **signal** level — the simulator emits physical crank/cam pulses that any decoder consumes. Phase 19 is about the desktop tuner connecting to RusEFI **directly** over serial/USB, which is a meaningfully larger effort (new framing + new command set + per-family routing throughout EcuConnection). Folding it into Phase 17/18 would distort the strip-and-bench-simulator focus those phases have.
+
+**Trigger to start Phase 19:** an operator who already runs RusEFI on a Hellen board asks for direct tuning support. Until that signal arrives, Phase 17/18 cover the use cases (RusEFI users can bench-test via the simulator; the `firmware_family` field is there to be flipped to RusEFI ahead of any Phase 19 work).
 
 ### Virtual Dyno Design Notes
 

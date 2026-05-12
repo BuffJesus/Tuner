@@ -326,6 +326,34 @@ After a burn that requires a power cycle:
 
 ---
 
+### 10. TRIGGERS Tab — Capture + Simulate
+
+**Current state:** Live trigger log capture (tooth/composite), CSV import, oscilloscope waveform view via `TriggerScopeWidget`, analysis findings panel.
+
+**Target state — split into two sub-surfaces:**
+
+#### 10.1. Capture (existing)
+Trigger log capture and analysis — already covered by the C++ port. No design changes.
+
+#### 10.2. Simulate (Phase 17, see `tuning-roadmap.md`)
+Drive an [Ardu-stim](https://github.com/speeduino/Ardu-Stim) bench simulator from inside the tuner — replacing the standalone Electron GUI (`resources/Ardu-Stim-master/UI/`, v1.2.1):
+
+- **Serial port picker** — separate from the ECU port; defaults to the first COM port that isn't the ECU's; firmware version chip shows `v1` or `v2` from the leading byte of the `C` config dump
+- **Cylinder filter chip strip** — `4` / `6` / `8` / `10` / `12` filter the 64-entry pattern catalog
+- **Pattern picker** — searchable list; each row shows pattern name + tooth count + Speeduino/RusEFI decoder badge
+- **RPM control trio** — fixed slider (200–9000 RPM, clamped at firmware `TMP_RPM_CAP`), sweep configurator (low / high / interval ms), pot-controlled mode toggle
+- **Compression-cycle card** (v2 firmware only — hidden when an older sim is detected) — enable toggle + cylinder-type dropdown (2/4/6/**8**-cyl 4-stroke) + target RPM + offset + dynamic flag. Surfaces what the operator actually came for when picking 8 cylinders: a realistic loaded-engine signature instead of a flat tone
+- **Signal inversion** — independent toggles for primary (crank) and secondary (cam) signal polarity
+- **Live waveform preview** — reuses `TriggerScopeWidget` driven by the `P` pattern dump (CSV edge states + degrees line)
+- **Pre-selection from SETUP wizard** — picking a trigger pattern + cylinder count in the Engine Setup Wizard surfaces a "Test on bench" chip that jumps here with the matching pattern selected **and** auto-fills the compression type (4-cyl → type 3, 6-cyl → type 4, 8-cyl → type 5)
+- **Save to EEPROM** — explicit button for the `s` command so the operator decides when settings persist past power-cycle (default: do not auto-persist)
+
+The Simulate sub-surface is **firmware-agnostic** because the simulator emits physical signals — both Speeduino and RusEFI bench-test against the same hardware. The decoder badges surface which firmware interprets each pattern.
+
+**Why this matters for the "guided power" philosophy:** bench-testing a trigger setup before firing an engine is one of the strongest safety nets in EFI tuning. Folding the simulator host into the tuner removes a second-app context switch and makes the trigger-pattern decision in SETUP traceable to a verifiable bench result in TRIGGERS — exactly the "explain why, not just what" loop. The compression-cycle card turns "is my 8-cyl decoder configured right?" from a flat-tone guess into a realistic stroke-by-stroke validation.
+
+---
+
 ## Visual System
 
 The native C++ app (`tuner_app.exe`) was accumulating palette drift — 10

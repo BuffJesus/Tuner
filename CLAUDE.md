@@ -33,7 +33,7 @@ This is a PySide6 desktop application with strict inward dependencies:
 - `domain` -> typed state and ECU models
 - `parsers` -> INI / MSQ / project ingestion
 - `transports` -> serial / TCP / UDP / mock I/O
-- `comms` -> Speeduino raw protocol, XCP, framing, CRC, controller abstractions
+- `comms` -> Speeduino raw protocol, framing, CRC, controller abstractions
 - `services` -> business logic and orchestration
 - `plugins` -> extension API scaffolding
 - `ui` -> thin PySide6 widgets
@@ -76,8 +76,11 @@ Core workflow already present:
 
 Still missing at product level:
 
-- full XCP editing parity
 - compressor-map-assisted turbo modeling
+- first-class RusEFI controller binding (Phase 19, see `docs/tuning-roadmap.md`)
+- bench-test trigger simulator (Phase 17, Ardu-stim host)
+
+XCP support is intentionally **out of scope** for the product (Phase 18 strip — Speeduino and RusEFI both speak TS-style raw serial, not XCP).
 
 ## Post-Roadmap Direction
 
@@ -234,15 +237,14 @@ Current real support:
 - `SpeeduinoControllerClient._send_data_command()` / `_recv_data_response()` detect framing via `getattr` — framed over TCP, raw over serial; Q/S handshake stays raw
 - `fetch_logger_data(logger_def)` — live tooth/composite log capture
 - simulator JSON and mock paths
-- partial XCP support
 
-Do not describe XCP as feature-complete.
+XCP support has been **removed** (Phase 18 strip, 2026-05-11). The speculative C++ `xcp_packets` + `xcp_simulator` clusters never wired into `EcuConnection` and were deleted along with their tests, bindings, and CMake entries. Neither Speeduino nor RusEFI speaks XCP; do not reintroduce it.
 
 ## Testing Notes
 
 Current Python collected suite: **2551 tests passing** with the `tuner_core` native extension built per `cpp/README.md` (includes C++ parity tests in `tests/unit/test_cpp_*_parity.py`, now covering the formula output channel evaluator). The parity suites skip cleanly when the extension isn't built so a fresh dev install without a compiler still passes the full Python-only run.
 
-Current Python collected suite: **3011 tests passing**. Current C++ doctest suite: **1395 tests, 10899 assertions, 0 failures** as of Phase 14 Slice 4 sub-slice 146 (INI `[PcVariables]` parser + aggregator merge). 98 services + G4 formula parser/evaluator/runtime enrichment + MSQ insert_missing + full chrome beautification arc + end-to-end staged-state workflow + VID/PID/BCD flash target classification + live tooth/composite trigger log decode + live capture session CSV/status formatters + AVRDUDE/Teensy/DFU flash command argument shapers + legacy project file format + XCP packet layer + XCP simulator command dispatch + JSON-line protocol simulator command dispatch + Speeduino connect strategy helpers + Speeduino capability header parse + INI `[SettingGroups]` parser **wired into the `NativeEcuDefinition` aggregator**. End-to-end test exercises the complete 10-step pipeline from production INI+MSQ load through workspace presenter staging to native format export and re-import. Integration test suites validate the full production INI/MSQ fixtures and the complete VE/WUE/trigger analysis pipelines end-to-end. Qt 6.7.3 built from source with matching MinGW UCRT 15.2 toolchain at `C:/Qt/6.7.3-custom`. UX design doc at `docs/ux-design.md`.
+Current Python collected suite: **3011 tests passing** (pre-Phase-18). Current C++ doctest suite: **1395 tests, 10899 assertions, 0 failures** as of Phase 14 Slice 4 sub-slice 146 (INI `[PcVariables]` parser + aggregator merge). **Phase 18 strip (2026-05-11) deleted the `xcp_packets` + `xcp_simulator` clusters** — those numbers will drop by ~38 doctest cases on the next clean build; re-run `python -m pytest --collect-only -q` and the C++ suite to refresh counts before quoting them. 98 services + G4 formula parser/evaluator/runtime enrichment + MSQ insert_missing + full chrome beautification arc + end-to-end staged-state workflow + VID/PID/BCD flash target classification + live tooth/composite trigger log decode + live capture session CSV/status formatters + AVRDUDE/Teensy/DFU flash command argument shapers + legacy project file format + JSON-line protocol simulator command dispatch + Speeduino connect strategy helpers + Speeduino capability header parse + INI `[SettingGroups]` parser **wired into the `NativeEcuDefinition` aggregator**. End-to-end test exercises the complete 10-step pipeline from production INI+MSQ load through workspace presenter staging to native format export and re-import. Integration test suites validate the full production INI/MSQ fixtures and the complete VE/WUE/trigger analysis pipelines end-to-end. Qt 6.7.3 built from source with matching MinGW UCRT 15.2 toolchain at `C:/Qt/6.7.3-custom`. UX design doc at `docs/ux-design.md`.
 
 **Phase 14 pivot is in progress.** The repo is moving from "Python app + C++ shared core" to "native C++ Qt 6 desktop app". `cpp/app/main.cpp` + `tuner_app.exe` are the new top-level target. Python `src/tuner/` stays alive as the parity oracle until the C++ app reaches feature parity, then gets deleted in one PR. See `docs/tuning-roadmap.md` Future Phase 14 and `cpp/README.md`.
 

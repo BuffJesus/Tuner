@@ -225,6 +225,41 @@ Four loggers are defined in the production INI:
 
 UI: Trigger Logs tab has a live-capture section (logger selector combo + "Capture Live Log" button) alongside the existing CSV import path. Capture runs in a `TriggerCaptureWorker` QThread.
 
+## Bench Simulator (Ardu-stim host)
+
+The TRIGGERS tab will host a "Simulate" sub-surface that drives an [Ardu-stim](https://github.com/speeduino/Ardu-Stim) bench-test trigger generator over a second serial port (separate from the ECU under test). Phase 17 in `tuning-roadmap.md`.
+
+**Reference firmware:** `resources/Ardu-Stim-master/ardustim/ardustim/`, `#define VERSION 2`. This is a modified Speeduino-community fork that extends upstream with a compression-cycle simulator — the 8-cylinder behavioral feature that makes bench testing realistic instead of a flat-tone pulse train.
+
+Architecture:
+
+```text
+TRIGGERS-tab Simulate panel (Qt)        ← replaces standalone Electron GUI v1.2.1
+    ->
+tuner_core::bench_simulator::controller
+    ->
+tuner_core::bench_simulator::protocol  ←  13 single-char commands @ 115200 baud
+    ->
+tuner_core::bench_simulator::config_codec  ←  18-byte v2 configTable (v1 11-byte fallback)
+    ->
+tuner_core::transport::SerialTransport  (separate COM port from ECU)
+    ->
+Ardu-stim firmware  →  physical crank/cam signal on Arduino pins → ECU under test
+```
+
+Pure-logic services planned (all under `tuner_core::bench_simulator::`):
+
+- `wheel_pattern_catalog` — 64-entry pattern table mirroring `wheel_defs.h::WheelType` (`DIZZY_FOUR_CYLINDER` through `GM_40_OSS`), tagged with cylinder count, crank/cam composition, friendly name from `*_friendly_name`, and Speeduino/RusEFI decoder compatibility
+- `config_codec` — pure byte (de)serializer for the 18-byte v2 `configTable` (`{version, wheel, mode, fixed_rpm, sweep_low_rpm, sweep_high_rpm, sweep_interval, useCompression, compressionType, compressionRPM, compressionOffset, compressionDynamic}` packed little-endian). Detects v1 (11-byte) legacy firmware via the leading version byte and falls back
+- `protocol` — byte builders/parsers for `a/c/C/L/n/N/p/P/R/r/s/S/X` commands (line-delimited decoder-name list from `L`, CSV+degrees pattern dump from `P`, 6-byte LE sweep payload to `r`)
+- `controller` — orchestration over `SerialTransport`; `set_wheel`, `set_fixed_rpm`, `set_sweep`, `set_compression(enabled, cyl_type, target_rpm, offset, dynamic)`, `read_status`, `list_patterns`, `save_to_eeprom`. Respects `TMP_RPM_CAP = 9000` for pot mode
+
+The simulator is signal-level, so it's firmware-agnostic — both Speeduino and RusEFI bench-test against the same hardware. The catalog tags surface which decoders interpret each pattern. The compression-cycle simulator is what makes 8-cyl validation meaningful: the firmware modulates RPM through the firing-order strokes per cylinder count (`COMPRESSION_TYPE_8CYL_4STROKE = 5`), exposed in `currentStatus` as `{base_rpm, compressionModifier, rpm}`.
+
+## Firmware Family
+
+The tuner targets **Speeduino** as the primary firmware family and **RusEFI** as the near-term secondary family. They share enough surface area (TS-format INI, MSQ tune storage, raw-style serial framing) to fit cleanly under one product. The `.tunerproj` schema will gain a `firmware_family: "speeduino" | "rusefi"` field (Phase 18) so the app routes protocol selection, INI signature sniffing, and operator-workflow defaults accordingly. XCP, FTDI-direct, Bluetooth, and proprietary OEM calibration stacks are explicitly **not** on the roadmap — see Phase 18 in `tuning-roadmap.md` for the strip plan.
+
 ## VE Analyze and WUE Analyze Service Layer
 
 VE Analyze and WUE Analyze are both wired end-to-end:
