@@ -420,6 +420,7 @@ if(TUNER_BUILD_APP)
         app/main.cpp
         app/shell/ecu_connection.cpp
         app/tabs/history_tab.cpp
+        app/tabs/triggers_simulate_panel.cpp
         app/ui/styles.cpp
         app/widgets/bar_gauge_widget.cpp
         app/widgets/dial_gauge_widget.cpp

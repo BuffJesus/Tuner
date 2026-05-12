@@ -104,6 +104,7 @@
 #include "shell/ecu_connection.hpp"
 #include "theme.hpp"
 #include "tabs/history_tab.hpp"
+#include "tabs/triggers_simulate_panel.hpp"
 #include "ui/styles.hpp"
 #include "widgets/bar_gauge_widget.hpp"
 #include "widgets/dial_gauge_widget.hpp"
@@ -234,10 +235,10 @@ namespace tt = tuner_theme;
 #include <windows.h>
 #endif
 
-namespace {
-
 // ---------------------------------------------------------------------------
-// Serial port enumeration (Windows registry)
+// Serial port enumeration (Windows registry). External linkage so the
+// extracted tabs/triggers_simulate_panel.cpp can reuse it without
+// duplicating the registry walk.
 // ---------------------------------------------------------------------------
 
 std::vector<std::string> list_serial_ports() {
@@ -270,6 +271,8 @@ std::vector<std::string> list_serial_ports() {
 #endif
     return ports;
 }
+
+namespace {  // resume anonymous namespace for TU-private helpers below
 
 std::string current_system_name() {
 #ifdef _WIN32
@@ -14477,6 +14480,9 @@ QWidget* build_triggers_tab(std::shared_ptr<EcuConnection> ecu_conn = nullptr) {
         source_label->setText(QString::fromUtf8(lbl));
         capture_btn->setEnabled(true);
     });
+
+    // Phase 17 Slice E — bench simulator (Ardu-stim host) panel.
+    outer->addWidget(build_triggers_simulate_panel());
 
     scroll->setWidget(container);
     return scroll;
