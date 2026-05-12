@@ -176,6 +176,7 @@ add_library(tuner_core STATIC
     src/bench_simulator_wheel_pattern_catalog.cpp
     src/bench_simulator_config_codec.cpp
     src/bench_simulator_protocol.cpp
+    src/bench_simulator_controller.cpp
     src/speeduino_connect_strategy.cpp
     src/ini_setting_groups_parser.cpp
     src/ini_setting_context_help_parser.cpp
@@ -341,6 +342,7 @@ if(TUNER_CORE_BUILD_TESTS)
         tests/test_bench_simulator_wheel_pattern_catalog.cpp
         tests/test_bench_simulator_config_codec.cpp
         tests/test_bench_simulator_protocol.cpp
+        tests/test_bench_simulator_controller.cpp
         tests/test_speeduino_connect_strategy.cpp
         tests/test_ini_setting_groups_parser.cpp
         tests/test_ini_setting_context_help_parser.cpp
