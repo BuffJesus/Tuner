@@ -91,7 +91,9 @@ cpp/
 
 ## Build & test (C++ side only)
 
-On Windows with MinGW (the validated path):
+### Windows (primary target — validated)
+
+MinGW UCRT path:
 
 ```sh
 cmake -S cpp -B build/cpp -G "MinGW Makefiles" \
@@ -105,6 +107,45 @@ build/cpp/tuner_core_tests.exe
 working-directory quirk; running the test exe directly works. The
 binary is statically linked against the MinGW runtime so no PATH
 manipulation is needed.
+
+### Linux (Phase 20 — `tuner_core_tests` builds today, Qt app is partial)
+
+The `tuner_core` library and its 1600+ doctest cases build cleanly on
+Linux because the library is stdlib-only. The Qt app links but the
+SerialTransport currently throws on `open()` — live ECU connection is
+gated on Phase 20 slice 1 (POSIX `termios` implementation). Offline
+work (load INI/MSQ, generate tables, replay datalogs, render gauges)
+works today.
+
+```sh
+# Distro deps (Ubuntu 22.04+):
+sudo apt install build-essential cmake qt6-base-dev qt6-tools-dev libgl1-mesa-dev
+
+# Vendor the two single-header deps first (curl steps above).
+
+cmake -S cpp -B build/cpp -G "Unix Makefiles" \
+  -DTUNER_CORE_BUILD_TESTS=ON \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build build/cpp -j$(nproc)
+build/cpp/tuner_core_tests
+```
+
+For the Qt app (requires Phase 20 slices 1–6 to be useful for live
+connect):
+
+```sh
+cmake -S cpp -B build/cpp-app -G "Unix Makefiles" \
+  -DTUNER_BUILD_APP=ON \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=/usr/lib/x86_64-linux-gnu/cmake/Qt6
+cmake --build build/cpp-app -j$(nproc)
+```
+
+### macOS (Phase 20+ — same POSIX paths as Linux)
+
+Same `Unix Makefiles` invocation. Qt 6 via Homebrew (`brew install qt@6`)
+or `aqt`. Live ECU connect waits on Phase 20 slice 9 (Mach-O specifics +
+notarization for distribution).
 
 Expected output: `tuner_core_tests` runs the doctest suite and reports
 **584 cases, 1794 assertions, 0 failures** as of Phase 14 Slice 4

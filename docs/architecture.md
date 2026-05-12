@@ -10,10 +10,24 @@ Native C++ Qt 6 desktop application built on the `tuner_core` static library.
   INI/MSQ/native parsers, protocol codecs, table generators, analysis services,
   dashboard layout, gauge zones, telemetry decoders. Pure logic, no Qt dependency.
 - `transports` (within tuner_core)
-  Serial (Win32 COM), TCP (Winsock2 with Speeduino framing), mock.
+  Serial (Win32 COM today; POSIX termios stub for Linux/macOS — Phase 20),
+  TCP (Winsock2 today; BSD sockets for POSIX — Phase 20),
+  mock.
 - `app` (Qt 6 application)
   Single-file Qt shell (`main.cpp`) assembling tuner_core services into a tabbed UI.
   Theme tokens in `theme.hpp`.
+
+## Platform Support
+
+| Platform | Shipped | Notes |
+|---|---|---|
+| **Windows 10/11 x64** | ✅ Yes | Primary target. MinGW UCRT 15.2 toolchain + Qt 6.7.3 built from source at `C:/Qt/6.7.3-custom`. Win32 serial (registry + `CreateFile`), Winsock2 TCP, AVRDUDE/Teensy-CLI/DFU bundled |
+| **Linux x86_64 (glibc)** | 🚧 Planned (Phase 20) | `transport_serial.cpp` has a POSIX stub already (`#ifndef _WIN32` branch using `termios`); needs the real implementation. `transport_tcp.cpp` needs BSD-socket alternative paths. `list_serial_ports` needs a `/dev/ttyUSB*`/`/dev/ttyACM*` scanner. Flash tool bundle ships Linux-arch AVRDUDE/Teensy/DFU binaries. Build via g++ 12+ or clang 16+ with Qt 6.x from distro packages or `aqt`. See `docs/tuning-roadmap.md` Phase 20 |
+| **Linux ARM64 (Raspberry Pi 4/5)** | 🚧 Planned (Phase 20) | Same code paths as x86_64; needs `aarch64`-arch flash tool binaries. AVRDUDE + Teensy CLI both ship aarch64 builds upstream (see `resources/Ardu-Stim-master/UI/bin/avrdude-aarch64/` for one reference) |
+| **macOS (Intel + Apple Silicon)** | 🚧 Planned (Phase 20+) | Same POSIX paths as Linux; needs Mach-O bundling + signing + notarization for distribution. Speeduino + RusEFI operators on macOS are a smaller cohort than Linux — schedule after Linux ships |
+| **FreeBSD / OpenBSD** | ❌ Out of scope | No operator demand identified; would inherit most of the Linux work but adds CI burden |
+
+The C++ code is **already mostly portable** — the `tuner_core` static library has zero platform-specific code, and `transport_serial.cpp` + `transport_tcp.cpp` are the two TUs that need conditional implementations. `list_serial_ports` in `cpp/app/main.cpp` is the third platform-conditional point. Everything else (parsers, generators, codecs, analysis services, all 99 bench-simulator doctest cases) is stdlib-only and builds on any C++20 compiler.
 
 ## Dependency Rules
 

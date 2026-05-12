@@ -4626,6 +4626,29 @@ This phase is **not yet committed**; it's listed here so future work has a known
 
 **Trigger to start Phase 19:** an operator who already runs RusEFI on a Hellen board asks for direct tuning support. Until that signal arrives, Phase 17/18 cover the use cases (RusEFI users can bench-test via the simulator; the `firmware_family` field is there to be flipped to RusEFI ahead of any Phase 19 work).
 
+### Phase 20: Linux + macOS support
+
+The C++ codebase is **already mostly portable** — `tuner_core` has zero platform-specific code, and the platform-conditional surface is narrow. Phase 20 fills in the three TUs that have Windows-only paths today.
+
+**Current Linux/macOS status:** building `tuner_core_tests` already works on POSIX (stdlib-only). The Qt app links but the SerialTransport is a `throw std::runtime_error("not implemented on this platform")` stub. Operators on Linux can run the analysis services / parsers / generators offline (load INI/MSQ files, generate tables, render gauges against datalogs) but can't connect to a live ECU.
+
+| # | Slice | Effort | Notes |
+|---|-------|--------|-------|
+| 1 | Linux `SerialTransport` — replace the `#else` stub in `transport_serial.cpp` with a real `termios`-based POSIX implementation. Mirror the Win32 shape: synchronous reads with `VMIN`/`VTIME` for timeout, DTR/RTS forced low, baud-rate change via `tcsetattr` + `cfsetispeed`/`cfsetospeed`. Standard ~80 LOC | Small | Stub already in place; just needs the body |
+| 2 | Linux `list_serial_ports` — in `cpp/app/main.cpp`, swap the Windows registry walk for a `/dev/ttyUSB*` + `/dev/ttyACM*` glob. Detect names + sort. Stay behind `#ifdef _WIN32` / `#else` so the Win32 path is unaffected | Small | ~30 LOC; can reuse `glob.h` or `dirent.h` |
+| 3 | Linux `TcpTransport` — winsock2 paths in `transport_tcp.cpp` (`SOCKET`, `closesocket`, `WSAStartup`, `select`-with-`fd_set`) need POSIX-socket alternatives. Most of the framing logic is portable; just the OS handles need conditional definitions | Small | ~50 LOC of `#ifdef _WIN32` branches |
+| 4 | CMake Linux paths — `MINGW`-guarded `add_link_options` block already skips on Linux. `target_link_libraries(tuner_core PRIVATE ws2_32 setupapi hid)` needs to be Win32-only (`if(WIN32)` already in place); verify equivalents are not needed on Linux. Qt 6 detection works via `CMAKE_PREFIX_PATH` to system Qt or `aqt`-installed Qt | Small | Audit + minor tweaks |
+| 5 | Linux flash tool bundle — `add_custom_command(POST_BUILD)` blocks currently only copy `avrdude-windows`, `teensy_loader_cli-windows`, `dfuutil-windows`. Linux build copies `avrdude-linux_x86_64`, `teensy_loader_cli-linux-x86_64`, `dfu-util-linux`. Reference: `firmware_flash_builder::linux_platform_dir` already knows every arch (Slice 102 sub-slice landed this) | Small | Verify `resources/` has the binaries or document where to fetch |
+| 6 | Linux UDP discovery — `udp_discovery.cpp` uses winsock2; needs POSIX socket parity. Same shape as slice 3 | Small | ~30 LOC |
+| 7 | Linux build CI — GitHub Actions job: Ubuntu 22.04 + Qt 6.6 from `apt` + `cmake --build` + `ctest`. Validates the test-only build at first; full Qt app build added after slices 1–6 land | Small | One workflow YAML |
+| 8 | Linux arm64 (Raspberry Pi 4/5) — same paths but `aarch64` toolchain + arch-specific flash binaries from `resources/Ardu-Stim-master/UI/bin/avrdude-aarch64/` and equivalents | Medium | Builds on slice 7 |
+| 9 | macOS support — Mach-O equivalent of slices 1–6 (same POSIX paths) + signing + notarization for distribution outside the App Store. Apple Silicon + Intel via CMake's `CMAKE_OSX_ARCHITECTURES` | Medium | Schedule after Linux ships |
+| 10 | AppImage / Flatpak packaging — Linux distribution beyond "build from source". AppImage is the lowest-friction for hobbyist Speeduino/RusEFI operators (no install, single executable) | Small | After slice 7 |
+
+**Why Linux matters for the Speeduino/RusEFI tilt:** a meaningful share of Speeduino operators run Linux daily — the firmware itself is developed on Linux, and Ardu-stim's Electron GUI already ships AppImage for Linux. RusEFI's installed base skews even more Linux-heavy (Hellen boards are typically programmed from Linux dev environments). Shipping Windows-only leaves Speeduino + RusEFI's natural user base half-served.
+
+**Trigger to start Phase 20:** willingness to set up Linux CI + the small porting effort. The window is small (POSIX serial + sockets are well-trodden ground) — gated on bandwidth, not blockers.
+
 ### Virtual Dyno Design Notes
 
 Calculates estimated torque and horsepower from ECU sensor data during
