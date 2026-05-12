@@ -1,0 +1,80 @@
+# Phase 20 slice 7: Linux build CI.
+#
+# Validates the POSIX paths added in slices 1–6:
+#   - SerialTransport (termios)
+#   - list_serial_ports (/dev scan)
+#   - TcpTransport (BSD sockets)
+#   - UDP discovery (BSD sockets)
+#
+# Runs the tuner_core_tests doctest binary as the correctness gate.
+# The Qt app build (TUNER_BUILD_APP=ON) is exercised as a link check
+# only — there's no display server in CI to launch it, and live-ECU
+# paths require real hardware.
+#
+# Triggered on push/PR to master and on any docs/code change that
+# could affect the POSIX surface.
+
+name: linux-build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  ubuntu-x86_64:
+    name: Ubuntu 22.04 x86_64
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            qt6-base-dev \
+            qt6-tools-dev \
+            libgl1-mesa-dev
+
+      - name: Vendor doctest single-header
+        run: |
+          mkdir -p cpp/third_party/doctest
+          curl -L -o cpp/third_party/doctest/doctest.h \
+            https://raw.githubusercontent.com/doctest/doctest/master/doctest/doctest.h
+
+      - name: Vendor nlohmann/json single-header
+        run: |
+          mkdir -p cpp/third_party/nlohmann
+          curl -L -o cpp/third_party/nlohmann/json.hpp \
+            https://github.com/nlohmann/json/releases/latest/download/json.hpp
+
+      - name: Configure tuner_core_tests
+        run: |
+          cmake -S cpp -B build/tests -G Ninja \
+            -DTUNER_CORE_BUILD_TESTS=ON \
+            -DTUNER_CORE_BUILD_BINDINGS=OFF \
+            -DTUNER_BUILD_APP=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build tuner_core_tests
+        run: cmake --build build/tests --parallel
+
+      - name: Run tuner_core_tests
+        run: build/tests/tuner_core_tests
+
+      - name: Configure tuner_app (link check only)
+        run: |
+          cmake -S cpp -B build/app -G Ninja \
+            -DTUNER_CORE_BUILD_TESTS=OFF \
+            -DTUNER_CORE_BUILD_BINDINGS=OFF \
+            -DTUNER_BUILD_APP=ON \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build tuner_app
+        run: cmake --build build/app --target tuner_app --parallel
