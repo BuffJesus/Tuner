@@ -36,7 +36,8 @@ public:
     }
 };
 
-// Serial transport via Win32 COM port API.
+// Serial transport. Win32 COM port API on Windows; POSIX termios on
+// Linux/macOS (Phase 20 slice 1).
 class SerialTransport : public Transport {
 public:
     SerialTransport(const std::string& port, int baud_rate);
@@ -57,7 +58,11 @@ public:
 private:
     std::string port_;
     int baud_rate_;
+#ifdef _WIN32
     void* handle_ = nullptr;  // HANDLE, opaque to avoid windows.h in header
+#else
+    int   fd_     = -1;       // POSIX file descriptor (-1 = closed)
+#endif
 };
 
 // TCP transport with optional Speeduino new-protocol framing.
