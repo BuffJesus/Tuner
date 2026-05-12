@@ -108,7 +108,22 @@ struct SimState {
     std::size_t   current_wheel   = 0;
 };
 
+// Process-global one-shot prefill set by the SETUP wizard (Slice F).
+// File-static so it can be reached from both the setter (called by
+// wizard) and the panel constructor (called when TRIGGERS tab builds).
+BenchSimulatorPrefill g_pending_prefill;
+
 }  // namespace
+
+void set_pending_prefill(const BenchSimulatorPrefill& prefill) {
+    g_pending_prefill = prefill;
+}
+
+BenchSimulatorPrefill take_pending_prefill() {
+    BenchSimulatorPrefill out = g_pending_prefill;
+    g_pending_prefill = {};
+    return out;
+}
 
 QWidget* build_triggers_simulate_panel() {
     auto state = std::make_shared<SimState>();
@@ -593,6 +608,34 @@ QWidget* build_triggers_simulate_panel() {
         }
     });
     poll->start(500);
+
+    // ----- Slice F prefill consumer ------------------------------------
+    // If the SETUP wizard stashed a "pre-select pattern N + compression
+    // type for K cylinders" hint via set_pending_prefill, apply it now.
+    // One-shot: take_pending_prefill clears the static.
+    {
+        auto pre = take_pending_prefill();
+        if (pre.wheel_index.has_value() && *pre.wheel_index < bs::kPatternCount) {
+            for (int i = 0; i < pattern_list->count(); ++i) {
+                auto* it = pattern_list->item(i);
+                if (it->data(Qt::UserRole).toULongLong() ==
+                    static_cast<qulonglong>(*pre.wheel_index)) {
+                    pattern_list->setCurrentRow(i);
+                    pattern_list->scrollToItem(it);
+                    break;
+                }
+            }
+        }
+        if (pre.compression_cyl.has_value()) {
+            if (auto ct = bs::compression_type_from_cylinders(*pre.compression_cyl)) {
+                int idx = comp_type_combo->findData(static_cast<int>(*ct));
+                if (idx >= 0) {
+                    comp_type_combo->setCurrentIndex(idx);
+                    comp_enable->setChecked(true);
+                }
+            }
+        }
+    }
 
     return card;
 }

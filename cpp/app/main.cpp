@@ -11217,6 +11217,87 @@ WizardResult open_engine_setup_wizard(QWidget* parent) {
     });
     make_hint(p4l, "Select a coil preset to auto-fill dwell values. "
               "36-1 missing tooth is the most common Speeduino trigger pattern.");
+
+    // Phase 17 Slice F — cross-link to TRIGGERS Simulate panel.
+    // "Pre-fill bench simulator" button stashes the wizard's trigger
+    // pattern + cylinder count into the panel's pending-prefill static;
+    // the next time the operator opens TRIGGERS, the Simulate panel
+    // pre-selects the matching wheel and compression-cycle type. No
+    // automatic tab switch (avoids cross-tab plumbing inside the modal
+    // dialog) — the hint label tells the operator where to look next.
+    {
+        auto* bench_row = new QHBoxLayout;
+        auto* bench_btn = new QPushButton(
+            QString::fromUtf8("Pre-fill bench simulator with this trigger config"));
+        bench_btn->setCursor(Qt::PointingHandCursor);
+        {
+            char bs[384];
+            std::snprintf(bs, sizeof(bs),
+                "QPushButton { background: %s; border: 1px solid %s; "
+                "border-radius: %dpx; padding: 6px 14px; "
+                "color: %s; font-size: %dpx; } "
+                "QPushButton:hover { background: %s; }",
+                tt::bg_elevated, tt::accent_primary,
+                tt::radius_sm, tt::text_primary, tt::font_small,
+                tt::fill_primary_mid);
+            bench_btn->setStyleSheet(QString::fromUtf8(bs));
+        }
+        auto* bench_hint = new QLabel(QString::fromUtf8(
+            "\xe2\x86\x92 then switch to TRIGGERS to bench-test on Ardu-stim"));
+        {
+            char hs[128];
+            std::snprintf(hs, sizeof(hs),
+                "QLabel { color: %s; font-size: %dpx; }",
+                tt::text_muted, tt::font_small);
+            bench_hint->setStyleSheet(QString::fromUtf8(hs));
+        }
+        bench_row->addWidget(bench_btn);
+        bench_row->addWidget(bench_hint);
+        bench_row->addStretch(1);
+        p4l->addLayout(bench_row);
+
+        // Heuristic teeth/missing → wheel-pattern-catalog index map.
+        // Captures the common Speeduino + RusEFI configs; unknown
+        // combinations fall back to 36-1 (a safe default).
+        // Encode the wheel-pattern indices as plain size_t constants to
+        // bypass any windows.h macro contamination on enum-class member
+        // access. The numbers track the WheelPatternIndex enum order in
+        // bench_simulator_wheel_pattern_catalog.hpp — keep aligned if
+        // upstream firmware reshuffles the catalog.
+        auto wheel_index_for = [](int teeth, int missing) -> std::size_t {
+            if (teeth == 36 && missing == 1) return 6;   // THIRTY_SIX_MINUS_ONE
+            if (teeth == 60 && missing == 2) return 3;   // SIXTY_MINUS_TWO
+            if (teeth == 24 && missing == 1) return 7;   // TWENTY_FOUR_MINUS_ONE
+            if (teeth == 8  && missing == 1) return 9;   // EIGHT_MINUS_ONE
+            if (teeth == 40 && missing == 1) return 12;  // FOURTY_MINUS_ONE
+            if (teeth == 4  && missing == 1) return 8;   // FOUR_MINUS_ONE_WITH_CAM
+            if (teeth == 6  && missing == 1) return 10;  // SIX_MINUS_ONE_WITH_CAM
+            if (teeth == 12 && missing == 1) return 11;  // TWELVE_MINUS_ONE_WITH_CAM
+            return 6;                                    // fallback: 36-1
+        };
+
+        // Capture by value: teeth_edit + missing_edit + cyl_edit
+        // are widget pointers; the lambda survives the wizard dialog
+        // until it's destroyed alongside the page.
+        QObject::connect(bench_btn, &QPushButton::clicked,
+                         [bench_btn, teeth_edit, missing_edit,
+                          cyl_edit, wheel_index_for]() {
+            int teeth = teeth_edit->text().toInt();
+            int missing = missing_edit->text().toInt();
+            int cyl = cyl_edit->text().toInt();
+            BenchSimulatorPrefill prefill;
+            prefill.wheel_index = wheel_index_for(teeth, missing);
+            if (cyl == 2 || cyl == 4 || cyl == 6 || cyl == 8) {
+                prefill.compression_cyl = static_cast<std::uint8_t>(cyl);
+            }
+            set_pending_prefill(prefill);
+            // Visual feedback — operator should see the chip change so
+            // they know the click registered.
+            bench_btn->setText(QString::fromUtf8(
+                "Prefilled \xe2\x9c\x93 \xe2\x80\x94 switch to TRIGGERS tab"));
+        });
+    }
+
     p4l->addStretch(1);
     pages->addWidget(p4);
 

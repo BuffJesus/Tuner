@@ -239,6 +239,23 @@ TEST_CASE("V10-specific decoder claims: FOURTY_MINUS_ONE on Speeduino, VIPER_96_
     CHECK(pattern_at(*viper).decoder_rusefi);  // RusEFI's library is broader
 }
 
+TEST_CASE("wizard-cross-link wheel indices stay pinned to firmware enum order") {
+    // Phase 17 Slice F: the SETUP wizard's `wheel_index_for` lambda
+    // returns plain size_t literals (windows.h macro contamination
+    // blocks enum-qualified access in main.cpp). These literals MUST
+    // match the WheelPatternIndex enum's integer values; if upstream
+    // firmware reshuffles wheel_defs.h::WheelType, this test flags the
+    // drift before the wizard ships silently wrong patterns.
+    CHECK(static_cast<std::size_t>(WheelPatternIndex::THIRTY_SIX_MINUS_ONE)         == 6);
+    CHECK(static_cast<std::size_t>(WheelPatternIndex::SIXTY_MINUS_TWO)              == 3);
+    CHECK(static_cast<std::size_t>(WheelPatternIndex::TWENTY_FOUR_MINUS_ONE)        == 7);
+    CHECK(static_cast<std::size_t>(WheelPatternIndex::EIGHT_MINUS_ONE)              == 9);
+    CHECK(static_cast<std::size_t>(WheelPatternIndex::FOURTY_MINUS_ONE)             == 12);
+    CHECK(static_cast<std::size_t>(WheelPatternIndex::FOUR_MINUS_ONE_WITH_CAM)      == 8);
+    CHECK(static_cast<std::size_t>(WheelPatternIndex::SIX_MINUS_ONE_WITH_CAM)       == 10);
+    CHECK(static_cast<std::size_t>(WheelPatternIndex::TWELVE_MINUS_ONE_WITH_CAM)    == 11);
+}
+
 TEST_CASE("catalog covers a reasonable engine cylinder count distribution") {
     int count_v4 = 0, count_v6 = 0, count_v8 = 0, count_v10 = 0, generic = 0;
     for (const auto& p : patterns()) {
