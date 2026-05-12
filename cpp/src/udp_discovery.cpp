@@ -11,6 +11,15 @@
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#else
+// POSIX (Linux + macOS) — Phase 20 slice 6.
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <thread>
 #endif
 
 namespace tuner_core::udp_discovery {
@@ -163,6 +172,67 @@ std::vector<DiscoveredDevice> discover(std::chrono::milliseconds timeout) {
     return out;
 }
 
-#endif  // _WIN32
+#else  // POSIX (Linux + macOS) — Phase 20 slice 6
+
+std::vector<DiscoveredDevice> discover(std::chrono::milliseconds timeout) {
+    std::vector<DiscoveredDevice> out;
+
+    int sock = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) return out;
+
+    int broadcast = 1;
+    ::setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = INADDR_ANY;
+    local.sin_port = 0;  // ephemeral
+    if (::bind(sock, reinterpret_cast<sockaddr*>(&local), sizeof(local)) != 0) {
+        ::close(sock);
+        return out;
+    }
+
+    sockaddr_in dest{};
+    dest.sin_family = AF_INET;
+    dest.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+    dest.sin_port = htons(kDiscoveryPort);
+
+    const char* probe = kDiscoveryProbe;
+    ::sendto(sock, probe, std::strlen(probe), 0,
+             reinterpret_cast<sockaddr*>(&dest), sizeof(dest));
+
+    // Non-blocking recv loop until deadline.
+    int flags = ::fcntl(sock, F_GETFL, 0);
+    if (flags >= 0) ::fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    char buf[2048];
+    while (std::chrono::steady_clock::now() < deadline) {
+        sockaddr_in from{};
+        socklen_t from_len = sizeof(from);
+        ssize_t n = ::recvfrom(sock, buf, sizeof(buf) - 1, 0,
+                               reinterpret_cast<sockaddr*>(&from), &from_len);
+        if (n > 0) {
+            buf[n] = '\0';
+            auto dev_opt = parse_announcement(
+                std::string_view(buf, static_cast<std::size_t>(n)));
+            if (dev_opt) {
+                char ip_str[INET_ADDRSTRLEN]{};
+                ::inet_ntop(AF_INET, &from.sin_addr, ip_str, sizeof(ip_str));
+                dev_opt->source_ip = ip_str;
+                merge_device(out, std::move(*dev_opt));
+            }
+        } else if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno != EAGAIN && errno != EWOULDBLOCK) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+
+    ::close(sock);
+    return out;
+}
+
+#endif  // _WIN32 / POSIX
 
 }  // namespace tuner_core::udp_discovery
